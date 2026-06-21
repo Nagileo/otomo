@@ -24,21 +24,26 @@ class SubjectBrief(BaseModel):
     name: str = ""
     name_cn: str = ""
     type: int | None = None
+    type_name: str | None = None
     date: str | None = None
     score: float | None = None
     rank: int | None = None
+    role: str | None = None  # 在该作品里的职责/角色（来自关系边 staff，如 主演/配音 角色名）
 
     @classmethod
     def from_raw(cls, raw: dict) -> "SubjectBrief":
         rating = raw.get("rating") or {}
+        t = raw.get("type")
         return cls(
             id=raw.get("id"),
             name=raw.get("name", "") or "",
             name_cn=raw.get("name_cn", "") or "",
-            type=raw.get("type"),
+            type=t,
+            type_name=SUBJECT_TYPE_NAME.get(t) if t else None,
             date=raw.get("date"),
             score=rating.get("score") if isinstance(rating, dict) else None,
             rank=rating.get("rank") if isinstance(rating, dict) else None,
+            role=raw.get("staff"),
         )
 
 

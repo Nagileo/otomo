@@ -46,6 +46,28 @@ def _summarize(result: ToolResult) -> str:
     return d.get("name_cn") or d.get("name") or "ok"
 
 
+# DeepSeek 等模型偶尔把工具调用写成 DSML 文本塞进 content，而非结构化 tool_calls 字段
+_LEAK_MARKERS = ("｜DSML｜", "DSML", "tool_calls", "invoke name", "<｜")
+_CORRECT_FC = (
+    "请使用函数调用（tool calls）来调用工具，不要在回复正文里输出 invoke / DSML / tool_calls 等标记。"
+    "若信息已足够，请直接给出最终自然语言答案。"
+)
+
+
+def _has_leak(text: str | None) -> bool:
+    return bool(text) and any(m in text for m in _LEAK_MARKERS)
+
+
+def _strip_leak(text: str) -> str:
+    """截断到第一个工具标记之前。"""
+    idx = len(text)
+    for m in _LEAK_MARKERS:
+        j = text.find(m)
+        if j != -1:
+            idx = min(idx, j)
+    return text[:idx].strip()
+
+
 class ReActRunner(AgentRunner):
     def __init__(
         self,
@@ -71,6 +93,7 @@ class ReActRunner(AgentRunner):
         sources: list[Citation] = []
         seen_urls: set[str] = set()
         steps = 0
+        corrections = 0
 
         try:
             # ---- 阶段 1：工具循环 ---- #
@@ -83,6 +106,12 @@ class ReActRunner(AgentRunner):
                 )
                 msg = resp.choices[0].message
                 if not msg.tool_calls:
+                    # 模型把工具调用写成了 DSML 文本 → 纠正后重试本轮，别误当成最终答案
+                    if _has_leak(msg.content) and corrections < 2:
+                        corrections += 1
+                        state.messages.append({"role": "assistant", "content": msg.content or ""})
+                        state.messages.append({"role": "system", "content": _CORRECT_FC})
+                        continue
                     break
 
                 state.messages.append(
@@ -129,18 +158,27 @@ class ReActRunner(AgentRunner):
             # ---- 阶段 2：流式生成最终答案（无工具，不外露 CoT）---- #
             compose_messages = state.messages + [{"role": "system", "content": COMPOSE_PROMPT}]
             answer_parts: list[str] = []
+            # 带 tools 但 tool_choice="none"：显式禁止再调工具，避免模型把工具标记当文本吐出
             stream = await self.llm.chat.completions.create(
-                model=self.model, messages=compose_messages, stream=True
+                model=self.model,
+                messages=compose_messages,
+                tools=tools,
+                tool_choice="none",
+                stream=True,
             )
+            acc = ""
             async for chunk in stream:
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta
                 if delta and delta.content:
+                    acc += delta.content
+                    if _has_leak(acc):  # 一旦冒出工具标记就停止吐，避免脏内容流到前端
+                        break
                     answer_parts.append(delta.content)
                     yield AnswerDeltaEvent(text=delta.content)
 
-            answer = "".join(answer_parts)
+            answer = _strip_leak("".join(answer_parts) or acc)
             state.messages.append({"role": "assistant", "content": answer})
             state.status = "done"
             yield FinalEvent(answer=answer, sources=sources, steps=steps)

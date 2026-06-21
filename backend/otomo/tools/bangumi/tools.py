@@ -56,6 +56,14 @@ class PersonIdArgs(BaseModel):
     person_id: int = Field(..., description="Bangumi 人物（声优/staff）ID")
 
 
+class PersonSubjectsArgs(BaseModel):
+    person_id: int = Field(..., description="Bangumi 人物（声优/staff）ID")
+    type: Literal["anime", "book", "music", "game", "real"] | None = Field(
+        None, description="限定作品类型；问『配过哪些动画』时传 anime（会过滤掉音乐专辑等）"
+    )
+    limit: int = Field(30, ge=1, le=100, description="最多返回多少部")
+
+
 # --------------------------------------------------------------------------- #
 # 工具实现
 # --------------------------------------------------------------------------- #
@@ -178,16 +186,25 @@ class SearchPersonsTool(Tool):
 
 class GetPersonSubjectsTool(Tool):
     name = "get_person_subjects"
-    description = "取某人物（声优/staff）参与的作品列表。声优→作品 的一跳（用于『TA 还配过哪些番』）。"
-    args_model = PersonIdArgs
+    description = (
+        "取某人物（声优/staff）参与的作品列表，可按类型过滤（anime/book/...），"
+        "每条带其在该作品的职责/角色。声优→作品 的一跳（用于『TA 还配过哪些番』）。"
+    )
+    args_model = PersonSubjectsArgs
     result_model = SubjectListResult
 
     def __init__(self, client: BangumiClient) -> None:
         self.client = client
 
-    async def run(self, args: PersonIdArgs) -> ToolResult[SubjectListResult]:
+    async def run(self, args: PersonSubjectsArgs) -> ToolResult[SubjectListResult]:
         raw = await self.client.get_person_subjects(args.person_id)
-        items = [SubjectBrief.from_raw(s) for s in (raw or []) if s.get("id")]
+        want = SUBJECT_TYPE.get(args.type) if args.type else None
+        items = [
+            SubjectBrief.from_raw(s)
+            for s in (raw or [])
+            if s.get("id") and (want is None or s.get("type") == want)
+        ]
+        items = items[: args.limit]
         return ToolResult(
             ok=True,
             data=SubjectListResult(query=f"person:{args.person_id}", count=len(items), subjects=items),

@@ -1,0 +1,66 @@
+# Otomo 可验证 golden cases（A2 种子集；目标 30 条，先 10 条跑通 harness）
+# 校验规则见 backend/otomo/eval/verifier.py：
+#   expect_contains 全部出现 / expect_any 至少一个 / expect_absent 都不得出现 / expect_tools 至少调用过
+# 选用 CN/JP 同形汉字的稳定事实；名字两种写法用 expect_any 兜住。
+
+- id: bocchi_year
+  question: 动画《孤独摇滚！》是哪一年开始播出的？
+  kind: single_hop
+  expect_contains: ["2022"]
+  expect_tools: ["search_subjects"]
+
+- id: bocchi_hitori_cv
+  question: 动画《孤独摇滚！》里 後藤一里 的声优是谁？
+  kind: two_hop
+  expect_contains: ["青山吉能"]
+  expect_tools: ["get_character_persons"]
+
+- id: aoyama_other_anime
+  question: 声优 青山吉能 除了《孤独摇滚！》还配过哪些动画？列两部。
+  kind: two_hop
+  expect_absent: ["无法查到", "查不到", "没有相关"]
+  expect_tools: ["get_person_subjects"]
+  note: 验证声优→作品一跳能取到非空结果
+
+- id: clannad_nagisa_cv
+  question: 《CLANNAD》中 古河渚 的声优是谁？
+  kind: two_hop
+  expect_contains: ["中原麻衣"]
+  expect_tools: ["get_character_persons"]
+
+- id: haruhi_cv
+  question: 《凉宫春日的忧郁》中 凉宫春日 的声优是谁？
+  kind: two_hop
+  expect_any: ["平野綾", "平野绫"]
+  expect_tools: ["get_character_persons"]
+
+- id: yuru_nadeshiko_cv
+  question: 《摇曳露营△》里 各务原抚子 的声优是谁？
+  kind: two_hop
+  expect_any: ["花守由美里", "花守ゆみり", "花守"]
+  expect_tools: ["get_character_persons"]
+
+- id: steins_kurisu_cv
+  question: 《命运石之门》里 牧濑红莉栖 的声优是谁？
+  kind: two_hop
+  expect_contains: ["今井麻美"]
+  expect_tools: ["get_character_persons"]
+
+- id: refuse_bd_sales
+  question: 《孤独摇滚！》的 BD（蓝光）销量是多少张？
+  kind: refusal
+  expect_any: ["无法", "查不到", "没有", "不在", "抱歉", "无法提供", "暂"]
+  expect_absent: ["销量约", "销量为", "万张"]
+  note: BD 销量不在 Bangumi 数据范围 → 应校准化拒答，不得编造
+
+- id: refuse_news
+  question: 《孤独摇滚！》第二季有什么尚未公开的独家爆料和最新内幕消息？
+  kind: refusal
+  expect_any: ["无法", "查不到", "没有", "暂", "不", "抱歉"]
+  note: 资讯/未公开消息不在数据范围 → 应拒答
+
+- id: kon_yui_cv
+  question: 《K-ON！轻音少女》里 平泽唯 的声优是谁？
+  kind: two_hop
+  expect_any: ["丰崎爱生", "豊崎愛生", "丰崎", "豊崎"]
+  expect_tools: ["get_character_persons"]
