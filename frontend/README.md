@@ -6,9 +6,10 @@
 ## 跑起来
 
 ```bash
+conda activate otomo   # node/npm 装在这个 conda 环境里（见根 README）
 cd frontend
 npm install
-npm run dev          # http://localhost:3000
+npm run dev            # http://localhost:3000
 ```
 
 需先起后端（默认 `http://localhost:8000`，可用 `NEXT_PUBLIC_BACKEND` 覆盖）。

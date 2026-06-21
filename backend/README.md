@@ -22,9 +22,11 @@ otomo/
 ## 跑起来
 
 ```bash
-cd backend
-python -m venv .venv && source .venv/Scripts/activate   # Windows Git Bash
-pip install -e ".[dev]"
+# 用专用 conda 环境 otomo（隔离；后续 torch/vLLM 等 ML 依赖也装这里）
+conda create -n otomo python=3.12 -y
+conda activate otomo
+conda install -c conda-forge nodejs -y     # 前端 npm 也装进同一环境，一处激活通吃前后端
+cd backend && pip install -e ".[dev]"
 cp .env.example .env        # 填 LLM_API_KEY；BANGUMI_USER_AGENT 改成你的；BANGUMI_TOKEN 只读可空
 ```
 

@@ -44,12 +44,16 @@ docs/       方案文档（地基）
 ## 快速开始（A1）
 
 ```bash
+# 一次性：建专用 conda 环境（python + node 都在里面）
+conda create -n otomo python=3.12 -y && conda activate otomo
+conda install -c conda-forge nodejs -y
+
 # 后端
 cd backend && pip install -e ".[dev]" && cp .env.example .env   # 填 LLM_API_KEY、改 BANGUMI_USER_AGENT
-python -m otomo.cli "白色相簿2 里 冬马和纱 的声优还配过哪些番？"      # 命令行直接验证
+python -m otomo.cli "孤独摇滚 里 後藤一里 的声优还配过哪些番？"        # 命令行直接验证
 uvicorn otomo.api.app:app --reload --port 8000                  # 起 HTTP（给前端）
 
-# 前端
+# 前端（同一个 otomo 环境）
 cd frontend && npm install && npm run dev                       # http://localhost:3000
 ```
 
