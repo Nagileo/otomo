@@ -33,9 +33,32 @@
 | [07-roadmap](docs/07-roadmap.md) | 版本里程碑（双轨 + eval 前置） |
 | [08-llm-and-config](docs/08-llm-and-config.md) | LLM 两层选型与密钥/配置规范 |
 
+## 代码结构
+
+```
+backend/    Python + FastAPI Agent 后端（手搓 ReAct + 自建 Bangumi 工具 + SSE）
+frontend/   最简 Next.js chat（消费 SSE，含 trace 面板）
+docs/       方案文档（地基）
+```
+
+## 快速开始（A1）
+
+```bash
+# 后端
+cd backend && pip install -e ".[dev]" && cp .env.example .env   # 填 LLM_API_KEY、改 BANGUMI_USER_AGENT
+python -m otomo.cli "白色相簿2 里 冬马和纱 的声优还配过哪些番？"      # 命令行直接验证
+uvicorn otomo.api.app:app --reload --port 8000                  # 起 HTTP（给前端）
+
+# 前端
+cd frontend && npm install && npm run dev                       # http://localhost:3000
+```
+
+详见 [backend/README](backend/README.md) 与 [frontend/README](frontend/README.md)。
+
 ## 状态
 
-🚧 文档阶段（docs-first）。代码尚未开始，先按文档定义边界与契约。
+🚧 **Track A1 骨架已落地**（手搓 ReAct + 7 个 Bangumi 图谱工具 + SSE + 最简前端）。
+下一步按 [07-roadmap](docs/07-roadmap.md)：A2（Plan-Execute + typed Verifier + 30 golden cases）。
 
 ## 许可证
 

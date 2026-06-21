@@ -45,7 +45,8 @@
 - [x] 立项、调研、方案确定
 - [x] 独立仓库 + git + docs 地基
 - [x] 方案迭代：自建工具/MCP、eval 前置双轨、LLM 两层选型、typed result、CoT 边界
-- [ ] A1 骨架 ← **下一步**
+- [x] **A1 骨架**：手搓 ReAct runner（两阶段，CoT 不外露）+ 自建 Bangumi client/7 工具（typed）+ FastAPI SSE + CLI + 最简 Next.js chat（trace 面板）
+- [ ] A2：Plan-Execute + typed Verifier + 30 条 golden cases ← **下一步**
 
 ## 下一步（A1 启动清单）
 1. `backend/` 脚手架（pyproject、FastAPI 空壳、`agent/` `tools/` 目录）。
