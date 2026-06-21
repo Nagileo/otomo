@@ -4,17 +4,20 @@
 
 ## 1. 三个核心契约（用 Pydantic 定义）
 
+> 工具 / Skills / MCP server 全部**自建**（参考但不接入 Bangumi-MCP/bgm-cli，见 [02 §1.5](02-data-sources.md)）。
+
 ### Tool
 ```
 Tool:
   name: str                      # 唯一名
   description: str               # 给 LLM 的说明
-  args_schema: pydantic.BaseModel# typed 入参（function-calling schema 来源）
-  run(args) -> ToolResult        # 同步/异步执行
+  args_schema: pydantic.BaseModel  # typed 入参（function-calling schema 来源）
+  result_schema: pydantic.BaseModel# typed 出参（每个工具自定义，禁止裸 Any）
+  run(args) -> ToolResult[T]       # 同步/异步执行
   # 元信息：是否写操作(需人工确认)、是否触外网(限流)、超时
-ToolResult:
+ToolResult[T]:                   # T = 该工具的 typed result schema（Pydantic），不用裸 Any
   ok: bool
-  data: Any                      # 结构化结果
+  data: T                        # 工具专属 typed 结构 —— verifier / trace replay / 评测都依赖它稳定
   source: list[Citation]         # 来源（萌娘/维基必填，用于回答挂链接）
   error: str | None
 ```
@@ -24,7 +27,7 @@ ToolResult:
 AgentState:
   messages: list[Message]        # 对话历史
   plan: list[Step] | None        # Plan-Execute 的计划
-  scratchpad: str                # ReAct 的思考缓冲
+  scratchpad: str                # ReAct 内部思考缓冲（ephemeral·不外露·不持久化，见 §2.5）
   short_term: dict               # 短期记忆（会话状态、视觉/检索证据、中间结果）
   memory_refs: list[str]         # 长期记忆检索引用
   trace: list[TraceEvent]        # plan/tool_call/observation/verifier 事件
@@ -52,6 +55,13 @@ AgentRunner:
 - **检索 Verifier**：召回是否命中正确实体/边（对 Bangumi 真值校验）。
 - **答案 Verifier**：最终事实是否落在图谱真值上（exact-match / precision-recall）；设定类用 LLM-as-judge + 来源核对。
 - 失败 → 触发重规划 / 降级 / 终止。这是后期 RL 过程奖励的来源。
+
+## 2.5 CoT 与可观测边界（重要）
+
+- **模型内部保留 CoT**：策略模型该有的链式思考能力**不剥夺**——ReAct 的 Thought、reasoning 模型的推理照常用于提升决策质量。
+- **但裸 CoT 不外露、不持久化**：用户面与 trace 面板只展示**结构化执行事件**——plan 摘要 / tool call(name+args) / observation / verifier 结果 / final rationale。原始思考是 ephemeral 的内部状态，用完即弃。
+- **三个理由**：① 多家模型条款不鼓励透出原始推理；② 裸 CoT 噪声大、不稳定，会拖垮 trace replay 与评测；③ 结构化轨迹对开源更专业、可 typed、可回放。
+- **与流式输出的关系**：照常流式，流的是**最终答案 token + 上述结构化事件**，不是思考全文。
 
 ## 3. 手搓 → LangGraph 对比计划（工程叙事的主线）
 

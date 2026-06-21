@@ -45,7 +45,8 @@
 见 [03-agent-contract](03-agent-contract.md)。先手搓 ReAct + Plan-Execute + 两级 Verifier，钉死 `Tool/AgentState/AgentRunner` 接口；后用 LangGraph 重写同一 agent 做对比。
 
 ### 工具层
-- **Bangumi Tool**（fork Bangumi-MCP，MIT）：search/subject/character/person/collection/episode/calendar。
+> **全部自己手搓**：client + 工具封装 + MCP server + Skill cards 都自建，只参考 Bangumi-MCP/bgm-cli 的 API 用法、不接其代码——这本身是「工」层叙事的一部分。
+- **Bangumi Tool**（自建：手写 thin async httpx client + 强制 UA + 工具封装）：search/subject/character/person/collection/episode/calendar。
 - **Moegirl Tool**：`opensearch`(标题解析) + `extracts`(取正文) + `info/categories`；按需取+缓存+署名。
 - **Wiki Tool**：中文维基全文搜索兜底。
 - **Recommender Tool**：`recommend(user_profile, filters) → ranked list`（漏斗封装为单一工具，agent 决定何时调、如何从对话设 filter）。
@@ -92,4 +93,4 @@ otomo/
 2. Plan：`search_characters("冬马和纱")` → `characters/{id}/persons`(取 CV) → `persons/{cv}/subjects` → 按 `air_date≥2013 & rating≥8 & tag~恋爱` 过滤/排序。
 3. （可选）对 top 结果 `moegirl.extracts` 补剧情，挂来源链接。
 4. Verifier：检索层校验召回、答案层校验事实是否落在 Bangumi 真值边上；失败触发重规划。
-5. SSE 流式吐 reasoning + 结构化结果 + 卡片；轨迹写 trace。
+5. SSE 流式吐**最终答案 token + 结构化执行事件**（plan 摘要 / tool call / observation / verifier）+ 卡片；**裸 CoT 不外露、不持久化**（见 [03 §2.5](03-agent-contract.md)）；轨迹写 trace。

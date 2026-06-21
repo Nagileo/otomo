@@ -30,7 +30,8 @@
 | [04-capabilities](docs/04-capabilities.md) | 能力路线图 T1/T2/T3 |
 | [05-evaluation](docs/05-evaluation.md) | 可验证多跳 benchmark、推荐指标、Agent 评测 |
 | [06-recsys](docs/06-recsys.md) | 推荐漏斗设计与学习路线 |
-| [07-roadmap](docs/07-roadmap.md) | 版本里程碑 v0.x / v1.x / v2.x |
+| [07-roadmap](docs/07-roadmap.md) | 版本里程碑（双轨 + eval 前置） |
+| [08-llm-and-config](docs/08-llm-and-config.md) | LLM 两层选型与密钥/配置规范 |
 
 ## 状态
 
