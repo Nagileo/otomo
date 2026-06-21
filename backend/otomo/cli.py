@@ -14,6 +14,8 @@ from .agent.contracts import (
     ErrorEvent,
     FinalEvent,
     ObservationEvent,
+    PlanEvent,
+    ReflectEvent,
     ToolCallEvent,
 )
 from .factory import build_runner
@@ -29,13 +31,18 @@ for _stream in (sys.stdout, sys.stderr):
 DIM, BOLD, CYAN, GREEN, RED, RESET = "\033[2m", "\033[1m", "\033[36m", "\033[32m", "\033[31m", "\033[0m"
 
 
-async def run(question: str) -> None:
+async def run(question: str, kind: str = "react") -> None:
     client = BangumiClient()
-    runner = build_runner(client)
+    runner = build_runner(client, kind)
     answering = False
     try:
         async for ev in runner.stream(question):
-            if isinstance(ev, ToolCallEvent):
+            if isinstance(ev, PlanEvent):
+                print(f"{BOLD}计划：{RESET}\n{DIM}{ev.summary}{RESET}")
+            elif isinstance(ev, ReflectEvent):
+                tag = "完整" if ev.complete else f"不完整 — {ev.note}"
+                print(f"{DIM}↺ 反思：{tag}{RESET}")
+            elif isinstance(ev, ToolCallEvent):
                 print(f"{CYAN}→ 调用 {ev.name}{RESET} {DIM}{ev.args}{RESET}")
             elif isinstance(ev, ObservationEvent):
                 mark = GREEN + "✓" if ev.ok else RED + "✗"
@@ -56,10 +63,15 @@ async def run(question: str) -> None:
 
 
 def main() -> None:
-    if len(sys.argv) < 2:
-        print('用法：python -m otomo.cli "你的问题"')
+    args = sys.argv[1:]
+    kind = "react"
+    if args and args[0] in ("--plan", "--react"):
+        kind = "plan" if args[0] == "--plan" else "react"
+        args = args[1:]
+    if not args:
+        print('用法：python -m otomo.cli [--plan|--react] "你的问题"')
         raise SystemExit(1)
-    asyncio.run(run(" ".join(sys.argv[1:])))
+    asyncio.run(run(" ".join(args), kind))
 
 
 if __name__ == "__main__":

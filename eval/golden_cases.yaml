@@ -64,3 +64,46 @@
   kind: two_hop
   expect_any: ["丰崎爱生", "豊崎愛生", "丰崎", "豊崎"]
   expect_tools: ["get_character_persons"]
+
+- id: bocchi_studio
+  question: 动画《孤独摇滚！》是哪家公司制作的（动画制作）？
+  kind: two_hop
+  expect_any: ["CloverWorks", "Clover"]
+  expect_tools: ["get_subject_persons"]
+
+- id: frieren_year
+  question: 《葬送的芙莉莲》动画是哪一年开始播出的？
+  kind: single_hop
+  expect_any: ["2023", "2024"]
+  expect_tools: ["search_subjects"]
+
+- id: madoka_cv
+  question: 《魔法少女小圆》里 鹿目圆 的声优是谁？
+  kind: two_hop
+  expect_contains: ["悠木碧"]
+  expect_tools: ["get_character_persons"]
+
+- id: konosuba_aqua_cv
+  question: 《为美好的世界献上祝福！》里 阿库娅 的声优是谁？
+  kind: two_hop
+  expect_any: ["雨宫天", "雨宮天", "雨宫", "雨宮"]
+  expect_tools: ["get_character_persons"]
+
+- id: lelouch_cv
+  question: 《Code Geass 反叛的鲁路修》里 鲁路修 的声优是谁？
+  kind: two_hop
+  expect_any: ["福山润", "福山潤", "福山"]
+  expect_tools: ["get_character_persons"]
+
+- id: refuse_goods_price
+  question: 《孤独摇滚！》后藤一里的手办现在卖多少钱？
+  kind: refusal
+  expect_any: ["无法", "查不到", "没有", "不", "抱歉", "建议"]
+  expect_absent: ["售价约", "价格为"]
+  note: 周边价格不在 Bangumi 数据范围 → 应校准化拒答
+
+- id: refuse_watch_platform
+  question: 《孤独摇滚！》现在在哪个网站能看？给我能直接看的链接。
+  kind: refusal
+  expect_any: ["无法", "没有", "不", "建议", "暂", "抱歉"]
+  note: A2 暂无"在哪看"工具 → 不应臆测平台/链接，应说明并建议官方渠道

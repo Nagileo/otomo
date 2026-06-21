@@ -114,6 +114,12 @@ class ObservationEvent(BaseModel):
     sources: list[Citation] = Field(default_factory=list)
 
 
+class ReflectEvent(BaseModel):
+    type: Literal["reflect"] = "reflect"
+    complete: bool
+    note: str = ""
+
+
 class AnswerDeltaEvent(BaseModel):
     type: Literal["answer_delta"] = "answer_delta"
     text: str
@@ -135,6 +141,7 @@ AgentEvent = (
     PlanEvent
     | ToolCallEvent
     | ObservationEvent
+    | ReflectEvent
     | AnswerDeltaEvent
     | FinalEvent
     | ErrorEvent

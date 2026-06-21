@@ -54,7 +54,8 @@ async def main_async(args: argparse.Namespace) -> int:
         cases = cases[: args.limit]
 
     client = BangumiClient()
-    runner = build_runner(client)
+    runner = build_runner(client, args.runner)
+    print(f"{DIM}runner={args.runner}{RESET}\n")
     results: list[CaseResult] = []
     try:
         for case in cases:
@@ -88,6 +89,7 @@ def main() -> None:
     ap.add_argument("--path", default=str(DEFAULT_CASES))
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--id", default="")
+    ap.add_argument("--runner", choices=["react", "plan"], default="react")
     args = ap.parse_args()
     raise SystemExit(asyncio.run(main_async(args)))
 

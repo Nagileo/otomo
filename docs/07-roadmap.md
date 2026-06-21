@@ -46,8 +46,8 @@
 - [x] 独立仓库 + git + docs 地基
 - [x] 方案迭代：自建工具/MCP、eval 前置双轨、LLM 两层选型、typed result、CoT 边界
 - [x] **A1 骨架**：手搓 ReAct runner（两阶段，CoT 不外露）+ 自建 Bangumi client/7 工具（typed）+ FastAPI SSE + CLI + 最简 Next.js chat（trace 面板）
-- [x] **A2（进行中）**：评测前置——typed Verifier（answer/retrieval/拒答 + 工具标记泄漏检查）+ 10 条种子 golden cases + eval runner（打分卡）；修工具粒度（type 过滤/role 透传）、修 DeepSeek DSML 工具标记泄漏。**基线 10/10**（7 two-hop / 1 single-hop / 2 refusal）。
-- [ ] A2 续：Plan-Execute runner（治 ReAct 钻牛角尖）+ golden cases 扩到 30 + 短期记忆 ← **下一步**
+- [x] **A2**：评测前置——typed Verifier（answer/retrieval/拒答 + 工具标记泄漏）+ **17 条 golden cases** + eval runner（`--runner react|plan`）；**Plan-Execute runner**（plan→execute→reflect→补救→compose，与 ReAct 共享 `_common`、同 AgentRunner 接口可 A/B）；**短期会话记忆**（API `session_id`）+ **滑动窗口**（`trim_messages`）；新增 subject→staff 工具（8 个工具）；修 DeepSeek DSML 泄漏与过度交叉验证。**ReAct 基线 17/17**（2 single / 11 two-hop / 4 refusal）。
+- [ ] A3：自动 benchmark 生成 + case replay + 指标报告（cases 扩到 30+；ReAct↔Plan 系统对比）← **下一步**
 
 ## 下一步（A1 启动清单）
 1. `backend/` 脚手架（pyproject、FastAPI 空壳、`agent/` `tools/` 目录）。

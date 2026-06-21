@@ -124,6 +124,28 @@ class GetSubjectCharactersTool(Tool):
         return ToolResult(ok=True, data=CharacterListResult(count=len(chars), characters=chars))
 
 
+class GetSubjectPersonsTool(Tool):
+    name = "get_subject_persons"
+    description = "取作品的 staff（导演/脚本/原作/动画制作公司等），每条带职责。用于『导演是谁/哪家公司制作』。"
+    args_model = SubjectIdArgs
+    result_model = PersonListResult
+
+    def __init__(self, client: BangumiClient) -> None:
+        self.client = client
+
+    async def run(self, args: SubjectIdArgs) -> ToolResult[PersonListResult]:
+        raw = await self.client.get_subject_persons(args.subject_id)
+        persons = [
+            PersonBrief(
+                id=p.get("id"), name=p.get("name", "") or "", type=p.get("type"),
+                relation=p.get("relation"),
+            )
+            for p in (raw or [])
+            if p.get("id")
+        ]
+        return ToolResult(ok=True, data=PersonListResult(count=len(persons), persons=persons))
+
+
 class SearchCharactersTool(Tool):
     name = "search_characters"
     description = "按名字搜索角色，返回候选角色及 ID。用于把角色名解析成 ID。"
@@ -217,6 +239,7 @@ def build_bangumi_tools(client: BangumiClient) -> list[Tool]:
         SearchSubjectsTool(client),
         GetSubjectTool(client),
         GetSubjectCharactersTool(client),
+        GetSubjectPersonsTool(client),
         SearchCharactersTool(client),
         GetCharacterPersonsTool(client),
         SearchPersonsTool(client),

@@ -135,6 +135,10 @@ class BangumiClient:
     async def get_subject_characters(self, subject_id: int) -> Any:
         return await self._get(f"/v0/subjects/{subject_id}/characters")
 
+    async def get_subject_persons(self, subject_id: int) -> Any:
+        """该作品的 staff（导演/脚本/原作/动画制作公司等），每条带 relation=职责。"""
+        return await self._get(f"/v0/subjects/{subject_id}/persons")
+
     async def search_characters(self, keyword: str, limit: int = 10) -> Any:
         return await self._post(
             "/v0/search/characters", {"keyword": keyword}, params={"limit": min(limit, 50)}
