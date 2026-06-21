@@ -49,6 +49,8 @@
 - **Bangumi Tool**（自建：手写 thin async httpx client + 强制 UA + 工具封装）：search/subject/character/person/collection/episode/calendar。
 - **Moegirl Tool**：`opensearch`(标题解析) + `extracts`(取正文) + `info/categories`；按需取+缓存+署名。
 - **Wiki Tool**：中文维基全文搜索兜底。
+- **Comments Tool**（口碑：短评/长评/吐槽，按需取+缓存+来源）：补足质性评价，供"口碑分析"。
+- **WhereToWatch Tool**：构造 mikan/Bilibili/资源站的搜索·订阅·深链外链（**仅 link-out，不抓取/不托管**）。
 - **Recommender Tool**：`recommend(user_profile, filters) → ranked list`（漏斗封装为单一工具，agent 决定何时调、如何从对话设 filter）。
 - **Eval Tool**：case replay + 指标计算。
 
