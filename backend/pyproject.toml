@@ -33,7 +33,6 @@ build-backend = "hatchling.build"
 packages = ["otomo"]
 
 [tool.pytest.ini_options]
-asyncio_mode = "auto"
 testpaths = ["tests"]
 
 [tool.ruff]

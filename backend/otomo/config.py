@@ -16,9 +16,9 @@ class Settings(BaseSettings):
     bangumi_token: str | None = None
 
     # ---- LLM（OpenAI 兼容，默认 DeepSeek）----
-    llm_base_url: str = "https://api.deepseek.com/v1"
+    llm_base_url: str = "https://api.deepseek.com"
     llm_api_key: str = ""
-    llm_model: str = "deepseek-chat"
+    llm_model: str = "deepseek-v4-flash"
 
     # ---- Agent / HTTP ----
     agent_max_iters: int = 8

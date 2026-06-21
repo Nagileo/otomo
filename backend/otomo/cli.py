@@ -19,6 +19,13 @@ from .agent.contracts import (
 from .factory import build_runner
 from .tools.bangumi.client import BangumiClient
 
+# Windows 控制台默认 GBK，强制 UTF-8 以正确输出中文与符号
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
+    except Exception:
+        pass
+
 DIM, BOLD, CYAN, GREEN, RED, RESET = "\033[2m", "\033[1m", "\033[36m", "\033[32m", "\033[31m", "\033[0m"
 
 

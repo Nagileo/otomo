@@ -1,7 +1,11 @@
-"""无网络 smoke 测试：契约、注册表分发、工具 schema 生成。"""
+"""无网络 smoke 测试：契约、注册表分发、工具 schema 生成。
+
+用 asyncio.run 自包含，不依赖 pytest-asyncio 插件，保证跨环境可跑。
+"""
 from __future__ import annotations
 
-import pytest
+import asyncio
+
 from pydantic import BaseModel, Field
 
 from otomo.agent.contracts import Tool, ToolResult
@@ -35,26 +39,23 @@ def test_openai_schema_shape():
     assert "text" in schema["function"]["parameters"]["properties"]
 
 
-@pytest.mark.asyncio
-async def test_registry_dispatch_ok():
+def test_registry_dispatch_ok():
     reg = ToolRegistry()
     reg.register(EchoTool())
-    result = await reg.dispatch("echo", '{"text": "hi"}')
+    result = asyncio.run(reg.dispatch("echo", '{"text": "hi"}'))
     assert result.ok and result.data.echoed == "hi"
 
 
-@pytest.mark.asyncio
-async def test_registry_bad_args():
+def test_registry_bad_args():
     reg = ToolRegistry()
     reg.register(EchoTool())
-    result = await reg.dispatch("echo", "{}")  # 缺 text
+    result = asyncio.run(reg.dispatch("echo", "{}"))  # 缺 text
     assert not result.ok and "validation" in (result.error or "")
 
 
-@pytest.mark.asyncio
-async def test_registry_unknown_tool():
+def test_registry_unknown_tool():
     reg = ToolRegistry()
-    result = await reg.dispatch("nope", "{}")
+    result = asyncio.run(reg.dispatch("nope", "{}"))
     assert not result.ok and "unknown" in (result.error or "")
 
 

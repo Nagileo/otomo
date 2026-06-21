@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
@@ -15,6 +16,7 @@ import httpx
 from ...config import settings
 
 SUBJECT_TYPE = {"book": 1, "anime": 2, "music": 3, "game": 4, "real": 6}
+_RETRY_STATUS = {500, 502, 503, 504}  # Bangumi 网关偶发 5xx，需重试
 
 
 class _TTLCache:
@@ -70,13 +72,39 @@ class BangumiClient:
         await self.aclose()
 
     # ---- 底层 ---- #
+    async def _request_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json_body: dict[str, Any] | None = None,
+        retries: int = 3,
+    ) -> Any:
+        """带 5xx / 网络错误重试（指数退避）。4xx 直接抛。"""
+        last_exc: Exception | None = None
+        for attempt in range(retries):
+            try:
+                r = await self._client.request(method, path, params=params, json=json_body)
+                if r.status_code in _RETRY_STATUS:
+                    last_exc = httpx.HTTPStatusError(
+                        f"{r.status_code} from {path}", request=r.request, response=r
+                    )
+                    await asyncio.sleep(0.5 * (attempt + 1))
+                    continue
+                r.raise_for_status()
+                return r.json()
+            except httpx.TransportError as e:  # 连接/超时类
+                last_exc = e
+                await asyncio.sleep(0.5 * (attempt + 1))
+        assert last_exc is not None
+        raise last_exc
+
     async def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         key = f"GET {path} {sorted((params or {}).items())}"
         if (cached := self._cache.get(key)) is not None:
             return cached
-        r = await self._client.get(path, params=params)
-        r.raise_for_status()
-        data = r.json()
+        data = await self._request_json("GET", path, params=params)
         self._cache.set(key, data)
         return data
 
@@ -84,9 +112,7 @@ class BangumiClient:
         key = f"POST {path} {params} {json_body}"
         if (cached := self._cache.get(key)) is not None:
             return cached
-        r = await self._client.post(path, json=json_body, params=params)
-        r.raise_for_status()
-        data = r.json()
+        data = await self._request_json("POST", path, params=params, json_body=json_body)
         self._cache.set(key, data)
         return data
 
