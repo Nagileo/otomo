@@ -1,0 +1,51 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.env.*
+.pytest_cache/
+.ipynb_checkpoints/
+
+# ---- Node / Next.js ----
+node_modules/
+.next/
+out/
+dist/
+npm-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# ---- 数据与缓存（许可证红线：萌娘语料绝不入库）----
+# 萌娘百科 / 维基的按需抓取缓存属于运行时产物，禁止提交（CC BY-NC-SA + ai-train=no）
+cache/
+data/raw/
+data/moegirl/
+data/cache/
+*.sqlite
+*.duckdb
+
+# 向量库 / 索引本地文件
+qdrant_storage/
+*.faiss
+*.index
+
+# 模型权重 / 训练产物
+*.pt
+*.bin
+*.safetensors
+checkpoints/
+runs/
+wandb/
+
+# 轨迹 / 评测大文件（保留 schema 与小样例，大数据不提交）
+trajectories/
+data/datasets/
+
+# ---- OS / IDE ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
