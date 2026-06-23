@@ -14,6 +14,7 @@ from .tools.bangumi.client import BangumiClient
 from .tools.moegirl import build_moegirl_tools
 from .tools.moegirl.client import MoegirlClient
 from .tools.profile import build_profile_tools
+from .tools.recommend import build_recommend_tools
 
 RunnerKind = Literal["react", "plan", "adaptive"]
 
@@ -30,6 +31,8 @@ def build_registry(
         for tool in build_moegirl_tools(moegirl):
             registry.register(tool)
     for tool in build_profile_tools(client, ltm or LongTermMemory()):
+        registry.register(tool)
+    for tool in build_recommend_tools(client):
         registry.register(tool)
     return registry
 

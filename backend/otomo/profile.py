@@ -9,7 +9,11 @@ from collections import Counter
 from pydantic import BaseModel, Field
 
 # 媒介/来源类标签对"题材口味"是噪声（年代单独统计）；保留题材与 staff 名
-_STOP_TAGS = {"TV", "剧场版", "OVA", "OAD", "WEB", "PV", "动画", "日本", "中国", "美国"}
+_STOP_TAGS = {
+    "TV", "剧场版", "OVA", "OAD", "WEB", "PV", "动画", "TV动画", "日本", "中国", "美国",
+    # 来源/媒介类标签太宽泛，对题材口味是噪声
+    "漫画改", "原创", "小说改", "游戏改", "轻小说改", "漫改", "改编",
+}
 
 
 def _is_noise(tag: str) -> bool:

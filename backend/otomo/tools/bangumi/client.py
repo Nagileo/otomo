@@ -119,14 +119,20 @@ class BangumiClient:
     # ---- v0 端点 ---- #
     async def search_subjects(
         self,
-        keyword: str,
+        keyword: str = "",
         subject_type: int | None = None,
         sort: str = "match",
         limit: int = 10,
+        tags: list[str] | None = None,
     ) -> Any:
         body: dict[str, Any] = {"keyword": keyword, "sort": sort}
+        filt: dict[str, Any] = {}
         if subject_type:
-            body["filter"] = {"type": [subject_type]}
+            filt["type"] = [subject_type]
+        if tags:
+            filt["tag"] = tags
+        if filt:
+            body["filter"] = filt
         return await self._post("/v0/search/subjects", body, params={"limit": min(limit, 50)})
 
     async def get_subject(self, subject_id: int) -> Any:
@@ -162,11 +168,27 @@ class BangumiClient:
         return await self._get("/v0/me")
 
     async def get_user_collections(
-        self, username: str, subject_type: int = 2, collection_type: int = 2,
+        self, username: str, subject_type: int = 2, collection_type: int | None = 2,
         limit: int = 50, offset: int = 0,
     ) -> Any:
-        """用户收藏。subject_type:2=动画；collection_type:1想看/2看过/3在看/4搁置/5抛弃。公开收藏免 token。"""
-        return await self._get(
-            f"/v0/users/{username}/collections",
-            {"subject_type": subject_type, "type": collection_type, "limit": min(limit, 50), "offset": offset},
-        )
+        """用户收藏。subject_type:2=动画；collection_type:1想看/2看过/3在看/4搁置/5抛弃（None=全部）。公开收藏免 token。"""
+        params: dict[str, Any] = {"subject_type": subject_type, "limit": min(limit, 50), "offset": offset}
+        if collection_type is not None:
+            params["type"] = collection_type
+        return await self._get(f"/v0/users/{username}/collections", params)
+
+    async def get_all_user_collections(
+        self, username: str, subject_type: int = 2, collection_type: int | None = None,
+        max_items: int = 300,
+    ) -> list[dict]:
+        """分页拉取收藏（默认全部状态），用于口味聚合 / 排除已看。"""
+        items: list[dict] = []
+        offset = 0
+        while len(items) < max_items:
+            page = await self.get_user_collections(username, subject_type, collection_type, 50, offset)
+            batch = page.get("data") or []
+            items.extend(batch)
+            if len(batch) < 50:
+                break
+            offset += 50
+        return items[:max_items]
