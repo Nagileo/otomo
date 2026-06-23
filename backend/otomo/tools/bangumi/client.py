@@ -156,3 +156,17 @@ class BangumiClient:
     async def get_person_subjects(self, person_id: int) -> Any:
         """该人物（声优/staff）参与的作品。"""
         return await self._get(f"/v0/persons/{person_id}/subjects")
+
+    async def get_me(self) -> Any:
+        """用 token 取当前用户信息（含 username）。需要 BANGUMI_TOKEN。"""
+        return await self._get("/v0/me")
+
+    async def get_user_collections(
+        self, username: str, subject_type: int = 2, collection_type: int = 2,
+        limit: int = 50, offset: int = 0,
+    ) -> Any:
+        """用户收藏。subject_type:2=动画；collection_type:1想看/2看过/3在看/4搁置/5抛弃。公开收藏免 token。"""
+        return await self._get(
+            f"/v0/users/{username}/collections",
+            {"subject_type": subject_type, "type": collection_type, "limit": min(limit, 50), "offset": offset},
+        )

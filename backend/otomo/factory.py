@@ -8,21 +8,29 @@ from .agent.contracts import AgentRunner
 from .agent.plan_execute import PlanExecuteRunner
 from .agent.react import ReActRunner
 from .agent.registry import ToolRegistry
+from .memory import LongTermMemory
 from .tools.bangumi import build_bangumi_tools
 from .tools.bangumi.client import BangumiClient
 from .tools.moegirl import build_moegirl_tools
 from .tools.moegirl.client import MoegirlClient
+from .tools.profile import build_profile_tools
 
 RunnerKind = Literal["react", "plan", "adaptive"]
 
 
-def build_registry(client: BangumiClient, moegirl: MoegirlClient | None = None) -> ToolRegistry:
+def build_registry(
+    client: BangumiClient,
+    moegirl: MoegirlClient | None = None,
+    ltm: LongTermMemory | None = None,
+) -> ToolRegistry:
     registry = ToolRegistry()
     for tool in build_bangumi_tools(client):
         registry.register(tool)
     if moegirl is not None:
         for tool in build_moegirl_tools(moegirl):
             registry.register(tool)
+    for tool in build_profile_tools(client, ltm or LongTermMemory()):
+        registry.register(tool)
     return registry
 
 
