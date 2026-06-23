@@ -15,6 +15,10 @@ class Settings(BaseSettings):
     bangumi_user_agent: str = "otomo-dev/otomo/0.1 (+https://github.com/yourname/otomo)"
     bangumi_token: str | None = None
 
+    # ---- 萌娘百科 RAG（按需取+缓存，绝不入库；见 docs/02）----
+    moegirl_api_base: str = "https://zh.moegirl.org.cn/api.php"
+    moegirl_user_agent: str = "otomo-rag/0.1 (+https://github.com/otomo-dev/otomo; non-commercial research)"
+
     # ---- LLM（OpenAI 兼容，默认 DeepSeek）----
     llm_base_url: str = "https://api.deepseek.com"
     llm_api_key: str = ""

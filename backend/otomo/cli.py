@@ -20,6 +20,7 @@ from .agent.contracts import (
 )
 from .factory import build_runner
 from .tools.bangumi.client import BangumiClient
+from .tools.moegirl.client import MoegirlClient
 
 # Windows 控制台默认 GBK，强制 UTF-8 以正确输出中文与符号
 for _stream in (sys.stdout, sys.stderr):
@@ -33,7 +34,8 @@ DIM, BOLD, CYAN, GREEN, RED, RESET = "\033[2m", "\033[1m", "\033[36m", "\033[32m
 
 async def run(question: str, kind: str = "react") -> None:
     client = BangumiClient()
-    runner = build_runner(client, kind)
+    moegirl = MoegirlClient()
+    runner = build_runner(client, moegirl, kind)
     answering = False
     try:
         async for ev in runner.stream(question):
@@ -60,6 +62,7 @@ async def run(question: str, kind: str = "react") -> None:
                 print(f"{RED}错误：{ev.message}{RESET}")
     finally:
         await client.aclose()
+        await moegirl.aclose()
 
 
 def main() -> None:

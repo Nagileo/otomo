@@ -1,0 +1,101 @@
+"""萌娘百科设定/梗/考据检索工具（A4 RAG 第一刀）。
+
+约束下的务实 RAG：萌娘只能按标题取、不能建持久语料库，所以**按需取单页 → 切块 → 按查询排序 → 返回 top 片段 + 来源**。
+（向量库 / 跨页混合检索属后续 C3；现在的"语料"就是临时取来的这一页，词法排序足够。）
+"""
+from __future__ import annotations
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from ...agent.contracts import Citation, Tool, ToolResult
+from .client import MoegirlClient
+
+
+class LoreArgs(BaseModel):
+    query: str = Field(..., description="想了解的设定/梗/考据问题，如『后藤一里的吉他梗』")
+    title_hint: str | None = Field(
+        None, description="若已知词条名（角色/作品名）就传，用于更准地定位萌娘页面"
+    )
+
+
+class LoreResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    title: str
+    found: bool
+    snippets: list[str] = Field(default_factory=list)
+
+
+def _chunk(text: str, size: int = 400) -> list[str]:
+    chunks: list[str] = []
+    buf = ""
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        if len(buf) + len(line) + 1 > size and buf:
+            chunks.append(buf)
+            buf = line
+        else:
+            buf = f"{buf}\n{line}" if buf else line
+    if buf:
+        chunks.append(buf)
+    return chunks
+
+
+def _bigrams(s: str) -> set[str]:
+    s = "".join(ch for ch in s if ch.strip())
+    return {s[i : i + 2] for i in range(len(s) - 1)} if len(s) >= 2 else {s}
+
+
+def _rank(query: str, chunks: list[str], top_k: int = 3) -> list[str]:
+    qb = _bigrams(query)
+    if not qb:
+        return chunks[:top_k]
+    scored = [(sum(1 for b in _bigrams(c) if b in qb), i, c) for i, c in enumerate(chunks)]
+    # 总分 + 保留导言（第 0 块）作为背景
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    top = [c for score, _i, c in scored[:top_k] if score > 0]
+    if chunks and chunks[0] not in top:  # 导言通常含核心设定，带上
+        top = [chunks[0]] + top
+    return top[:top_k] if top else chunks[:1]
+
+
+class LoreSearchTool(Tool):
+    name = "lore_search"
+    description = (
+        "从萌娘百科检索角色/作品的设定、剧情、梗、术语、考据等非结构化知识。"
+        "用于回答『XX 有什么梗 / 设定 / 由来』这类 Bangumi 结构化数据答不了的问题。返回片段并附来源链接。"
+    )
+    args_model = LoreArgs
+    result_model = LoreResult
+
+    def __init__(self, client: MoegirlClient) -> None:
+        self.client = client
+
+    async def run(self, args: LoreArgs) -> ToolResult[LoreResult]:
+        seed = args.title_hint or args.query
+        titles = await self.client.opensearch(seed, limit=3)
+        if not titles:
+            return ToolResult(
+                ok=True, data=LoreResult(title="", found=False, snippets=[]),
+                error=None,
+            )
+        page = await self.client.extract(titles[0], intro_only=False)
+        if not page or not page.get("extract"):
+            return ToolResult(ok=True, data=LoreResult(title=titles[0], found=False, snippets=[]))
+
+        snippets = _rank(args.query, _chunk(page["extract"]))
+        cite = Citation(
+            title=f"萌娘百科 — {page['title']}",
+            url=page.get("fullurl") or "",
+            source="moegirl",
+        )
+        return ToolResult(
+            ok=True,
+            data=LoreResult(title=page["title"], found=True, snippets=snippets),
+            sources=[cite],
+        )
+
+
+def build_moegirl_tools(client: MoegirlClient) -> list[Tool]:
+    return [LoreSearchTool(client)]

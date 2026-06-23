@@ -55,7 +55,8 @@
 - [x] **A2**：评测前置——typed Verifier（answer/retrieval/拒答 + 工具标记泄漏）+ **17 条 golden cases** + eval runner（`--runner react|plan`）；**Plan-Execute runner**（plan→execute→reflect→补救→compose，与 ReAct 共享 `_common`、同 AgentRunner 接口可 A/B）；**短期会话记忆**（API `session_id`）+ **滑动窗口**（`trim_messages`）；新增 subject→staff 工具（8 个工具）；修 DeepSeek DSML 泄漏与过度交叉验证。**ReAct 基线 17/17**（2 single / 11 two-hop / 4 refusal）。
 - [x] **Adaptive runner**：路由器按复杂度分流——简单直跑 ReAct、复杂先 plan 再 react+reflect（产品默认；纯 react/plan 保留作 A/B）。
 - [x] **A3（核心）**：自动 benchmark 生成器（`otomo.eval.generate`，从 Bangumi 图谱造可验证题、真值取自 API：年份/主角声优/制作公司）→ 24 条自动 cases；eval runner 兼作 case replay + 打分卡；GoldenCase 加 `min_tools`（防纯记忆作答）。**Adaptive 在自动集 24/24**（grounding 使中日双名命中）。
-- [ ] 下一步按新优先级转入 **Track B 推荐 / A4 RAG·产品能力**（三 runner 系统对比报告作为 A3 收尾可随时补）
+- [x] **A4（第一刀 · 萌娘 RAG）**：自建 thin 萌娘客户端（白名单端点 opensearch+extracts、强制 UA、缓存、**按需取不入库**）+ `lore_search` 工具（解析标题→取正文→切块→词法排序→top 片段）+ **强制来源引用**。实测考据/设定问答打通并挂萌娘来源。
+- [ ] 下一步：A4 续（中文维基兜底 / 注入检测 / 长期记忆=口味画像）→ 真产品能力（考据QA·口味画像·季番速览）；并行 **Track B 推荐**（RL 推后）
 
 ## 下一步（A1 启动清单）
 1. `backend/` 脚手架（pyproject、FastAPI 空壳、`agent/` `tools/` 目录）。

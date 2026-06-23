@@ -10,19 +10,26 @@ from .agent.react import ReActRunner
 from .agent.registry import ToolRegistry
 from .tools.bangumi import build_bangumi_tools
 from .tools.bangumi.client import BangumiClient
+from .tools.moegirl import build_moegirl_tools
+from .tools.moegirl.client import MoegirlClient
 
 RunnerKind = Literal["react", "plan", "adaptive"]
 
 
-def build_registry(client: BangumiClient) -> ToolRegistry:
+def build_registry(client: BangumiClient, moegirl: MoegirlClient | None = None) -> ToolRegistry:
     registry = ToolRegistry()
     for tool in build_bangumi_tools(client):
         registry.register(tool)
+    if moegirl is not None:
+        for tool in build_moegirl_tools(moegirl):
+            registry.register(tool)
     return registry
 
 
-def build_runner(client: BangumiClient, kind: RunnerKind = "adaptive") -> AgentRunner:
-    registry = build_registry(client)
+def build_runner(
+    client: BangumiClient, moegirl: MoegirlClient | None = None, kind: RunnerKind = "adaptive"
+) -> AgentRunner:
+    registry = build_registry(client, moegirl)
     if kind == "plan":
         return PlanExecuteRunner(registry)
     if kind == "react":

@@ -18,12 +18,14 @@ from ..factory import build_registry
 from ..agent.plan_execute import PlanExecuteRunner
 from ..agent.react import ReActRunner
 from ..tools.bangumi.client import BangumiClient
+from ..tools.moegirl.client import MoegirlClient
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.bangumi = BangumiClient()
-    app.state.registry = build_registry(app.state.bangumi)
+    app.state.moegirl = MoegirlClient()
+    app.state.registry = build_registry(app.state.bangumi, app.state.moegirl)
     app.state.runners = {
         "react": ReActRunner(app.state.registry),
         "plan": PlanExecuteRunner(app.state.registry),
@@ -34,6 +36,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         await app.state.bangumi.aclose()
+        await app.state.moegirl.aclose()
 
 
 app = FastAPI(title="Otomo Backend", version="0.1.0", lifespan=lifespan)

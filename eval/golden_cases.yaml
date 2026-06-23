@@ -107,3 +107,11 @@
   kind: refusal
   expect_any: ["无法", "没有", "不", "建议", "暂", "抱歉"]
   note: A2 暂无"在哪看"工具 → 不应臆测平台/链接，应说明并建议官方渠道
+
+- id: lore_bocchi_nickname
+  question: 《孤独摇滚！》里 后藤一里 在乐队里的外号（爱称）是什么？
+  kind: two_hop
+  expect_any: ["波奇", "ぼっち", "小孤独"]
+  expect_tools: ["lore_search"]
+  min_tools: 1
+  note: RAG——设定/外号需查萌娘百科，并应挂来源

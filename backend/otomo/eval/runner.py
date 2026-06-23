@@ -18,6 +18,7 @@ import yaml
 from ..agent.contracts import FinalEvent, ToolCallEvent
 from ..factory import build_runner
 from ..tools.bangumi.client import BangumiClient
+from ..tools.moegirl.client import MoegirlClient
 from .verifier import CaseResult, GoldenCase, verify
 
 for _stream in (sys.stdout, sys.stderr):  # Windows GBK 兜底
@@ -54,7 +55,8 @@ async def main_async(args: argparse.Namespace) -> int:
         cases = cases[: args.limit]
 
     client = BangumiClient()
-    runner = build_runner(client, args.runner)
+    moegirl = MoegirlClient()
+    runner = build_runner(client, moegirl, args.runner)
     print(f"{DIM}runner={args.runner}{RESET}\n")
     results: list[CaseResult] = []
     try:
@@ -70,6 +72,7 @@ async def main_async(args: argparse.Namespace) -> int:
             print(f"  {DIM}答：{res.answer[:120].replace(chr(10),' ')}…{RESET}\n")
     finally:
         await client.aclose()
+        await moegirl.aclose()
 
     passed = sum(r.passed for r in results)
     total = len(results)
