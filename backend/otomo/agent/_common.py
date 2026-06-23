@@ -132,6 +132,35 @@ async def step_tools(
         messages.append({"role": "tool", "tool_call_id": tc.id, "content": result.to_observation()})
 
 
+async def run_tool_round(
+    llm: AsyncOpenAI,
+    model: str,
+    registry: ToolRegistry,
+    messages: list[dict],
+    tools: list[dict],
+    max_iters: int,
+    sources: list[Citation],
+    seen_urls: set[str],
+) -> AsyncIterator[Any]:
+    """一轮"执行"：反复让模型调工具直到它不再调（含 DSML 文本误写的纠正）。
+    ReAct / Plan-Execute / Adaptive 三个 runner 共用。side effect 落到 messages/sources。"""
+    corrections = 0
+    for _ in range(max_iters):
+        resp = await llm.chat.completions.create(
+            model=model, messages=trim_messages(messages), tools=tools, tool_choice="auto"
+        )
+        msg = resp.choices[0].message
+        if not msg.tool_calls:
+            if has_leak(msg.content) and corrections < 2:
+                corrections += 1
+                messages.append({"role": "assistant", "content": msg.content or ""})
+                messages.append({"role": "system", "content": CORRECT_FC})
+                continue
+            return
+        async for ev in step_tools(registry, msg, messages, sources, seen_urls):
+            yield ev
+
+
 async def stream_answer(
     llm: AsyncOpenAI, model: str, messages: list[dict], tools: list[dict]
 ) -> AsyncIterator[AnswerDeltaEvent]:

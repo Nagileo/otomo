@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
+from ..agent.adaptive import AdaptiveRunner
 from ..agent.contracts import AgentState
 from ..factory import build_registry
 from ..agent.plan_execute import PlanExecuteRunner
@@ -26,6 +27,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.runners = {
         "react": ReActRunner(app.state.registry),
         "plan": PlanExecuteRunner(app.state.registry),
+        "adaptive": AdaptiveRunner(app.state.registry),
     }
     app.state.sessions: dict[str, AgentState] = {}  # 短期记忆：session_id -> 会话状态
     try:
@@ -46,7 +48,7 @@ app.add_middleware(
 
 class ChatRequest(BaseModel):
     message: str
-    runner: Literal["react", "plan"] = "react"
+    runner: Literal["react", "plan", "adaptive"] = "adaptive"
     session_id: str | None = None  # 传则跨请求复用会话（短期记忆）
 
 

@@ -64,12 +64,13 @@ async def run(question: str, kind: str = "react") -> None:
 
 def main() -> None:
     args = sys.argv[1:]
-    kind = "react"
-    if args and args[0] in ("--plan", "--react"):
-        kind = "plan" if args[0] == "--plan" else "react"
+    kind = "adaptive"  # 产品默认：按复杂度自适应
+    flags = {"--plan": "plan", "--react": "react", "--adaptive": "adaptive"}
+    if args and args[0] in flags:
+        kind = flags[args[0]]
         args = args[1:]
     if not args:
-        print('用法：python -m otomo.cli [--plan|--react] "你的问题"')
+        print('用法：python -m otomo.cli [--adaptive|--plan|--react] "你的问题"')
         raise SystemExit(1)
     asyncio.run(run(" ".join(args), kind))
 

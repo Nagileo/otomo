@@ -46,21 +46,11 @@ class PlanExecuteRunner(AgentRunner):
     async def _chat(self, messages: list[dict], **kw):
         return await self.llm.chat.completions.create(model=self.model, messages=messages, **kw)
 
-    async def _tool_round(self, state, tools, sources, seen_urls) -> AsyncIterator[AgentEvent]:
-        """一轮执行：反复调工具直到模型不再调（含 DSML 纠正）。"""
-        corrections = 0
-        for _ in range(self.max_iters):
-            resp = await self._chat(C.trim_messages(state.messages), tools=tools, tool_choice="auto")
-            msg = resp.choices[0].message
-            if not msg.tool_calls:
-                if C.has_leak(msg.content) and corrections < 2:
-                    corrections += 1
-                    state.messages.append({"role": "assistant", "content": msg.content or ""})
-                    state.messages.append({"role": "system", "content": C.CORRECT_FC})
-                    continue
-                break
-            async for ev in C.step_tools(self.registry, msg, state.messages, sources, seen_urls):
-                yield ev
+    def _tool_round(self, state, tools, sources, seen_urls) -> AsyncIterator[AgentEvent]:
+        """一轮执行：复用共享的 run_tool_round（含 DSML 纠正）。"""
+        return C.run_tool_round(
+            self.llm, self.model, self.registry, state.messages, tools, self.max_iters, sources, seen_urls
+        )
 
     async def stream(
         self, user_input: str, state: AgentState | None = None
