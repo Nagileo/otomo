@@ -6,17 +6,22 @@
 """
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from ...agent.contracts import Citation, Tool, ToolResult
 from ...memory import LongTermMemory
 from ...profile import TasteProfile, compute_taste_profile
-from ..bangumi.client import BangumiClient
+from ..bangumi.client import SUBJECT_TYPE, BangumiClient
 
-_MAX_ITEMS = 200  # 首版上限，控制调用量
+_MAX_ITEMS = 300  # 首版上限，控制调用量
 
 
 class TasteArgs(BaseModel):
+    subject_type: Literal["anime", "book", "music", "game", "real"] = Field(
+        "anime", description="对哪类作品画像（anime/book(漫画·小说)/music/game/real）；默认动画"
+    )
     username: str | None = Field(
         None, description="Bangumi 用户名；不传则用当前登录账号（需 token）"
     )
@@ -42,8 +47,9 @@ class TasteProfileTool(Tool):
             me = await self.client.get_me()
             username = me.get("username") or str(me.get("id"))
 
+        key = f"{username}:{args.subject_type}"  # 每类型一份画像
         if not args.refresh:
-            cached = self.ltm.get("taste", username)
+            cached = self.ltm.get("taste", key)
             if cached:
                 return ToolResult(
                     ok=True,
@@ -51,20 +57,11 @@ class TasteProfileTool(Tool):
                     sources=[Citation(title=f"Bangumi @{username}", url=f"https://bgm.tv/user/{username}", source="bangumi")],
                 )
 
-        items: list[dict] = []
-        offset = 0
-        while len(items) < _MAX_ITEMS:
-            page = await self.client.get_user_collections(
-                username, subject_type=2, collection_type=2, limit=50, offset=offset
-            )
-            batch = page.get("data") or []
-            items.extend(batch)
-            if len(batch) < 50:
-                break
-            offset += 50
-
+        items = await self.client.get_all_user_collections(
+            username, SUBJECT_TYPE[args.subject_type], collection_type=2, max_items=_MAX_ITEMS
+        )
         profile = compute_taste_profile(username, items)
-        self.ltm.set("taste", username, profile.model_dump())
+        self.ltm.set("taste", key, profile.model_dump())
         return ToolResult(
             ok=True,
             data=profile,
