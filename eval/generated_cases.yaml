@@ -1,0 +1,152 @@
+- id: gen_328609_year
+  question: 动画《孤独摇滚！》是哪一年首播的？
+  kind: single_hop
+  expect_contains:
+  - '2022'
+  min_tools: 1
+  note: 'auto: subject.date'
+- id: gen_328609_cv
+  question: 动画《孤独摇滚！》里 後藤ひとり 的声优是谁？
+  expect_contains:
+  - 青山吉能
+  min_tools: 1
+  note: 'auto: subject→character→actor'
+- id: gen_328609_studio
+  question: 动画《孤独摇滚！》的动画制作公司是哪家？
+  expect_contains:
+  - CloverWorks
+  min_tools: 1
+  note: 'auto: subject→persons(动画制作)'
+- id: gen_400602_year
+  question: 动画《葬送的芙莉莲》是哪一年首播的？
+  kind: single_hop
+  expect_contains:
+  - '2023'
+  min_tools: 1
+  note: 'auto: subject.date'
+- id: gen_400602_cv
+  question: 动画《葬送的芙莉莲》里 フリーレン 的声优是谁？
+  expect_contains:
+  - 種﨑敦美
+  min_tools: 1
+  note: 'auto: subject→character→actor'
+- id: gen_400602_studio
+  question: 动画《葬送的芙莉莲》的动画制作公司是哪家？
+  expect_contains:
+  - MADHOUSE
+  min_tools: 1
+  note: 'auto: subject→persons(动画制作)'
+- id: gen_10380_year
+  question: 动画《命运石之门》是哪一年首播的？
+  kind: single_hop
+  expect_contains:
+  - '2011'
+  min_tools: 1
+  note: 'auto: subject.date'
+- id: gen_10380_cv
+  question: 动画《命运石之门》里 椎名まゆり 的声优是谁？
+  expect_contains:
+  - 花澤香菜
+  min_tools: 1
+  note: 'auto: subject→character→actor'
+- id: gen_10380_studio
+  question: 动画《命运石之门》的动画制作公司是哪家？
+  expect_contains:
+  - WHITE FOX
+  min_tools: 1
+  note: 'auto: subject→persons(动画制作)'
+- id: gen_183878_year
+  question: 动画《紫罗兰永恒花园》是哪一年首播的？
+  kind: single_hop
+  expect_contains:
+  - '2018'
+  min_tools: 1
+  note: 'auto: subject.date'
+- id: gen_183878_cv
+  question: 动画《紫罗兰永恒花园》里 ヴァイオレット・エヴァーガーデン 的声优是谁？
+  expect_contains:
+  - 石川由依
+  min_tools: 1
+  note: 'auto: subject→character→actor'
+- id: gen_183878_studio
+  question: 动画《紫罗兰永恒花园》的动画制作公司是哪家？
+  expect_contains:
+  - 京都アニメーション
+  min_tools: 1
+  note: 'auto: subject→persons(动画制作)'
+- id: gen_207195_year
+  question: 动画《摇曳露营△》是哪一年首播的？
+  kind: single_hop
+  expect_contains:
+  - '2018'
+  min_tools: 1
+  note: 'auto: subject.date'
+- id: gen_207195_cv
+  question: 动画《摇曳露营△》里 各務原なでしこ 的声优是谁？
+  expect_contains:
+  - 花守ゆみり
+  min_tools: 1
+  note: 'auto: subject→character→actor'
+- id: gen_207195_studio
+  question: 动画《摇曳露营△》的动画制作公司是哪家？
+  expect_contains:
+  - C-Station
+  min_tools: 1
+  note: 'auto: subject→persons(动画制作)'
+- id: gen_55770_year
+  question: 动画《进击的巨人》是哪一年首播的？
+  kind: single_hop
+  expect_contains:
+  - '2013'
+  min_tools: 1
+  note: 'auto: subject.date'
+- id: gen_55770_cv
+  question: 动画《进击的巨人》里 エレン・イェーガー 的声优是谁？
+  expect_contains:
+  - 梶裕貴
+  min_tools: 1
+  note: 'auto: subject→character→actor'
+- id: gen_55770_studio
+  question: 动画《进击的巨人》的动画制作公司是哪家？
+  expect_contains:
+  - WIT STUDIO
+  min_tools: 1
+  note: 'auto: subject→persons(动画制作)'
+- id: gen_51_year
+  question: 动画《CLANNAD》是哪一年首播的？
+  kind: single_hop
+  expect_contains:
+  - '2007'
+  min_tools: 1
+  note: 'auto: subject.date'
+- id: gen_51_cv
+  question: 动画《CLANNAD》里 古河渚 的声优是谁？
+  expect_contains:
+  - 中原麻衣
+  min_tools: 1
+  note: 'auto: subject→character→actor'
+- id: gen_51_studio
+  question: 动画《CLANNAD》的动画制作公司是哪家？
+  expect_contains:
+  - 京都アニメーション
+  min_tools: 1
+  note: 'auto: subject→persons(动画制作)'
+- id: gen_485_year
+  question: 动画《凉宫春日的忧郁》是哪一年首播的？
+  kind: single_hop
+  expect_contains:
+  - '2006'
+  min_tools: 1
+  note: 'auto: subject.date'
+- id: gen_485_cv
+  question: 动画《凉宫春日的忧郁》里 キョン 的声优是谁？
+  expect_contains:
+  - 杉田智和
+  min_tools: 1
+  note: 'auto: subject→character→actor'
+- id: gen_485_studio
+  question: 动画《凉宫春日的忧郁》的动画制作公司是哪家？
+  expect_contains:
+  - 京都アニメーション
+  min_tools: 1
+  note: 'auto: subject→persons(动画制作)'

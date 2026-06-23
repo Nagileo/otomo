@@ -24,6 +24,7 @@ class GoldenCase(BaseModel):
     expect_any: list[str] = Field(default_factory=list)       # 至少一个出现
     expect_absent: list[str] = Field(default_factory=list)    # 都不得出现
     expect_tools: list[str] = Field(default_factory=list)     # 至少调用过这些工具
+    min_tools: int = 0                                        # 至少调用过几次工具（防纯记忆作答）
     note: str = ""
 
 
@@ -55,6 +56,10 @@ def verify(case: GoldenCase, answer: str, tools_called: list[str]) -> CaseResult
         checks.append(Check(label=f"不含「{s}」", passed=s.lower() not in a))
     for t in case.expect_tools:
         checks.append(Check(label=f"调用过 {t}", passed=t in called))
+    if case.min_tools:
+        checks.append(
+            Check(label=f"至少调用 {case.min_tools} 次工具", passed=len(tools_called) >= case.min_tools)
+        )
 
     # 空答案一律失败
     if not answer.strip():

@@ -54,8 +54,8 @@
 - [x] **A1 骨架**：手搓 ReAct runner（两阶段，CoT 不外露）+ 自建 Bangumi client/7 工具（typed）+ FastAPI SSE + CLI + 最简 Next.js chat（trace 面板）
 - [x] **A2**：评测前置——typed Verifier（answer/retrieval/拒答 + 工具标记泄漏）+ **17 条 golden cases** + eval runner（`--runner react|plan`）；**Plan-Execute runner**（plan→execute→reflect→补救→compose，与 ReAct 共享 `_common`、同 AgentRunner 接口可 A/B）；**短期会话记忆**（API `session_id`）+ **滑动窗口**（`trim_messages`）；新增 subject→staff 工具（8 个工具）；修 DeepSeek DSML 泄漏与过度交叉验证。**ReAct 基线 17/17**（2 single / 11 two-hop / 4 refusal）。
 - [x] **Adaptive runner**：路由器按复杂度分流——简单直跑 ReAct、复杂先 plan 再 react+reflect（产品默认；纯 react/plan 保留作 A/B）。
-- [ ] A3：自动 benchmark 生成 + case replay + 指标报告（cases 扩到 30+；三 runner 系统对比）← **下一步**
-- [ ] 之后按新优先级：Track B 推荐 / A4 RAG·产品能力 / C1-C3 工程纵深（RL 推后）
+- [x] **A3（核心）**：自动 benchmark 生成器（`otomo.eval.generate`，从 Bangumi 图谱造可验证题、真值取自 API：年份/主角声优/制作公司）→ 24 条自动 cases；eval runner 兼作 case replay + 打分卡；GoldenCase 加 `min_tools`（防纯记忆作答）。**Adaptive 在自动集 24/24**（grounding 使中日双名命中）。
+- [ ] 下一步按新优先级转入 **Track B 推荐 / A4 RAG·产品能力**（三 runner 系统对比报告作为 A3 收尾可随时补）
 
 ## 下一步（A1 启动清单）
 1. `backend/` 脚手架（pyproject、FastAPI 空壳、`agent/` `tools/` 目录）。
