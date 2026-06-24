@@ -94,7 +94,7 @@ class WebSearchTool(Tool):
 
     def __init__(self, provider: str | None = None, api_key: str | None = None) -> None:
         self.provider = (provider or settings.websearch_provider).lower()
-        self.api_key = api_key if api_key is not None else settings.websearch_api_key
+        self.api_key = api_key if api_key is not None else settings.websearch_key()
 
     async def run(self, args: WebSearchArgs) -> ToolResult[WebSearchResult]:
         if not self.api_key:

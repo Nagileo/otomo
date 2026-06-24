@@ -27,7 +27,8 @@
   - `BANGUMI_USER_AGENT=otomo-dev/otomo/0.1 (+repo-url)`（**强制**，通用 UA 会被拒）
   - `MOEGIRL_USER_AGENT=otomo-rag/0.1 (+repo-url; contact)`（礼貌 + 可联系）
   - `LLM_BASE_URL=` / `LLM_API_KEY=` / `LLM_MODEL=`（默认指向 DeepSeek）
-  - `WEBSEARCH_PROVIDER=`（tavily/exa/serper，默认 tavily）/ `WEBSEARCH_API_KEY=`（全网兜底搜索；不填则 web_search 工具优雅报"未配置"）
+  - Web search（全网兜底）：`WEBSEARCH_PROVIDER=`（tavily/serper/exa/bocha，默认 tavily）+ 各引擎专属 key `WEBSEARCH_TAVILY_KEY/WEBSEARCH_SERPER_KEY/WEBSEARCH_EXA_KEY/WEBSEARCH_BOCHA_KEY`（全配好，切引擎只改 PROVIDER 一行）；或用通用 `WEBSEARCH_API_KEY` 兜底。不填则 web_search 优雅报"未配置"。
+    - 定价/质量：tavily/exa 每月1000免费(个人首选)；**serper 一次性2500后 $1/千最便宜+中文质量好(付费首选)**；bocha 试用1000/3月、之后 ¥36/千($5)质量最好但最贵。
 - 切本地 Qwen：`LLM_BASE_URL` 指向本地 vLLM 的 OpenAI 兼容端点即可，其余不变。
 
 ## 4. 成本与限流意识
