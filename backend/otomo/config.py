@@ -50,6 +50,12 @@ class Settings(BaseSettings):
         }.get(p, "")
         return per or self.websearch_api_key
 
+    # ---- 离线协同召回（CF）----
+    # recsys-offline 训练导出的 item-item 相似度表，作在线 recommend 的"协同召回 provider"
+    # （看过 X 的人也看 Y，补在线天生缺失的协同信号）。按 i2i_{subject_type}.json 加载；
+    # 文件缺失则该路召回静默跳过（优雅降级，不影响标签/图谱召回）。
+    cf_i2i_dir: str = "otomo/data"
+
     # ---- Agent / HTTP ----
     agent_max_iters: int = 8
     http_timeout: float = 30.0

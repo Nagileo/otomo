@@ -13,12 +13,15 @@
 """
 from __future__ import annotations
 
+import json
+import os
 import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from ...agent.contracts import Citation, Tool, ToolResult
+from ...config import settings
 from ...profile import compute_taste_profile
 from ..bangumi.client import SUBJECT_TYPE, BangumiClient
 
@@ -28,7 +31,29 @@ _MAX_COLLECT = 800
 _NICHE_OFFSET = 30        # 冷门模式：跳过最热门，挖热度榜中尾部
 _GRAPH_FAV = 3
 _GRAPH_ROLES = {"导演", "监督", "动画制作", "原作", "系列构成", "脚本", "制作"}
-_ENRICH_TOP = 15         # 对前 N 个缺评分的候选按需补 get_subject
+_GRAPH_WORKS = 8         # 图谱召回每个 staff/制作组最多取 N 部（防高产制作组霸榜、保多样性）
+_ENRICH_TOP = 18         # 对前 N 个缺评分/缺名的候选按需补 get_subject
+_CF_SEEDS = 8            # 取用户最爱的前 N 部作协同召回种子
+_CF_NBR = 20             # 每个种子取 i2i 的前 N 个邻居
+_CF_CAP = 1.5            # cf_bonus 封顶（协同是强个性化信号，略高于 graph 的 1.2）
+
+_I2I_CACHE: dict[str, dict] = {}
+
+
+def _load_i2i(subject_type: str) -> dict:
+    """加载 recsys-offline 导出的 item-item 相似度表（离线 CF 反哺在线的产物）。
+
+    按 i2i_{subject_type}.json 找；缺失/损坏→空表，使协同召回这一路静默跳过（优雅降级）。
+    进程内缓存，避免每次请求重读。
+    """
+    if subject_type not in _I2I_CACHE:
+        path = os.path.join(settings.cf_i2i_dir, f"i2i_{subject_type}.json")
+        try:
+            with open(path, encoding="utf-8") as f:
+                _I2I_CACHE[subject_type] = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            _I2I_CACHE[subject_type] = {"items": {}, "meta": {}}
+    return _I2I_CACHE[subject_type]
 
 _MOOD_TAG_MAP: dict[str, list[str]] = {
     "不费脑": ["日常", "治愈", "轻松"], "轻松": ["日常", "治愈", "搞笑"],
@@ -78,6 +103,15 @@ def _blank(x: dict) -> dict:
         "matched": set(), "graph": set(), "weight": 0.0,
         "rating": x.get("rating") or {},
         "image": img.get("common") or img.get("medium") or img.get("grid"),
+        "cf": 0.0, "cf_from": set(),
+    }
+
+
+def _blank_id() -> dict:
+    """协同召回新候选（i2i 只给 subject_id+score，name/rating/image 待 enrich 补）。"""
+    return {
+        "name": None, "matched": set(), "graph": set(), "weight": 0.0,
+        "rating": {}, "image": None, "cf": 0.0, "cf_from": set(),
     }
 
 
@@ -91,6 +125,7 @@ class RecommendArgs(BaseModel):
     niche: bool = Field(False, description="冷门挖宝：偏高分低人气、少推大热门（重度用户/想挖宝时用）")
     explore: bool = Field(False, description="口味拓展：用次级标签探索邻近题材，跳出核心舒适区")
     use_graph: bool = Field(True, description="图谱召回：从你最爱作品的监督/制作组找其未看的其他作品")
+    use_cf: bool = Field(True, description="协同召回：看过你爱的作品的人还看了啥（离线 CF，需 i2i 表；无表则自动跳过）")
 
 
 class RecItem(BaseModel):
@@ -146,27 +181,50 @@ class RecommendTool(Tool):
             picks = [p for p in (persons or []) if p.get("relation") in _GRAPH_ROLES and p.get("id")][:2]
             for p in picks:
                 works = await self.client.get_person_subjects(p["id"])
-                for w in works or []:
-                    if w.get("type") != stype:
-                        continue
-                    wid = w.get("id")
-                    if not wid or wid in seen:
+                works = [w for w in (works or []) if w.get("type") == stype and w.get("id")]
+                for w in works[:_GRAPH_WORKS]:  # 每制作组限量，防霸榜
+                    wid = w["id"]
+                    if wid in seen:
                         continue
                     c = cand.setdefault(wid, _blank(w))
                     c["graph"].add(f"同{p.get('relation')}·{p.get('name')}")
 
-    async def _enrich_ratings(self, ranked_ids: list[tuple[int, dict]]) -> None:
-        """对前 N 个缺评分的候选按需补评分（图谱召回的 person_subjects 不带 rating）。"""
+    def _cf_recall(self, cand: dict, fav_ids: list[int], seen: set[int], i2i: dict) -> None:
+        """协同召回：用户最爱作品的 i2i 邻居（看过 X 的人也看 Y）。补在线缺失的协同信号。
+
+        i2i score 量纲随模型(BM25/ALS)波动，故用 **rank 衰减** 1/(1+rank) 累加，量纲稳定、跨模型可比；
+        多个种子召回到同一邻居会累加（共识越强分越高）。i2i 是内存 dict，无 IO，故同步。
+        """
+        items = i2i.get("items") or {}
+        if not items:
+            return
+        for sid in fav_ids[:_CF_SEEDS]:
+            for rank, pair in enumerate((items.get(str(sid)) or [])[:_CF_NBR]):
+                nbr_sid = int(pair[0])
+                if nbr_sid in seen:
+                    continue
+                c = cand.get(nbr_sid)
+                if c is None:
+                    c = cand[nbr_sid] = _blank_id()
+                c["cf"] += 1.0 / (1 + rank)
+                c["cf_from"].add(sid)
+
+    async def _enrich(self, ranked_ids: list[tuple[int, dict]]) -> None:
+        """对前 N 个信息不全（缺评分或缺名，多来自图谱/协同召回）的候选按需补 get_subject。"""
         n = 0
         for sid, c in ranked_ids:
             if n >= _ENRICH_TOP:
                 break
-            if c["rating"].get("score"):
+            if c["name"] and c["rating"].get("score"):
                 continue
             n += 1
             try:
                 raw = await self.client.get_subject(sid)
-                c["rating"] = raw.get("rating") or {}
+                if not c["name"]:
+                    c["name"] = raw.get("name_cn") or raw.get("name")
+                    img = raw.get("images") or {}
+                    c["image"] = c["image"] or img.get("common") or img.get("medium") or img.get("grid")
+                c["rating"] = raw.get("rating") or c["rating"]
             except Exception:  # noqa: BLE001
                 pass
 
@@ -188,40 +246,62 @@ class RecommendTool(Tool):
 
         cand: dict[int, dict] = {}
         await self._tag_recall(cand, stype, recall_tags, user_tags, maxw, mood, seen, args.niche)
+
+        # 用户最爱作品（按评分降序）——图谱召回与协同召回共用作种子
+        fav_sorted = sorted(watched, key=lambda it: -(it.get("rate") or 0))
+        fav_ids = [it["subject"]["id"] for it in fav_sorted if it.get("subject", {}).get("id")]
+        fav_names = {
+            it["subject"]["id"]: (it["subject"].get("name_cn") or it["subject"].get("name"))
+            for it in fav_sorted if it.get("subject", {}).get("id")
+        }
         if args.use_graph:
-            fav_ids = [
-                it["subject"]["id"]
-                for it in sorted(watched, key=lambda it: -(it.get("rate") or 0))
-                if it.get("subject", {}).get("id")
-            ]
             await self._graph_recall(cand, stype, fav_ids, seen)
+        if args.use_cf:  # 协同召回（离线 CF 反哺）：无 i2i 表则 _load_i2i 返回空、静默跳过
+            self._cf_recall(cand, fav_ids, seen, _load_i2i(args.subject_type))
 
         def affinity(c: dict) -> float:
             return c["weight"] / maxw  # ≈ 加权命中标签数
 
         def graph_bonus(c: dict) -> float:
-            return min(len(c["graph"]), 2) * 0.6  # 封顶 ~1.2，避免压过标签
+            # 图谱是弱信号（同制作组≠一定喜欢），封顶 0.9，低于协同(1.5)：协同>图谱
+            return min(len(c["graph"]), 2) * 0.45
 
-        # 预排（不含质量）→ 给 top 候选补评分 → 终排（含质量）
-        prelim = sorted(cand.items(), key=lambda kv: -(affinity(kv[1]) + graph_bonus(kv[1])))[:25]
-        await self._enrich_ratings(prelim)
+        def cf_bonus(c: dict) -> float:
+            return min(c.get("cf", 0.0), _CF_CAP)  # 封顶，避免协同召回压过标签口味
+
+        # 预排（不含质量）→ 给 top 候选补名/评分 → 终排（含质量）
+        prelim = sorted(
+            cand.items(), key=lambda kv: -(affinity(kv[1]) + graph_bonus(kv[1]) + cf_bonus(kv[1]))
+        )[:30]
+        await self._enrich(prelim)
 
         def score(c: dict) -> float:
-            if args.niche:
-                return 0.5 * affinity(c) + 0.5 * graph_bonus(c) + 2.0 * _quality_niche(c["rating"])
-            return affinity(c) + graph_bonus(c) + 1.2 * _quality_popular(c["rating"])
+            if args.niche:  # 挖冷门：协同偏热门，权重压低
+                return (0.5 * affinity(c) + 0.5 * graph_bonus(c)
+                        + 0.4 * cf_bonus(c) + 2.0 * _quality_niche(c["rating"]))
+            return affinity(c) + graph_bonus(c) + cf_bonus(c) + 1.2 * _quality_popular(c["rating"])
+
+        def cf_reason(c: dict) -> list[str]:
+            if not c["cf_from"]:
+                return []
+            names = [n for n in (fav_names.get(s) for s in c["cf_from"]) if n]
+            if not names:
+                return ["相似口味用户的选择"]
+            return [f"看过《{names[0]}》的人也在看" + (" 等" if len(c["cf_from"]) > 1 else "")]
 
         ranked = sorted(prelim, key=lambda kv: -score(kv[1]))
         out: list[RecItem] = []
         seen_series: set[str] = set()
         for sid, c in ranked:
+            if not c["name"]:
+                continue  # 协同召回候选未被 enrich 补到名，跳过
             sk = _series_key(c["name"])
             if sk in seen_series:
                 continue
             seen_series.add(sk)
             out.append(RecItem(
                 id=sid, name=c["name"], score=round(score(c), 3),
-                reasons=sorted(c["matched"]) + sorted(c["graph"]),
+                reasons=sorted(c["matched"]) + sorted(c["graph"]) + cf_reason(c),
                 bangumi_score=(c["rating"] or {}).get("score"),
                 rank=(c["rating"] or {}).get("rank"),
                 image=c.get("image"),
