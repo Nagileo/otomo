@@ -21,9 +21,9 @@ from .models import (
 )
 
 
-def _subject_citation(subject_id: int, name: str) -> Citation:
+def _subject_citation(subject_id: int, name: str, image: str | None = None) -> Citation:
     return Citation(title=name or f"subject {subject_id}",
-                    url=f"https://bgm.tv/subject/{subject_id}", source="bangumi")
+                    url=f"https://bgm.tv/subject/{subject_id}", source="bangumi", image=image)
 
 
 # --------------------------------------------------------------------------- #
@@ -85,7 +85,7 @@ class SearchSubjectsTool(Tool):
         return ToolResult(
             ok=True,
             data=SubjectListResult(query=args.keyword, count=len(items), subjects=items),
-            sources=[_subject_citation(s.id, s.name_cn or s.name) for s in items[:5]],
+            sources=[_subject_citation(s.id, s.name_cn or s.name, s.image) for s in items[:5]],
         )
 
 
@@ -102,7 +102,7 @@ class GetSubjectTool(Tool):
         raw = await self.client.get_subject(args.subject_id)
         detail = SubjectDetail.from_raw(raw)
         return ToolResult(ok=True, data=detail,
-                          sources=[_subject_citation(detail.id, detail.name_cn or detail.name)])
+                          sources=[_subject_citation(detail.id, detail.name_cn or detail.name, detail.image)])
 
 
 class GetSubjectCharactersTool(Tool):
@@ -230,7 +230,7 @@ class GetPersonSubjectsTool(Tool):
         return ToolResult(
             ok=True,
             data=SubjectListResult(query=f"person:{args.person_id}", count=len(items), subjects=items),
-            sources=[_subject_citation(s.id, s.name_cn or s.name) for s in items[:5]],
+            sources=[_subject_citation(s.id, s.name_cn or s.name, s.image) for s in items[:5]],
         )
 
 

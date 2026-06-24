@@ -72,10 +72,12 @@ def _quality_niche(rating: dict) -> float:
 
 
 def _blank(x: dict) -> dict:
+    img = x.get("images") or {}
     return {
         "name": x.get("name_cn") or x.get("name"),
         "matched": set(), "graph": set(), "weight": 0.0,
         "rating": x.get("rating") or {},
+        "image": img.get("common") or img.get("medium") or img.get("grid"),
     }
 
 
@@ -99,6 +101,7 @@ class RecItem(BaseModel):
     reasons: list[str]
     bangumi_score: float | None = None
     rank: int | None = None
+    image: str | None = None
 
 
 class RecommendResult(BaseModel):
@@ -221,6 +224,7 @@ class RecommendTool(Tool):
                 reasons=sorted(c["matched"]) + sorted(c["graph"]),
                 bangumi_score=(c["rating"] or {}).get("score"),
                 rank=(c["rating"] or {}).get("rank"),
+                image=c.get("image"),
             ))
             if len(out) >= args.limit:
                 break
@@ -231,5 +235,8 @@ class RecommendTool(Tool):
             data=RecommendResult(
                 subject_type=args.subject_type, based_on_tags=recall_tags, mode=mode, items=out
             ),
-            sources=[Citation(title=f"Bangumi @{username}", url=f"https://bgm.tv/user/{username}", source="bangumi")],
+            sources=[
+                Citation(title=it.name, url=f"https://bgm.tv/subject/{it.id}", source="bangumi", image=it.image)
+                for it in out
+            ],
         )

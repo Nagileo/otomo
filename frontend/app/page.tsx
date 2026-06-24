@@ -1,10 +1,20 @@
 "use client";
 
 import { useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND ?? "http://localhost:8000";
 
-type Source = { title: string; url: string; source: string };
+type Source = { title: string; url: string; source: string; image?: string };
+
+function Markdown({ text }: { text: string }) {
+  return (
+    <div className="md">
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+    </div>
+  );
+}
 type TraceItem =
   | { kind: "call"; name: string; args: Record<string, unknown> }
   | { kind: "obs"; name: string; ok: boolean; summary: string }
@@ -117,26 +127,34 @@ export default function Home() {
           {messages.map((m, i) => (
             <div key={i} className={`msg ${m.role}`}>
               <div className="role">{m.role === "user" ? "你" : "Otomo"}</div>
-              <div className="bubble">{m.content}</div>
+              {m.role === "user" ? (
+                <div className="bubble">{m.content}</div>
+              ) : (
+                <div className="bubble">
+                  <Markdown text={m.content} />
+                </div>
+              )}
             </div>
           ))}
           {answer && (
             <div className="msg assistant">
               <div className="role">Otomo</div>
-              <div className="bubble">{answer}▍</div>
+              <div className="bubble">
+                <Markdown text={answer + "▍"} />
+              </div>
             </div>
           )}
           {sources.length > 0 && (
             <div className="sources">
-              来源：
-              {sources.map((s, i) => (
-                <span key={i}>
-                  {" "}
-                  <a href={s.url} target="_blank" rel="noreferrer">
-                    {s.title}
+              <div className="src-label">来源 / 相关</div>
+              <div className="src-cards">
+                {sources.map((s, i) => (
+                  <a key={i} className="src-card" href={s.url} target="_blank" rel="noreferrer" title={s.title}>
+                    {s.image ? <img src={s.image} alt="" loading="lazy" /> : <div className="noimg" />}
+                    <span className="src-title">{s.title}</span>
                   </a>
-                </span>
-              ))}
+                ))}
+              </div>
             </div>
           )}
           {followups.length > 0 && (

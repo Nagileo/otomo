@@ -22,6 +22,7 @@ class Citation(BaseModel):
     title: str
     url: str
     source: str = "bangumi"  # bangumi / moegirl / wikipedia ...
+    image: str | None = None  # 封面图 URL（作品来源时有，前端渲染卡片缩略图）
 
 
 T = TypeVar("T", bound=BaseModel)

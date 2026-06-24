@@ -19,6 +19,13 @@ class Rating(BaseModel):
     count: dict[str, int] | None = None  # 1~10 分各有多少人打 → 口碑分布（集中高分/双峰两极）
 
 
+def _image_of(raw: dict) -> str | None:
+    img = raw.get("images")
+    if isinstance(img, dict):
+        return img.get("common") or img.get("medium") or img.get("grid") or None
+    return None
+
+
 class SubjectBrief(BaseModel):
     model_config = _BASE
     id: int
@@ -30,6 +37,7 @@ class SubjectBrief(BaseModel):
     score: float | None = None
     rank: int | None = None
     role: str | None = None  # 在该作品里的职责/角色（来自关系边 staff，如 主演/配音 角色名）
+    image: str | None = None  # 封面图 URL
 
     @classmethod
     def from_raw(cls, raw: dict) -> "SubjectBrief":
@@ -45,6 +53,7 @@ class SubjectBrief(BaseModel):
             score=rating.get("score") if isinstance(rating, dict) else None,
             rank=rating.get("rank") if isinstance(rating, dict) else None,
             role=raw.get("staff"),
+            image=_image_of(raw),
         )
 
 
@@ -58,6 +67,7 @@ class SubjectDetail(BaseModel):
     summary: str = ""
     rating: Rating | None = None
     tags: list[str] = Field(default_factory=list)
+    image: str | None = None
 
     @classmethod
     def from_raw(cls, raw: dict) -> "SubjectDetail":
@@ -71,6 +81,7 @@ class SubjectDetail(BaseModel):
             summary=(raw.get("summary") or "")[:600],
             rating=Rating.model_validate(raw["rating"]) if raw.get("rating") else None,
             tags=tags[:15],
+            image=_image_of(raw),
         )
 
 
