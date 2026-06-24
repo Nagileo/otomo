@@ -67,6 +67,19 @@ async def _search(provider: str, api_key: str, query: str, n: int, timeout: floa
                 {"title": x.get("title", ""), "url": x.get("link", ""), "snippet": x.get("snippet", "")}
                 for x in (r.json().get("organic") or [])
             ]
+        if provider == "bocha":
+            r = await c.post(
+                "https://api.bochaai.com/v1/web-search",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={"query": query, "summary": True, "count": n},
+            )
+            r.raise_for_status()
+            pages = ((r.json().get("data") or {}).get("webPages") or {}).get("value") or []
+            return [
+                {"title": x.get("name", ""), "url": x.get("url", ""),
+                 "snippet": (x.get("summary") or x.get("snippet") or "")[:300]}
+                for x in pages
+            ]
         raise ValueError(f"未知 websearch provider: {provider}")
 
 
