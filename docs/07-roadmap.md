@@ -63,11 +63,16 @@
 
 ### 外部知识增强 & 综述档（对标豆包补广度，**补充非主体**；先于离线 CF）
 守住可验证+个性化+eval+RL 护城河。顺序：
-- [ ] **Web search 工具**（headline·全网/时效/话语兜底）：provider 抽象(Tavily/Exa/Serper/博查)，标低置信+挂源 ← **当前在做**
-- [ ] 追问建议 → B站/相关视频外链 → 轻量综述档(adaptive 单次思考+一次检索档) → 短评/长评观点聚合 → 关系/剧情多源 RAG 强化 → 延迟优化(后期)
-（详见 [04 外部知识增强](04-capabilities.md)、[02 §3.2](02-data-sources.md)）
+- [x] **外部知识增强档完成（6/6）**：
+  - **Web search**（tools/websearch，provider 抽象 tavily/exa/serper/bocha，无 key 优雅降级，标低置信挂源）。定价核实：tavily/exa 每月 1000 免费(个人首选,默认 tavily)、serper 一次性 2500 后 $1/千(质量最佳,付费首选)、bocha 需预充值(无免费)。
+  - **追问建议**（FollowupEvent + 前端 chips）。
+  - **B站相关视频外链**（find_related_videos）。
+  - **轻量综述档**（adaptive SYNTHESIS 路由：开放综述题→一次有界检索+分层综合，对标豆包单次思考）。
+  - **口碑**（Bangumi 评分分布直方图 rating.count + web_search 社区讨论；Bangumi 短评无 API 故 reframe）。
+  - **关系/剧情多源 RAG**（中文维基 wiki_search，CC BY-SA 有全文搜索；国内间歇不可达→优雅降级转 web_search；与萌娘互补）。
+  - 现 15+ 工具，路由 SIMPLE/SYNTHESIS/复杂plan 三档；延迟优化留后期。
 
-- [ ] 之后：**Track B-offline S0**（recsys-offline：公开数据集 + 评测套件 + 流行度基线 → ItemCF/MF → LambdaMART）；离线评测回头给在线做"留一法"自评 + 调权重。RL 推后。
+- [ ] **下一步：Track B-offline S0**（recsys-offline：公开数据集 + 评测套件 + 流行度基线 → ItemCF/MF → LambdaMART）；离线评测回头给在线做"留一法"自评 + 调权重。RL 推后。
 
 ## 下一步（A1 启动清单）
 1. `backend/` 脚手架（pyproject、FastAPI 空壳、`agent/` `tools/` 目录）。
