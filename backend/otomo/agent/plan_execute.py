@@ -108,6 +108,9 @@ class PlanExecuteRunner(AgentRunner):
                 yield ev
 
             answer = C.strip_leak("".join(parts))
+            if not answer.strip():  # 合成泄漏/为空 → 强制纯文本兜底重写
+                answer = await C.compose_fallback(self.llm, self.model, compose) or \
+                    "抱歉，这次没能整理出回答，请再问一次或换个问法。"
             state.messages.append({"role": "assistant", "content": answer})
             state.status = "done"
             yield FinalEvent(answer=answer, sources=sources, steps=steps)

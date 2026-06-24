@@ -90,6 +90,10 @@ export default function Home() {
         break;
       case "final":
         setSources(ev.sources ?? []);
+        if (ev.answer) {
+          answerRef.current = ev.answer; // 以最终完整答案为准，覆盖流式残留（如泄漏被截断的片段）
+          setAnswer(ev.answer);
+        }
         break;
       case "error":
         setTrace((t) => [...t, { kind: "obs", name: "error", ok: false, summary: ev.message }]);

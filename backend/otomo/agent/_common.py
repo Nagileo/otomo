@@ -178,3 +178,17 @@ async def stream_answer(
             if has_leak(acc):
                 break
             yield AnswerDeltaEvent(text=delta.content)
+
+
+_FORCE_TEXT = (
+    "基于以上已查到的信息，用纯自然语言给出最终回答。"
+    "禁止输出任何工具调用 / invoke / DSML / tool_calls 标记，只要给用户看的结论。"
+)
+
+
+async def compose_fallback(llm: AsyncOpenAI, model: str, messages: list[dict]) -> str:
+    """流式合成泄漏/为空时的兜底：彻底不带 tools 调一次，强制纯文本。"""
+    resp = await llm.chat.completions.create(
+        model=model, messages=messages + [{"role": "system", "content": _FORCE_TEXT}]
+    )
+    return strip_leak(resp.choices[0].message.content or "")
