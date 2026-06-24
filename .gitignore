@@ -44,6 +44,12 @@ wandb/
 trajectories/
 data/datasets/
 
+# ---- 凭证 / 离线数据集（绝不提交）----
+kaggle.json
+**/kaggle.json
+recsys-offline/data/
+*.csv
+
 # ---- OS / IDE ----
 .DS_Store
 Thumbs.db
