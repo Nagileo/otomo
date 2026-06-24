@@ -13,7 +13,10 @@
 - **S1 ✅**：ItemCF(BM25) + ALS/BPR-MF（implicit），同台对比流行度。`run_s1`。
   - 真实结果（Anime Rec DB，5.2M 正反馈/69k 用户，评测 5000）：
     流行度 NDCG@10=0.064 → **ItemCF 0.110(+72%) · BPR 0.133(+108%) · ALS 0.174(+171%)**。**ALS 完胜**。
-- **S2（核心·下一步）**：交叉特征 + **LightGBM LambdaMART** 重排（召回用 ALS），报 NDCG@10 再提升。
+- **S2 ✅（核心）**：ALS 召回 top-100 → 交叉特征 → **LightGBM LambdaMART** 重排。`run_s2`（防泄漏：LTR 训练/评测用户不相交）。
+  - 真实结果（评测 4000）：ALS NDCG@10=0.176 → **重排 0.181(+3%)、MRR 0.142→0.149(+5%)**。特征重要度 **genre_overlap≈als_score > members > rating**。
+  - 提升温和（ALS 已强 + 仅 6 基础特征）；漏斗/LTR/特征重要度/防泄漏评测全跑通，更大增益靠 S3 LLM 特征 + 更多交叉/序列特征。
+- **S3+**：LLM 派生特征/冷启动 → 双塔+Faiss → 导出接在线 → DPO/GRPO（推后）。
 - S3+：LLM 特征/冷启动 → 双塔+Faiss → 导出接在线 → DPO/GRPO（推后）。
 
 ## 数据集（S0 决定）
