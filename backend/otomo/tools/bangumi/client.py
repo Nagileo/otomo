@@ -124,6 +124,7 @@ class BangumiClient:
         sort: str = "match",
         limit: int = 10,
         tags: list[str] | None = None,
+        offset: int = 0,
     ) -> Any:
         body: dict[str, Any] = {"keyword": keyword, "sort": sort}
         filt: dict[str, Any] = {}
@@ -133,7 +134,9 @@ class BangumiClient:
             filt["tag"] = tags
         if filt:
             body["filter"] = filt
-        return await self._post("/v0/search/subjects", body, params={"limit": min(limit, 50)})
+        return await self._post(
+            "/v0/search/subjects", body, params={"limit": min(limit, 50), "offset": offset}
+        )
 
     async def get_subject(self, subject_id: int) -> Any:
         return await self._get(f"/v0/subjects/{subject_id}")
