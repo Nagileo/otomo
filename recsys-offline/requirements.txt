@@ -1,0 +1,8 @@
+# 离线推荐依赖（装进 conda env otomo）
+pandas>=2.0
+numpy>=1.26
+scipy>=1.11
+implicit>=0.7      # ItemCF / ALS / BPR（S1）
+lightgbm>=4.0      # LambdaMART 重排（S2）
+kaggle>=1.6        # 下载公开数据集
+pytest>=8.0

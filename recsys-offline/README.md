@@ -9,9 +9,11 @@
 新番时效由在线轨负责（LightFM hybrid 还能用元数据推训练未见的新番）。
 
 ## 阶段（对应 docs/06 §7）
-- **S0（当前）**：评测套件（Recall@K / NDCG@K / HitRate@K / MRR）+ 划分（leave-one-out / 时间分割）+ **流行度基线**。
-- S1：内容过滤 + ItemCF + ALS/BPR-MF，报各法 vs 流行度。
-- S2（核心）：交叉特征 + **LightGBM LambdaMART** 重排，报 NDCG@10 提升。
+- **S0 ✅**：评测套件（Recall@K / NDCG@K / HitRate@K / MRR）+ leave-one-out + **流行度基线**。`run_baseline`。
+- **S1 ✅**：ItemCF(BM25) + ALS/BPR-MF（implicit），同台对比流行度。`run_s1`。
+  - 真实结果（Anime Rec DB，5.2M 正反馈/69k 用户，评测 5000）：
+    流行度 NDCG@10=0.064 → **ItemCF 0.110(+72%) · BPR 0.133(+108%) · ALS 0.174(+171%)**。**ALS 完胜**。
+- **S2（核心·下一步）**：交叉特征 + **LightGBM LambdaMART** 重排（召回用 ALS），报 NDCG@10 再提升。
 - S3+：LLM 特征/冷启动 → 双塔+Faiss → 导出接在线 → DPO/GRPO（推后）。
 
 ## 数据集（S0 决定）
