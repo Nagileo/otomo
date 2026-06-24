@@ -22,6 +22,7 @@ from .contracts import (
     Citation,
     ErrorEvent,
     FinalEvent,
+    FollowupEvent,
     ToolCallEvent,
 )
 from .prompts import COMPOSE_PROMPT, SYSTEM_PROMPT
@@ -91,6 +92,9 @@ class ReActRunner(AgentRunner):
             state.messages.append({"role": "assistant", "content": answer})
             state.status = "done"
             yield FinalEvent(answer=answer, sources=sources, steps=steps)
+            followups = await C.gen_followups(self.llm, self.model, C.trim_messages(state.messages))
+            if followups:
+                yield FollowupEvent(questions=followups)
 
         except Exception as e:  # noqa: BLE001
             state.status = "failed"

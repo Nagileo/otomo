@@ -192,3 +192,25 @@ async def compose_fallback(llm: AsyncOpenAI, model: str, messages: list[dict]) -
         model=model, messages=messages + [{"role": "system", "content": _FORCE_TEXT}]
     )
     return strip_leak(resp.choices[0].message.content or "")
+
+
+_FOLLOWUP_PROMPT = (
+    "基于以上对话，列出用户可能接着想问的 2-3 个简短问题（每个不超过 20 字，二次元相关、"
+    "且能用你的工具回答）。只输出 JSON 字符串数组，如 [\"...\",\"...\"]，不要多余文字。"
+)
+
+
+async def gen_followups(llm: AsyncOpenAI, model: str, messages: list[dict]) -> list[str]:
+    """生成 2-3 个追问建议（一次轻量调用，失败返回空）。"""
+    try:
+        resp = await llm.chat.completions.create(
+            model=model, messages=messages + [{"role": "system", "content": _FOLLOWUP_PROMPT}]
+        )
+        txt = strip_leak(resp.choices[0].message.content or "")
+        i, j = txt.find("["), txt.rfind("]")
+        if 0 <= i < j:
+            arr = json.loads(txt[i : j + 1])
+            return [str(x).strip() for x in arr if str(x).strip()][:3]
+    except Exception:  # noqa: BLE001
+        pass
+    return []

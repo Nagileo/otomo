@@ -13,6 +13,7 @@ from .agent.contracts import (
     AnswerDeltaEvent,
     ErrorEvent,
     FinalEvent,
+    FollowupEvent,
     ObservationEvent,
     PlanEvent,
     ReflectEvent,
@@ -58,6 +59,10 @@ async def run(question: str, kind: str = "react") -> None:
                 print(f"\n\n{DIM}— 步数 {ev.steps}；来源 {len(ev.sources)} 条 —{RESET}")
                 for s in ev.sources:
                     print(f"  {DIM}· {s.title} {s.url}{RESET}")
+            elif isinstance(ev, FollowupEvent):
+                print(f"\n{BOLD}💡 你可能还想问：{RESET}")
+                for q in ev.questions:
+                    print(f"  {CYAN}· {q}{RESET}")
             elif isinstance(ev, ErrorEvent):
                 print(f"{RED}错误：{ev.message}{RESET}")
     finally:

@@ -16,17 +16,19 @@ export default function Home() {
   const [trace, setTrace] = useState<TraceItem[]>([]);
   const [answer, setAnswer] = useState("");
   const [sources, setSources] = useState<Source[]>([]);
+  const [followups, setFollowups] = useState<string[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const answerRef = useRef("");
 
-  async function send() {
-    const q = input.trim();
+  async function send(override?: string) {
+    const q = (override ?? input).trim();
     if (!q || busy) return;
     setInput("");
     setMessages((m) => [...m, { role: "user", content: q }]);
     setTrace([]);
     setSources([]);
+    setFollowups([]);
     setAnswer("");
     answerRef.current = "";
     setBusy(true);
@@ -95,6 +97,9 @@ export default function Home() {
           setAnswer(ev.answer);
         }
         break;
+      case "followup":
+        setFollowups(ev.questions ?? []);
+        break;
       case "error":
         setTrace((t) => [...t, { kind: "obs", name: "error", ok: false, summary: ev.message }]);
         break;
@@ -134,6 +139,15 @@ export default function Home() {
               ))}
             </div>
           )}
+          {followups.length > 0 && (
+            <div className="followups">
+              {followups.map((q, i) => (
+                <button key={i} className="chip" onClick={() => send(q)} disabled={busy}>
+                  {q}
+                </button>
+              ))}
+            </div>
+          )}
           <div className="row">
             <input
               type="text"
@@ -143,7 +157,7 @@ export default function Home() {
               onKeyDown={(e) => e.key === "Enter" && send()}
               disabled={busy}
             />
-            <button onClick={send} disabled={busy}>
+            <button onClick={() => send()} disabled={busy}>
               {busy ? "…" : "发送"}
             </button>
           </div>

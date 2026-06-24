@@ -132,6 +132,11 @@ class FinalEvent(BaseModel):
     steps: int = 0
 
 
+class FollowupEvent(BaseModel):
+    type: Literal["followup"] = "followup"
+    questions: list[str] = Field(default_factory=list)
+
+
 class ErrorEvent(BaseModel):
     type: Literal["error"] = "error"
     message: str
@@ -144,6 +149,7 @@ AgentEvent = (
     | ReflectEvent
     | AnswerDeltaEvent
     | FinalEvent
+    | FollowupEvent
     | ErrorEvent
 )
 

@@ -50,3 +50,10 @@ button:disabled { opacity: .5; cursor: default; }
 .trace-item .args { color: var(--dim); }
 .sources { font-size: 12px; color: var(--dim); margin-top: 10px; }
 .sources a { color: var(--accent); text-decoration: none; }
+
+.followups { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.chip {
+  background: #0c0e13; border: 1px solid var(--border); color: var(--text);
+  border-radius: 16px; padding: 6px 12px; font-size: 13px; cursor: pointer;
+}
+.chip:hover { border-color: var(--accent); color: var(--accent); }
