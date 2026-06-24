@@ -25,7 +25,8 @@ class Settings(BaseSettings):
     llm_model: str = "deepseek-v4-flash"
 
     # ---- Web search（全网兜底，provider 可换；不填 key 则 web_search 工具优雅报"未配置"）----
-    websearch_provider: str = "serper"  # serper(默认,中文覆盖最佳最便宜) / tavily / exa / bocha
+    # tavily/exa 每月 1000 次免费(个人开发首选)；serper 中文质量最佳但免费是一次性 2500；bocha 需预充值
+    websearch_provider: str = "tavily"
     websearch_api_key: str = ""
 
     # ---- Agent / HTTP ----

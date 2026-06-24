@@ -28,7 +28,13 @@ from .contracts import (
     ToolCallEvent,
 )
 from .plan_execute import MAX_REFLECT_ROUNDS
-from .prompts import COMPOSE_PROMPT, REFLECT_PROMPT, ROUTER_PLAN_PROMPT, SYSTEM_PROMPT
+from .prompts import (
+    COMPOSE_PROMPT,
+    REFLECT_PROMPT,
+    ROUTER_PLAN_PROMPT,
+    SYNTHESIS_COMPOSE,
+    SYSTEM_PROMPT,
+)
 from .registry import ToolRegistry
 
 
@@ -71,13 +77,25 @@ class AdaptiveRunner(AgentRunner):
                 ]
             )
             routed = C.strip_leak(router.choices[0].message.content or "")
-            simple = routed.strip().upper().startswith("SIMPLE")
+            up = routed.strip().upper()
+            compose_prompt = COMPOSE_PROMPT
 
-            if simple:
+            if up.startswith("SIMPLE"):
                 # 简单任务：直接 ReAct，一轮执行即可
                 yield PlanEvent(summary="简单任务 → 直接执行（ReAct）")
                 async for ev in C.run_tool_round(
                     self.llm, self.model, self.registry, state.messages, tools, self.max_iters, sources, seen_urls
+                ):
+                    if isinstance(ev, ToolCallEvent):
+                        steps += 1
+                    yield ev
+            elif up.startswith("SYNTHESIS"):
+                # 综述档：一次有界检索（RAG/web 为主）后综合，更快，对标豆包单次思考
+                yield PlanEvent(summary="综述题 → 一次检索后综合")
+                compose_prompt = SYNTHESIS_COMPOSE
+                async for ev in C.run_tool_round(
+                    self.llm, self.model, self.registry, state.messages, tools,
+                    min(self.max_iters, 3), sources, seen_urls,
                 ):
                     if isinstance(ev, ToolCallEvent):
                         steps += 1
@@ -109,7 +127,7 @@ class AdaptiveRunner(AgentRunner):
                     )
 
             # ---- 流式最终答案 ---- #
-            compose = C.trim_messages(state.messages) + [{"role": "system", "content": COMPOSE_PROMPT}]
+            compose = C.trim_messages(state.messages) + [{"role": "system", "content": compose_prompt}]
             parts: list[str] = []
             async for ev in C.stream_answer(self.llm, self.model, compose, tools):
                 parts.append(ev.text)

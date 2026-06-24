@@ -15,6 +15,7 @@ from .tools.moegirl import build_moegirl_tools
 from .tools.moegirl.client import MoegirlClient
 from .tools.profile import build_profile_tools
 from .tools.recommend import build_recommend_tools
+from .tools.videos import build_video_tools
 from .tools.websearch import build_websearch_tools
 
 RunnerKind = Literal["react", "plan", "adaptive"]
@@ -36,6 +37,8 @@ def build_registry(
     for tool in build_recommend_tools(client):
         registry.register(tool)
     for tool in build_websearch_tools():
+        registry.register(tool)
+    for tool in build_video_tools():
         registry.register(tool)
     return registry
 
