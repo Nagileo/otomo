@@ -31,8 +31,8 @@ class Settings(BaseSettings):
     # ---- Web search（全网兜底，provider 可换；不填 key 则 web_search 工具优雅报"未配置"）----
     # 分级：默认用 provider(免费优先 tavily)；高质量需求升级到 quality_provider(serper便宜/bocha中文最佳)。
     # 各引擎 key 全配好，切只改这两行。tavily/exa 月1000免费；serper 2500一次后$1/千(便宜+中文好)；bocha 1000/3月后¥36/千(最佳但贵)
-    websearch_provider: str = "tavily"          # 主引擎（免费优先）
-    websearch_quality_provider: str = "serper"  # 高质量升级引擎
+    websearch_provider: str = "tavily"          # 普通查询主引擎（免费优先）
+    websearch_quality_provider: str = "bocha"   # 高质量首选（博查二创/中文话语最好）；失败/配额满自动降级
     websearch_api_key: str = ""                 # 通用兜底
     websearch_tavily_key: str = ""
     websearch_serper_key: str = ""

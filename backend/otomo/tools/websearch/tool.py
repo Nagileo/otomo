@@ -14,6 +14,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from ...agent.contracts import Citation, Tool, ToolResult
 from ...config import settings
 
+# 降级兜底顺序（免费/便宜优先）：首选引擎失败或配额满时按此顺序往下试
+_FALLBACK_ORDER = ["tavily", "serper", "bocha", "exa"]
+
 
 class WebSearchArgs(BaseModel):
     query: str = Field(..., description="搜索词；查最新资讯/粉丝讨论/跨源信息时用")
@@ -95,28 +98,34 @@ class WebSearchTool(Tool):
     args_model = WebSearchArgs
     result_model = WebSearchResult
 
-    def __init__(self, provider: str | None = None, api_key: str | None = None) -> None:
+    def __init__(self, provider: str | None = None) -> None:
         self.primary = (provider or settings.websearch_provider).lower()
         self.quality = settings.websearch_quality_provider.lower()
-        self._forced_key = api_key  # 测试可强制指定
+
+    def _chain(self, high_quality: bool) -> list[str]:
+        """降级链：首选引擎在前，其余按兜底顺序在后，只保留已配 key 的。"""
+        preferred = self.quality if high_quality else self.primary
+        order = [preferred] + [p for p in _FALLBACK_ORDER if p != preferred]
+        return [p for p in dict.fromkeys(order) if settings.websearch_key(p)]
 
     async def run(self, args: WebSearchArgs) -> ToolResult[WebSearchResult]:
-        provider = self.quality if args.high_quality else self.primary
-        key = self._forced_key if self._forced_key is not None else settings.websearch_key(provider)
-        if not key:  # 升级引擎没配 key → 回退主引擎
-            provider = self.primary
-            key = self._forced_key if self._forced_key is not None else settings.websearch_key(provider)
-        if not key:
-            return ToolResult(
-                ok=False,
-                error="未配置搜索 API key：在 .env 设 WEBSEARCH_PROVIDER 与对应的 WEBSEARCH_<ENGINE>_KEY",
-            )
-        hits = await _search(provider, key, args.query, args.max_results, settings.http_timeout)
-        return ToolResult(
-            ok=True,
-            data=WebSearchResult(query=args.query, provider=provider, hits=[WebHit(**h) for h in hits]),
-            sources=[Citation(title=(h["title"] or h["url"])[:60], url=h["url"], source="web") for h in hits if h.get("url")],
-        )
+        chain = self._chain(args.high_quality)
+        if not chain:
+            return ToolResult(ok=False, error="未配置任何搜索 key：在 .env 设 WEBSEARCH_<ENGINE>_KEY")
+        last = ""
+        for provider in chain:  # 逐个尝试；报错(含 403 配额满)或空结果就降级到下一个
+            try:
+                hits = await _search(provider, settings.websearch_key(provider), args.query, args.max_results, settings.http_timeout)
+            except Exception as e:  # noqa: BLE001
+                last = f"{provider}: {type(e).__name__}"
+                continue
+            if hits:
+                return ToolResult(
+                    ok=True,
+                    data=WebSearchResult(query=args.query, provider=provider, hits=[WebHit(**h) for h in hits]),
+                    sources=[Citation(title=(h["title"] or h["url"])[:60], url=h["url"], source="web") for h in hits if h.get("url")],
+                )
+        return ToolResult(ok=False, error=f"全网搜索均无结果或失败（{last}）")
 
 
 def build_websearch_tools() -> list[Tool]:
