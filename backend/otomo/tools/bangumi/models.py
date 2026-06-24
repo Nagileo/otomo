@@ -16,6 +16,7 @@ class Rating(BaseModel):
     score: float | None = None
     rank: int | None = None
     total: int | None = None
+    count: dict[str, int] | None = None  # 1~10 分各有多少人打 → 口碑分布（集中高分/双峰两极）
 
 
 class SubjectBrief(BaseModel):

@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     moegirl_api_base: str = "https://zh.moegirl.org.cn/api.php"
     moegirl_user_agent: str = "otomo-rag/0.1 (+https://github.com/otomo-dev/otomo; non-commercial research)"
 
+    # ---- 中文维基 RAG（CC BY-SA，有全文搜索；补关系/剧情）----
+    wiki_api_base: str = "https://zh.wikipedia.org/w/api.php"
+    wiki_user_agent: str = "otomo-rag/0.1 (+https://github.com/otomo-dev/otomo)"
+
     # ---- LLM（OpenAI 兼容，默认 DeepSeek）----
     llm_base_url: str = "https://api.deepseek.com"
     llm_api_key: str = ""

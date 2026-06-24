@@ -8,6 +8,7 @@ from __future__ import annotations
 from pydantic import BaseModel, ConfigDict, Field
 
 from ...agent.contracts import Citation, Tool, ToolResult
+from .._rag import chunk_text, rank_chunks
 from .client import MoegirlClient
 
 
@@ -23,41 +24,6 @@ class LoreResult(BaseModel):
     title: str
     found: bool
     snippets: list[str] = Field(default_factory=list)
-
-
-def _chunk(text: str, size: int = 400) -> list[str]:
-    chunks: list[str] = []
-    buf = ""
-    for line in text.split("\n"):
-        line = line.strip()
-        if not line:
-            continue
-        if len(buf) + len(line) + 1 > size and buf:
-            chunks.append(buf)
-            buf = line
-        else:
-            buf = f"{buf}\n{line}" if buf else line
-    if buf:
-        chunks.append(buf)
-    return chunks
-
-
-def _bigrams(s: str) -> set[str]:
-    s = "".join(ch for ch in s if ch.strip())
-    return {s[i : i + 2] for i in range(len(s) - 1)} if len(s) >= 2 else {s}
-
-
-def _rank(query: str, chunks: list[str], top_k: int = 3) -> list[str]:
-    qb = _bigrams(query)
-    if not qb:
-        return chunks[:top_k]
-    scored = [(sum(1 for b in _bigrams(c) if b in qb), i, c) for i, c in enumerate(chunks)]
-    # 总分 + 保留导言（第 0 块）作为背景
-    scored.sort(key=lambda x: (-x[0], x[1]))
-    top = [c for score, _i, c in scored[:top_k] if score > 0]
-    if chunks and chunks[0] not in top:  # 导言通常含核心设定，带上
-        top = [chunks[0]] + top
-    return top[:top_k] if top else chunks[:1]
 
 
 class LoreSearchTool(Tool):
@@ -84,7 +50,7 @@ class LoreSearchTool(Tool):
         if not page or not page.get("extract"):
             return ToolResult(ok=True, data=LoreResult(title=titles[0], found=False, snippets=[]))
 
-        snippets = _rank(args.query, _chunk(page["extract"]))
+        snippets = rank_chunks(args.query, chunk_text(page["extract"]))
         cite = Citation(
             title=f"萌娘百科 — {page['title']}",
             url=page.get("fullurl") or "",
