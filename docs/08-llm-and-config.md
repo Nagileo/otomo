@@ -27,6 +27,7 @@
   - `BANGUMI_USER_AGENT=otomo-dev/otomo/0.1 (+repo-url)`（**强制**，通用 UA 会被拒）
   - `MOEGIRL_USER_AGENT=otomo-rag/0.1 (+repo-url; contact)`（礼貌 + 可联系）
   - `LLM_BASE_URL=` / `LLM_API_KEY=` / `LLM_MODEL=`（默认指向 DeepSeek）
+  - `WEBSEARCH_PROVIDER=`（tavily/exa/serper，默认 tavily）/ `WEBSEARCH_API_KEY=`（全网兜底搜索；不填则 web_search 工具优雅报"未配置"）
 - 切本地 Qwen：`LLM_BASE_URL` 指向本地 vLLM 的 OpenAI 兼容端点即可，其余不变。
 
 ## 4. 成本与限流意识

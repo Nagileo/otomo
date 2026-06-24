@@ -59,7 +59,15 @@
 - [x] **A4 产品能力① · 口味画像 + 长期记忆**：读用户 Bangumi 看过动画 → 聚合标签偏好/评分分布/年代/最爱 → agent 叙述"二次元人格"；结果落**文件式长期记忆**（cache/ltm，gitignored，下次默认读缓存）。多用户：传 username 读公开收藏 / 不传则 token→`/v0/me` 取当前账号。实测 @sunshineclover 画像准确。
 - [x] **Track B-online（推荐 · 在线）**：`recommend_subjects` 工具——口味画像 + 心境标签 → Bangumi 标签 heat 召回 → 排除已看 → (个人标签权重 + 质量)重排，**通用 anime/book/music/game/real**；agent 据 matched_tags 解释、从用户描述提炼心境标签。实测 @sunshineclover 推荐贴合（轻音/辉夜/白箱…）。说明：线上无跨用户共现，故内容侧；CF/MF/LTR 属离线轨。
 - [x] **B-online baseline 修复 + 全类型化**：完全排除已看 / 系列去重 + 多样性 / 心境词→合法标签映射 / 打分归一 / 加深召回；口味画像加 `subject_type`（默认 anime）、提示词 ACGN 通用化；落"全覆盖原则 + 类型模型"于 docs。**诚实发现**：重度用户在核心题材内容召回会**饱和**（"据口味"无标签时几乎无未看候选）→ 印证必须上离线 CF；心境/跨类型（galgame 等）推荐良好。
-- [ ] 下一步：**Track B-offline S0**（recsys-offline：公开数据集 + 评测套件 + 流行度基线）→ ItemCF/MF → LambdaMART；在线推荐可加"留一法 on 真实收藏"自评、并补"按 staff/制作公司图谱召回"治饱和。RL 推后。
+- [x] **B-online 多策略召回 + 平衡打分**：图谱召回(监督/制作组/原作的未看作品，治饱和) + 冷门 niche(高分≥7.5低人气) + explore 口味拓展(次级标签) + LLM提名验证(check_subjects) + 评分补全(top候选 get_subject) + 平衡打分(affinity+封顶graph+质量) + 主动追问(prompt)。实测 @sunshineclover 饱和治好(1→多部佐藤順一作品)。
+
+### 外部知识增强 & 综述档（对标豆包补广度，**补充非主体**；先于离线 CF）
+守住可验证+个性化+eval+RL 护城河。顺序：
+- [ ] **Web search 工具**（headline·全网/时效/话语兜底）：provider 抽象(Tavily/Exa/Serper/博查)，标低置信+挂源 ← **当前在做**
+- [ ] 追问建议 → B站/相关视频外链 → 轻量综述档(adaptive 单次思考+一次检索档) → 短评/长评观点聚合 → 关系/剧情多源 RAG 强化 → 延迟优化(后期)
+（详见 [04 外部知识增强](04-capabilities.md)、[02 §3.2](02-data-sources.md)）
+
+- [ ] 之后：**Track B-offline S0**（recsys-offline：公开数据集 + 评测套件 + 流行度基线 → ItemCF/MF → LambdaMART）；离线评测回头给在线做"留一法"自评 + 调权重。RL 推后。
 
 ## 下一步（A1 启动清单）
 1. `backend/` 脚手架（pyproject、FastAPI 空壳、`agent/` `tools/` 目录）。
