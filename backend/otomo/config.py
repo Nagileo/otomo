@@ -29,23 +29,25 @@ class Settings(BaseSettings):
     llm_model: str = "deepseek-v4-flash"
 
     # ---- Web search（全网兜底，provider 可换；不填 key 则 web_search 工具优雅报"未配置"）----
-    # 切引擎只改 websearch_provider；各引擎 key 各放一处，全配好随时切。
-    # tavily/exa 每月1000免费；serper 一次性2500后$1/千(最便宜+中文好)；bocha 试用1000/3月、之后¥36/千(质量最好但贵)
-    websearch_provider: str = "tavily"  # tavily / serper / exa / bocha
-    websearch_api_key: str = ""         # 通用兜底（provider 专属 key 未填时用）
+    # 分级：默认用 provider(免费优先 tavily)；高质量需求升级到 quality_provider(serper便宜/bocha中文最佳)。
+    # 各引擎 key 全配好，切只改这两行。tavily/exa 月1000免费；serper 2500一次后$1/千(便宜+中文好)；bocha 1000/3月后¥36/千(最佳但贵)
+    websearch_provider: str = "tavily"          # 主引擎（免费优先）
+    websearch_quality_provider: str = "serper"  # 高质量升级引擎
+    websearch_api_key: str = ""                 # 通用兜底
     websearch_tavily_key: str = ""
     websearch_serper_key: str = ""
     websearch_exa_key: str = ""
     websearch_bocha_key: str = ""
 
-    def websearch_key(self) -> str:
-        """按当前 provider 取其专属 key，未填则回退通用 key。"""
+    def websearch_key(self, provider: str | None = None) -> str:
+        """取指定（或当前主）引擎的 key，未填则回退通用 key。"""
+        p = provider or self.websearch_provider
         per = {
             "tavily": self.websearch_tavily_key,
             "serper": self.websearch_serper_key,
             "exa": self.websearch_exa_key,
             "bocha": self.websearch_bocha_key,
-        }.get(self.websearch_provider, "")
+        }.get(p, "")
         return per or self.websearch_api_key
 
     # ---- Agent / HTTP ----

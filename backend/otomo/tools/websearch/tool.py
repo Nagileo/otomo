@@ -18,6 +18,9 @@ from ...config import settings
 class WebSearchArgs(BaseModel):
     query: str = Field(..., description="搜索词；查最新资讯/粉丝讨论/跨源信息时用")
     max_results: int = Field(5, ge=1, le=10)
+    high_quality: bool = Field(
+        False, description="需要更高质量/中文粉丝话语/深度综述时设 true，升级到更强引擎；普通查询留 false（免费引擎）"
+    )
 
 
 class WebHit(BaseModel):
@@ -93,19 +96,25 @@ class WebSearchTool(Tool):
     result_model = WebSearchResult
 
     def __init__(self, provider: str | None = None, api_key: str | None = None) -> None:
-        self.provider = (provider or settings.websearch_provider).lower()
-        self.api_key = api_key if api_key is not None else settings.websearch_key()
+        self.primary = (provider or settings.websearch_provider).lower()
+        self.quality = settings.websearch_quality_provider.lower()
+        self._forced_key = api_key  # 测试可强制指定
 
     async def run(self, args: WebSearchArgs) -> ToolResult[WebSearchResult]:
-        if not self.api_key:
+        provider = self.quality if args.high_quality else self.primary
+        key = self._forced_key if self._forced_key is not None else settings.websearch_key(provider)
+        if not key:  # 升级引擎没配 key → 回退主引擎
+            provider = self.primary
+            key = self._forced_key if self._forced_key is not None else settings.websearch_key(provider)
+        if not key:
             return ToolResult(
                 ok=False,
-                error="未配置搜索 API key：在 .env 设 WEBSEARCH_API_KEY 与 WEBSEARCH_PROVIDER(tavily/exa/serper)",
+                error="未配置搜索 API key：在 .env 设 WEBSEARCH_PROVIDER 与对应的 WEBSEARCH_<ENGINE>_KEY",
             )
-        hits = await _search(self.provider, self.api_key, args.query, args.max_results, settings.http_timeout)
+        hits = await _search(provider, key, args.query, args.max_results, settings.http_timeout)
         return ToolResult(
             ok=True,
-            data=WebSearchResult(query=args.query, provider=self.provider, hits=[WebHit(**h) for h in hits]),
+            data=WebSearchResult(query=args.query, provider=provider, hits=[WebHit(**h) for h in hits]),
             sources=[Citation(title=(h["title"] or h["url"])[:60], url=h["url"], source="web") for h in hits if h.get("url")],
         )
 
