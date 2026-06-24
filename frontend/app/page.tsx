@@ -7,7 +7,8 @@ const BACKEND = process.env.NEXT_PUBLIC_BACKEND ?? "http://localhost:8000";
 type Source = { title: string; url: string; source: string };
 type TraceItem =
   | { kind: "call"; name: string; args: Record<string, unknown> }
-  | { kind: "obs"; name: string; ok: boolean; summary: string };
+  | { kind: "obs"; name: string; ok: boolean; summary: string }
+  | { kind: "note"; text: string };
 type Msg = { role: "user" | "assistant"; content: string };
 
 export default function Home() {
@@ -46,12 +47,17 @@ export default function Home() {
         const { value, done } = await reader.read();
         if (done) break;
         buf += decoder.decode(value, { stream: true });
-        const blocks = buf.split("\n\n");
+        // SSE 事件以空行分隔；后端用 \r\n\r\n，必须兼容 \r
+        const blocks = buf.split(/\r?\n\r?\n/);
         buf = blocks.pop() ?? "";
         for (const block of blocks) {
-          const dataLine = block.split("\n").find((l) => l.startsWith("data:"));
+          const dataLine = block.split(/\r?\n/).find((l) => l.startsWith("data:"));
           if (!dataLine) continue;
-          handleEvent(JSON.parse(dataLine.slice(5).trim()));
+          try {
+            handleEvent(JSON.parse(dataLine.slice(5).trim()));
+          } catch {
+            /* 忽略半包/ping */
+          }
         }
       }
     } catch (e) {
@@ -66,6 +72,12 @@ export default function Home() {
 
   function handleEvent(ev: any) {
     switch (ev.type) {
+      case "plan":
+        setTrace((t) => [...t, { kind: "note", text: `📋 ${ev.summary}` }]);
+        break;
+      case "reflect":
+        setTrace((t) => [...t, { kind: "note", text: ev.complete ? "↺ 反思：完整" : `↺ 反思：${ev.note}` }]);
+        break;
       case "tool_call":
         setTrace((t) => [...t, { kind: "call", name: ev.name, args: ev.args }]);
         break;
@@ -135,12 +147,18 @@ export default function Home() {
 
         <div className="panel">
           <h3>执行轨迹 (trace)</h3>
-          {trace.length === 0 && <div style={{ color: "var(--dim)", fontSize: 12 }}>工具调用与观察会实时出现在这里</div>}
+          {trace.length === 0 && !busy && (
+            <div style={{ color: "var(--dim)", fontSize: 12 }}>工具调用与观察会实时出现在这里</div>
+          )}
           {trace.map((t, i) =>
             t.kind === "call" ? (
               <div key={i} className="trace-item">
                 <span className="name">→ {t.name}</span>{" "}
                 <span className="args">{JSON.stringify(t.args)}</span>
+              </div>
+            ) : t.kind === "note" ? (
+              <div key={i} className="trace-item" style={{ color: "var(--dim)" }}>
+                {t.text}
               </div>
             ) : (
               <div key={i} className="trace-item">
@@ -148,6 +166,7 @@ export default function Home() {
               </div>
             )
           )}
+          {busy && <div className="trace-item" style={{ color: "var(--accent)" }}>● 处理中…（推荐类查询可能要十几秒）</div>}
         </div>
       </div>
     </div>
