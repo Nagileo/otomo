@@ -10,6 +10,7 @@ from .agent.react import ReActRunner
 from .agent.registry import ToolRegistry
 from .memory import LongTermMemory
 from .tools.comments import build_comment_tools
+from .tools.community import build_community_tools
 from .tools.bangumi import build_bangumi_tools
 from .tools.bangumi.client import BangumiClient
 from .tools.moegirl import build_moegirl_tools
@@ -38,6 +39,8 @@ def build_registry(
     for tool in build_wiki_tools():
         registry.register(tool)
     for tool in build_comment_tools():
+        registry.register(tool)
+    for tool in build_community_tools():
         registry.register(tool)
     for tool in build_profile_tools(client, ltm or LongTermMemory()):
         registry.register(tool)
