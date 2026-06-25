@@ -44,6 +44,19 @@ def strip_leak(text: str) -> str:
     return text[:idx].strip()
 
 
+_BAD_FINAL_ANSWERS = {"<", "<|", "<｜", "｜", "|"}
+
+
+def should_fallback_answer(answer: str, leaked: list[bool] | None = None) -> bool:
+    """判断最终答案是否只是 DSML / tool-call 泄漏残片，需强制纯文本重写。"""
+    s = answer.strip()
+    if not s or s in _BAD_FINAL_ANSWERS:
+        return True
+    if len(s) < 3 and any(ch in s for ch in "<｜|"):
+        return True
+    return bool(leaked) and len(s) < 20
+
+
 def safe_json(s: str | None) -> dict[str, Any]:
     if not s:
         return {}
@@ -195,9 +208,13 @@ async def run_tool_round(
 
 
 async def stream_answer(
-    llm: AsyncOpenAI, model: str, messages: list[dict], tools: list[dict]
+    llm: AsyncOpenAI, model: str, messages: list[dict], tools: list[dict],
+    leaked: list[bool] | None = None,
 ) -> AsyncIterator[AnswerDeltaEvent]:
-    """无工具（tool_choice=none）的流式最终答案；一旦冒出工具标记立即停止吐。"""
+    """无工具（tool_choice=none）的流式最终答案；一旦冒出工具标记立即停止吐，并把 True 记入 leaked。
+
+    leaked 让调用方知道"流式中途漏了 DSML 标记"——即使已 yield 了残片（如单个"<"），
+    也能据此触发纯文本兜底，而不是把残片当最终答案。"""
     stream = await llm.chat.completions.create(
         model=model, messages=messages, tools=tools, tool_choice="none", stream=True
     )
@@ -209,6 +226,8 @@ async def stream_answer(
         if delta and delta.content:
             acc += delta.content
             if has_leak(acc):
+                if leaked is not None:
+                    leaked.append(True)
                 break
             yield AnswerDeltaEvent(text=delta.content)
 

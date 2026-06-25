@@ -2,7 +2,7 @@
 
 - 不传 username 时用 token 经 /v0/me 解析当前用户（你自己的号）。
 - 传 username 则读其公开收藏（多用户、零授权）。
-- 结果写入长期记忆；下次默认读缓存（refresh=true 可强制重算）。
+- 当前开发阶段每次按最新收藏重算；上线后再按需要启用缓存。
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from ...memory import LongTermMemory
 from ...profile import TasteProfile, compute_taste_profile
 from ..bangumi.client import SUBJECT_TYPE, BangumiClient
 
-_MAX_ITEMS = 300  # 首版上限，控制调用量
+_MAX_ITEMS = 1000  # 重度用户常 >300，尽量拉全（分页每页 50）；再大就分批/采样
 
 
 class TasteArgs(BaseModel):
@@ -25,7 +25,7 @@ class TasteArgs(BaseModel):
     username: str | None = Field(
         None, description="Bangumi 用户名；不传则用当前登录账号（需 token）"
     )
-    refresh: bool = Field(False, description="是否忽略长期记忆缓存、强制重新计算")
+    refresh: bool = Field(False, description="兼容参数；当前开发阶段始终重新计算")
 
 
 class TasteProfileTool(Tool):
@@ -37,9 +37,8 @@ class TasteProfileTool(Tool):
     args_model = TasteArgs
     result_model = TasteProfile
 
-    def __init__(self, client: BangumiClient, ltm: LongTermMemory) -> None:
+    def __init__(self, client: BangumiClient, _ltm: LongTermMemory) -> None:
         self.client = client
-        self.ltm = ltm
 
     async def run(self, args: TasteArgs) -> ToolResult[TasteProfile]:
         username = args.username
@@ -47,21 +46,10 @@ class TasteProfileTool(Tool):
             me = await self.client.get_me()
             username = me.get("username") or str(me.get("id"))
 
-        key = f"{username}:{args.subject_type}"  # 每类型一份画像
-        if not args.refresh:
-            cached = self.ltm.get("taste", key)
-            if cached:
-                return ToolResult(
-                    ok=True,
-                    data=TasteProfile.model_validate(cached),
-                    sources=[Citation(title=f"Bangumi @{username}", url=f"https://bgm.tv/user/{username}", source="bangumi")],
-                )
-
         items = await self.client.get_all_user_collections(
             username, SUBJECT_TYPE[args.subject_type], collection_type=2, max_items=_MAX_ITEMS
         )
         profile = compute_taste_profile(username, items)
-        self.ltm.set("taste", key, profile.model_dump())
         return ToolResult(
             ok=True,
             data=profile,

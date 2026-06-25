@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ...agent.contracts import Tool, ToolResult
 from ..bangumi.client import SUBJECT_TYPE, BangumiClient
 
-_MAX_COLLECT = 800
+_MAX_COLLECT = 1000
 _MAX_TITLES = 15
 
 

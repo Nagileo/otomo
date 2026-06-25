@@ -91,6 +91,7 @@ class VerticalLinksTool(Tool):
             if intent == "guide":
                 add("泛式", "https://space.bilibili.com/63231", "评价向漫评/导视 UP")
                 add("瓶子君152", "https://space.bilibili.com/730732", "评价向漫评 UP")
+                add("台长", "https://space.bilibili.com/213741", "综合漫评/动画杂谈 UP")
         if want("discuss"):
             for keys, sites in _THEME_SITES:  # 题材社区（按 tag）
                 if any(any(k in tag for k in keys) for tag in (args.tags or [])):

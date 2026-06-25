@@ -44,6 +44,7 @@ class FindVideosTool(Tool):
         links = [
             VideoLink(label=f"{q} · 综合", url=_bili(q)),
             VideoLink(label=f"{q} · 解析/考据", url=_bili(f"{q} 解析 考据")),
+            VideoLink(label=f"{q} · 台长", url=_bili(f"{q} 台长")),
             VideoLink(label=f"{q} · 二创/MAD", url=_bili(f"{q} MAD")),
         ]
         return ToolResult(

@@ -27,7 +27,7 @@ from ..bangumi.client import SUBJECT_TYPE, BangumiClient
 
 _RECALL_PER_TAG = 50
 _MAX_RECALL_TAGS = 8
-_MAX_COLLECT = 800
+_MAX_COLLECT = 1000
 _NICHE_OFFSET = 30        # 冷门模式：跳过最热门，挖热度榜中尾部
 _GRAPH_FAV = 3
 _GRAPH_ROLES = {"导演", "监督", "动画制作", "原作", "系列构成", "脚本", "制作"}

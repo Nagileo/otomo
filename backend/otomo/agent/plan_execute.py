@@ -104,12 +104,13 @@ class PlanExecuteRunner(AgentRunner):
             # ---- 4. COMPOSE（流式最终答案）---- #
             compose = C.trim_messages(state.messages) + [{"role": "system", "content": COMPOSE_PROMPT}]
             parts: list[str] = []
-            async for ev in C.stream_answer(self.llm, self.model, compose, tools):
+            leaked: list[bool] = []
+            async for ev in C.stream_answer(self.llm, self.model, compose, tools, leaked):
                 parts.append(ev.text)
                 yield ev
 
             answer = C.strip_leak("".join(parts))
-            if not answer.strip():  # 合成泄漏/为空 → 强制纯文本兜底重写
+            if C.should_fallback_answer(answer, leaked):
                 answer = await C.compose_fallback(self.llm, self.model, compose) or \
                     "抱歉，这次没能整理出回答，请再问一次或换个问法。"
             state.messages.append({"role": "assistant", "content": answer})

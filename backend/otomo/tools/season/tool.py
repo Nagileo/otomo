@@ -24,10 +24,25 @@ def _air_range(year: int, month: int) -> tuple[str, str]:
     return start, end
 
 
+def _guides(year: int, month: int) -> list["GuideLink"]:
+    gq = quote(f"{year}年{month}月 新番导视")
+    rq = quote(f"{year}年{month}月 新番 推荐")
+    return [
+        GuideLink(site="名作之壁吧", url=f"https://search.bilibili.com/all?keyword={gq}", note="数据向新番导视（最推）"),
+        GuideLink(site="yuc.wiki", url="https://yuc.wiki/", note="放送时间表/数据（按季归档）"),
+        GuideLink(site="漫评 UP（泛式/瓶子君/台长等）", url=f"https://search.bilibili.com/all?keyword={rq}", note="评价向导视/推荐视频"),
+    ]
+
+
 class SeasonArgs(BaseModel):
     year: int = Field(..., description="年份，如 2024")
     month: Literal[1, 4, 7, 10] = Field(..., description="季度起始月：1 冬 / 4 春 / 7 夏 / 10 秋")
     limit: int = Field(15, ge=1, le=30)
+
+
+class YearAnimeArgs(BaseModel):
+    year: int = Field(..., description="年份，如 2027；可查未来年份，结果仅代表 Bangumi 已收录且有播出日期的动画")
+    limit_per_season: int = Field(20, ge=1, le=30, description="每季度最多返回多少部")
 
 
 class GuideLink(BaseModel):
@@ -44,6 +59,13 @@ class SeasonResult(BaseModel):
     guides: list[GuideLink] = Field(default_factory=list)
 
 
+class YearAnimeResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    year: int
+    count: int
+    seasons: list[SeasonResult] = Field(default_factory=list)
+
+
 class ListSeasonAnimeTool(Tool):
     name = "list_season_anime"
     description = (
@@ -58,29 +80,60 @@ class ListSeasonAnimeTool(Tool):
     def __init__(self, client: BangumiClient) -> None:
         self.client = client
 
-    async def run(self, args: SeasonArgs) -> ToolResult[SeasonResult]:
-        start, end = _air_range(args.year, args.month)
+    async def _fetch_season(self, year: int, month: int, limit: int) -> SeasonResult:
+        start, end = _air_range(year, month)
         raw = await self.client.search_subjects(
-            "", subject_type=2, sort="heat", limit=args.limit, air_date=[f">={start}", f"<{end}"]
+            "", subject_type=2, sort="heat", limit=limit, air_date=[f">={start}", f"<{end}"]
         )
         anime = [SubjectBrief.from_raw(s) for s in (raw.get("data") or []) if s.get("id")]
-        season = f"{args.year} 年 {args.month} 月（{_SEASON_NAME[args.month]}）番"
-        gq = quote(f"{args.year}年{args.month}月 新番导视")
-        rq = quote(f"{args.year}年{args.month}月 新番 推荐")
-        guides = [
-            GuideLink(site="名作之壁吧", url=f"https://search.bilibili.com/all?keyword={gq}", note="数据向新番导视（最推）"),
-            GuideLink(site="yuc.wiki", url="https://yuc.wiki/", note="放送时间表/数据（按季归档）"),
-            GuideLink(site="漫评 UP（泛式/瓶子君等）", url=f"https://search.bilibili.com/all?keyword={rq}", note="评价向导视/推荐视频"),
-        ]
+        return SeasonResult(
+            season=f"{year} 年 {month} 月（{_SEASON_NAME[month]}）番",
+            count=len(anime),
+            anime=anime,
+            guides=_guides(year, month),
+        )
+
+    async def run(self, args: SeasonArgs) -> ToolResult[SeasonResult]:
+        result = await self._fetch_season(args.year, args.month, args.limit)
         return ToolResult(
             ok=True,
-            data=SeasonResult(season=season, count=len(anime), anime=anime, guides=guides),
+            data=result,
             sources=[
                 Citation(title=s.name_cn or s.name, url=f"https://bgm.tv/subject/{s.id}", source="bangumi", image=s.image)
-                for s in anime[:5]
+                for s in result.anime[:5]
+            ],
+        )
+
+
+class ListYearAnimeTool(Tool):
+    name = "list_year_anime"
+    description = (
+        "按全年四个季度列某年动画（1/4/7/10 月番），每季按 Bangumi heat 排。"
+        "用于『2027 年有什么番 / 明年有哪些动画化 / 某年新番总览』。"
+        "未来年份只代表 Bangumi **已收录且有 air_date** 的条目；查不到时不要断言没公开，只说当前 Bangumi 未收录。"
+    )
+    args_model = YearAnimeArgs
+    result_model = YearAnimeResult
+
+    def __init__(self, client: BangumiClient) -> None:
+        self.client = client
+        self._season_tool = ListSeasonAnimeTool(client)
+
+    async def run(self, args: YearAnimeArgs) -> ToolResult[YearAnimeResult]:
+        seasons = [
+            await self._season_tool._fetch_season(args.year, month, args.limit_per_season)
+            for month in (1, 4, 7, 10)
+        ]
+        anime = [s for season in seasons for s in season.anime]
+        return ToolResult(
+            ok=True,
+            data=YearAnimeResult(year=args.year, count=len(anime), seasons=seasons),
+            sources=[
+                Citation(title=s.name_cn or s.name, url=f"https://bgm.tv/subject/{s.id}", source="bangumi", image=s.image)
+                for s in anime[:8]
             ],
         )
 
 
 def build_season_tools(client: BangumiClient) -> list[Tool]:
-    return [ListSeasonAnimeTool(client)]
+    return [ListSeasonAnimeTool(client), ListYearAnimeTool(client)]
