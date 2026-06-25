@@ -26,6 +26,7 @@ _THEME_SITES: list[tuple[tuple[str, ...], list[tuple[str, str, str]]]] = [
     (("百合", "GL"), [
         ("百合会", "https://bbs.yamibo.com/forum.php", "百合作品论坛（动漫/漫画/轻小说区）"),
         ("FlowerMX-花梦", "https://space.bilibili.com/13181306", "百合向导视/推荐 UP"),
+        ("峻岸上的喀秋莎", "https://space.bilibili.com/228172909", "百合作品翻译 UP"),
     ]),
     (("芳文", "Kirara", "きらら", "日常系"), [
         ("芳文观星台", "https://space.bilibili.com/1585955812", "芳文社/きらら系盘点 UP"),
@@ -96,15 +97,22 @@ class VerticalLinksTool(Tool):
                     for s, u, n in sites:
                         add(s, u, n)
             if t == "game":  # galgame 圈
-                add("VNDB", f"https://vndb.org/v?q={q}", "galgame 权威库（评分/资料，也有 search_visual_novels 工具）")
+                add("VNDB", f"https://vndb.org/v?q={q}", "galgame 权威库（评分/资料，亦有 search_visual_novels 工具）")
+                add("批判空间", "https://erogamescape.dyndns.org/~ap2/ero/toukei_kaiseki/", "日系 galgame 打分站（权威评分）")
                 add("绯月 Kf", "https://bbs.kfpromax.com/", "galgame 社区/补丁")
                 add("月幕", "https://www.ymgal.games/", "galgame 资料/汉化")
+                add("galgame 吧", _tieba("galgame"), "galgame 讨论（贴吧）")
             elif t == "book":  # 轻小说圈
                 add("轻之国度", "https://www.lightnovel.fun/", "轻小说讨论/资源")
-            add("更广讨论", _bili(f"{name} 评价"), "B站漫评/NGA/S1 等（搜索）")
+                add("真白萌", "https://masiro.me/", "web 小说/轻小说")
+            add("NGA", "https://bbs.nga.cn/", "综合 ACG 讨论区（动漫区）")
+            add("S1", "https://stage1st.com/2b/", "综合 ACG 论坛（2 次元区）")
+            add("更广讨论", _bili(f"{name} 评价"), "B站漫评等（搜索）")
         if want("media"):
             add("Pixiv", f"https://www.pixiv.net/tags/{q}/artworks", "同人图/插画")
+            add("推特搜索", f"https://x.com/search?q={q}", "同人图/情报（X / Twitter）")
             add("网易云音乐", f"https://music.163.com/#/search/m/?s={q}", "OST/角色歌（歌单/乐评区）")
+            add("QQ音乐", f"https://y.qq.com/n/ryqq/search?w={q}", "OST/角色歌")
 
         return ToolResult(ok=True, data=VerticalLinksResult(name=name, intent=intent, links=links))
 
