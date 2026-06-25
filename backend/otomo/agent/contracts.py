@@ -25,6 +25,19 @@ class Citation(BaseModel):
     image: str | None = None  # 封面图 URL（作品来源时有，前端渲染卡片缩略图）
 
 
+class EntityRef(BaseModel):
+    """Bangumi 图谱实体的 canonical 引用。
+
+    图谱级 Verifier 的基石：把"答案文本/工具返回"锚定到 (type,id)，
+    用于 set-F1（答案实体集合 vs 真值集合）与路径边验证（重建 agent 走的图谱路径）。
+    """
+
+    type: Literal["subject", "person", "character"]
+    id: int
+    name: str
+    aliases: list[str] = Field(default_factory=list)  # 中日双名/别名，文本命中用
+
+
 T = TypeVar("T", bound=BaseModel)
 
 
@@ -113,6 +126,7 @@ class ObservationEvent(BaseModel):
     ok: bool
     summary: str
     sources: list[Citation] = Field(default_factory=list)
+    entities: list[EntityRef] = Field(default_factory=list)  # 该步返回的 canonical 实体（路径重建/校验用）
 
 
 class ReflectEvent(BaseModel):

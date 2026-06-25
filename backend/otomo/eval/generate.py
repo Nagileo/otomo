@@ -16,6 +16,7 @@ from pathlib import Path
 
 import yaml
 
+from ..agent.contracts import EntityRef
 from ..tools.bangumi.client import SUBJECT_TYPE, BangumiClient
 from .verifier import GoldenCase
 
@@ -58,6 +59,7 @@ async def gen_for_keyword(client: BangumiClient, kw: str) -> list[GoldenCase]:
         cases.append(GoldenCase(
             id=f"gen_{sid}_year", question=f"动画《{name}》是哪一年首播的？",
             kind="single_hop", expect_contains=[yr], min_tools=1,
+            truth_path=[("subject", sid)],  # 至少要查到该作品
             note="auto: subject.date",
         ))
 
@@ -66,12 +68,16 @@ async def gen_for_keyword(client: BangumiClient, kw: str) -> list[GoldenCase]:
     main = next((c for c in chars if c.get("relation") == "主角" and c.get("actors")), None)
     main = main or next((c for c in chars if c.get("actors")), None)
     if main:
-        cv = (main["actors"][0] or {}).get("name")
-        cname = main.get("name")
+        actor = main["actors"][0] or {}
+        cv, cv_id = actor.get("name"), actor.get("id")
+        cname, cid = main.get("name"), main.get("id")
         if cv and cname:
+            te = [EntityRef(type="person", id=cv_id, name=cv, aliases=[cv])] if cv_id else []
+            tp = [("subject", sid), ("character", cid), ("person", cv_id)] if (cid and cv_id) else []
             cases.append(GoldenCase(
                 id=f"gen_{sid}_cv", question=f"动画《{name}》里 {cname} 的声优是谁？",
                 kind="two_hop", expect_contains=[cv], min_tools=1,
+                truth_entities=te, truth_path=tp,
                 note="auto: subject→character→actor",
             ))
 
@@ -79,9 +85,13 @@ async def gen_for_keyword(client: BangumiClient, kw: str) -> list[GoldenCase]:
     persons = await client.get_subject_persons(sid)
     studio = next((p for p in persons if p.get("relation") == "动画制作" and p.get("name")), None)
     if studio:
+        st_id = studio.get("id")
+        te = [EntityRef(type="person", id=st_id, name=studio["name"], aliases=[studio["name"]])] if st_id else []
+        tp = [("subject", sid), ("person", st_id)] if st_id else []
         cases.append(GoldenCase(
             id=f"gen_{sid}_studio", question=f"动画《{name}》的动画制作公司是哪家？",
             kind="two_hop", expect_contains=[studio["name"]], min_tools=1,
+            truth_entities=te, truth_path=tp,
             note="auto: subject→persons(动画制作)",
         ))
     return cases

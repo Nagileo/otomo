@@ -5,18 +5,45 @@
   - '2022'
   min_tools: 1
   note: 'auto: subject.date'
+  truth_path:
+  - - subject
+    - 328609
 - id: gen_328609_cv
   question: 动画《孤独摇滚！》里 後藤ひとり 的声优是谁？
   expect_contains:
   - 青山吉能
   min_tools: 1
   note: 'auto: subject→character→actor'
+  truth_entities:
+  - type: person
+    id: 13684
+    name: 青山吉能
+    aliases:
+    - 青山吉能
+  truth_path:
+  - - subject
+    - 328609
+  - - character
+    - 87968
+  - - person
+    - 13684
 - id: gen_328609_studio
   question: 动画《孤独摇滚！》的动画制作公司是哪家？
   expect_contains:
   - CloverWorks
   min_tools: 1
   note: 'auto: subject→persons(动画制作)'
+  truth_entities:
+  - type: person
+    id: 32356
+    name: CloverWorks
+    aliases:
+    - CloverWorks
+  truth_path:
+  - - subject
+    - 328609
+  - - person
+    - 32356
 - id: gen_400602_year
   question: 动画《葬送的芙莉莲》是哪一年首播的？
   kind: single_hop
@@ -24,18 +51,45 @@
   - '2023'
   min_tools: 1
   note: 'auto: subject.date'
+  truth_path:
+  - - subject
+    - 400602
 - id: gen_400602_cv
   question: 动画《葬送的芙莉莲》里 フリーレン 的声优是谁？
   expect_contains:
   - 種﨑敦美
   min_tools: 1
   note: 'auto: subject→character→actor'
+  truth_entities:
+  - type: person
+    id: 7575
+    name: 種﨑敦美
+    aliases:
+    - 種﨑敦美
+  truth_path:
+  - - subject
+    - 400602
+  - - character
+    - 86246
+  - - person
+    - 7575
 - id: gen_400602_studio
   question: 动画《葬送的芙莉莲》的动画制作公司是哪家？
   expect_contains:
   - MADHOUSE
   min_tools: 1
   note: 'auto: subject→persons(动画制作)'
+  truth_entities:
+  - type: person
+    id: 603
+    name: MADHOUSE
+    aliases:
+    - MADHOUSE
+  truth_path:
+  - - subject
+    - 400602
+  - - person
+    - 603
 - id: gen_10380_year
   question: 动画《命运石之门》是哪一年首播的？
   kind: single_hop
@@ -43,18 +97,45 @@
   - '2011'
   min_tools: 1
   note: 'auto: subject.date'
+  truth_path:
+  - - subject
+    - 10380
 - id: gen_10380_cv
   question: 动画《命运石之门》里 椎名まゆり 的声优是谁？
   expect_contains:
   - 花澤香菜
   min_tools: 1
   note: 'auto: subject→character→actor'
+  truth_entities:
+  - type: person
+    id: 4765
+    name: 花澤香菜
+    aliases:
+    - 花澤香菜
+  truth_path:
+  - - subject
+    - 10380
+  - - character
+    - 12381
+  - - person
+    - 4765
 - id: gen_10380_studio
   question: 动画《命运石之门》的动画制作公司是哪家？
   expect_contains:
   - WHITE FOX
   min_tools: 1
   note: 'auto: subject→persons(动画制作)'
+  truth_entities:
+  - type: person
+    id: 7512
+    name: WHITE FOX
+    aliases:
+    - WHITE FOX
+  truth_path:
+  - - subject
+    - 10380
+  - - person
+    - 7512
 - id: gen_183878_year
   question: 动画《紫罗兰永恒花园》是哪一年首播的？
   kind: single_hop
@@ -62,18 +143,45 @@
   - '2018'
   min_tools: 1
   note: 'auto: subject.date'
+  truth_path:
+  - - subject
+    - 183878
 - id: gen_183878_cv
   question: 动画《紫罗兰永恒花园》里 ヴァイオレット・エヴァーガーデン 的声优是谁？
   expect_contains:
   - 石川由依
   min_tools: 1
   note: 'auto: subject→character→actor'
+  truth_entities:
+  - type: person
+    id: 5727
+    name: 石川由依
+    aliases:
+    - 石川由依
+  truth_path:
+  - - subject
+    - 183878
+  - - character
+    - 37344
+  - - person
+    - 5727
 - id: gen_183878_studio
   question: 动画《紫罗兰永恒花园》的动画制作公司是哪家？
   expect_contains:
   - 京都アニメーション
   min_tools: 1
   note: 'auto: subject→persons(动画制作)'
+  truth_entities:
+  - type: person
+    id: 2481
+    name: 京都アニメーション
+    aliases:
+    - 京都アニメーション
+  truth_path:
+  - - subject
+    - 183878
+  - - person
+    - 2481
 - id: gen_207195_year
   question: 动画《摇曳露营△》是哪一年首播的？
   kind: single_hop
@@ -81,18 +189,45 @@
   - '2018'
   min_tools: 1
   note: 'auto: subject.date'
+  truth_path:
+  - - subject
+    - 207195
 - id: gen_207195_cv
   question: 动画《摇曳露营△》里 各務原なでしこ 的声优是谁？
   expect_contains:
   - 花守ゆみり
   min_tools: 1
   note: 'auto: subject→character→actor'
+  truth_entities:
+  - type: person
+    id: 10503
+    name: 花守ゆみり
+    aliases:
+    - 花守ゆみり
+  truth_path:
+  - - subject
+    - 207195
+  - - character
+    - 56775
+  - - person
+    - 10503
 - id: gen_207195_studio
   question: 动画《摇曳露营△》的动画制作公司是哪家？
   expect_contains:
   - C-Station
   min_tools: 1
   note: 'auto: subject→persons(动画制作)'
+  truth_entities:
+  - type: person
+    id: 15461
+    name: C-Station
+    aliases:
+    - C-Station
+  truth_path:
+  - - subject
+    - 207195
+  - - person
+    - 15461
 - id: gen_55770_year
   question: 动画《进击的巨人》是哪一年首播的？
   kind: single_hop
@@ -100,18 +235,45 @@
   - '2013'
   min_tools: 1
   note: 'auto: subject.date'
+  truth_path:
+  - - subject
+    - 55770
 - id: gen_55770_cv
   question: 动画《进击的巨人》里 エレン・イェーガー 的声优是谁？
   expect_contains:
   - 梶裕貴
   min_tools: 1
   note: 'auto: subject→character→actor'
+  truth_entities:
+  - type: person
+    id: 5209
+    name: 梶裕貴
+    aliases:
+    - 梶裕貴
+  truth_path:
+  - - subject
+    - 55770
+  - - character
+    - 18101
+  - - person
+    - 5209
 - id: gen_55770_studio
   question: 动画《进击的巨人》的动画制作公司是哪家？
   expect_contains:
   - WIT STUDIO
   min_tools: 1
   note: 'auto: subject→persons(动画制作)'
+  truth_entities:
+  - type: person
+    id: 8481
+    name: WIT STUDIO
+    aliases:
+    - WIT STUDIO
+  truth_path:
+  - - subject
+    - 55770
+  - - person
+    - 8481
 - id: gen_51_year
   question: 动画《CLANNAD》是哪一年首播的？
   kind: single_hop
@@ -119,18 +281,45 @@
   - '2007'
   min_tools: 1
   note: 'auto: subject.date'
+  truth_path:
+  - - subject
+    - 51
 - id: gen_51_cv
   question: 动画《CLANNAD》里 古河渚 的声优是谁？
   expect_contains:
   - 中原麻衣
   min_tools: 1
   note: 'auto: subject→character→actor'
+  truth_entities:
+  - type: person
+    id: 4145
+    name: 中原麻衣
+    aliases:
+    - 中原麻衣
+  truth_path:
+  - - subject
+    - 51
+  - - character
+    - 4
+  - - person
+    - 4145
 - id: gen_51_studio
   question: 动画《CLANNAD》的动画制作公司是哪家？
   expect_contains:
   - 京都アニメーション
   min_tools: 1
   note: 'auto: subject→persons(动画制作)'
+  truth_entities:
+  - type: person
+    id: 2481
+    name: 京都アニメーション
+    aliases:
+    - 京都アニメーション
+  truth_path:
+  - - subject
+    - 51
+  - - person
+    - 2481
 - id: gen_485_year
   question: 动画《凉宫春日的忧郁》是哪一年首播的？
   kind: single_hop
@@ -138,15 +327,364 @@
   - '2006'
   min_tools: 1
   note: 'auto: subject.date'
+  truth_path:
+  - - subject
+    - 485
 - id: gen_485_cv
   question: 动画《凉宫春日的忧郁》里 キョン 的声优是谁？
   expect_contains:
   - 杉田智和
   min_tools: 1
   note: 'auto: subject→character→actor'
+  truth_entities:
+  - type: person
+    id: 4513
+    name: 杉田智和
+    aliases:
+    - 杉田智和
+  truth_path:
+  - - subject
+    - 485
+  - - character
+    - 47
+  - - person
+    - 4513
 - id: gen_485_studio
   question: 动画《凉宫春日的忧郁》的动画制作公司是哪家？
   expect_contains:
   - 京都アニメーション
   min_tools: 1
   note: 'auto: subject→persons(动画制作)'
+  truth_entities:
+  - type: person
+    id: 2481
+    name: 京都アニメーション
+    aliases:
+    - 京都アニメーション
+  truth_path:
+  - - subject
+    - 485
+  - - person
+    - 2481
+- id: gen_364450_year
+  question: 动画《莉可丽丝》是哪一年首播的？
+  kind: single_hop
+  expect_contains:
+  - '2022'
+  min_tools: 1
+  note: 'auto: subject.date'
+  truth_path:
+  - - subject
+    - 364450
+- id: gen_364450_cv
+  question: 动画《莉可丽丝》里 錦木千束 的声优是谁？
+  expect_contains:
+  - 安済知佳
+  min_tools: 1
+  note: 'auto: subject→character→actor'
+  truth_entities:
+  - type: person
+    id: 11485
+    name: 安済知佳
+    aliases:
+    - 安済知佳
+  truth_path:
+  - - subject
+    - 364450
+  - - character
+    - 108663
+  - - person
+    - 11485
+- id: gen_364450_studio
+  question: 动画《莉可丽丝》的动画制作公司是哪家？
+  expect_contains:
+  - A-1 Pictures
+  min_tools: 1
+  note: 'auto: subject→persons(动画制作)'
+  truth_entities:
+  - type: person
+    id: 3525
+    name: A-1 Pictures
+    aliases:
+    - A-1 Pictures
+  truth_path:
+  - - subject
+    - 364450
+  - - person
+    - 3525
+- id: gen_248175_year
+  question: 动画《辉夜大小姐想让我告白～天才们的恋爱头脑战～》是哪一年首播的？
+  kind: single_hop
+  expect_contains:
+  - '2019'
+  min_tools: 1
+  note: 'auto: subject.date'
+  truth_path:
+  - - subject
+    - 248175
+- id: gen_248175_cv
+  question: 动画《辉夜大小姐想让我告白～天才们的恋爱头脑战～》里 四宮かぐや 的声优是谁？
+  expect_contains:
+  - 古賀葵
+  min_tools: 1
+  note: 'auto: subject→character→actor'
+  truth_entities:
+  - type: person
+    id: 19606
+    name: 古賀葵
+    aliases:
+    - 古賀葵
+  truth_path:
+  - - subject
+    - 248175
+  - - character
+    - 66899
+  - - person
+    - 19606
+- id: gen_248175_studio
+  question: 动画《辉夜大小姐想让我告白～天才们的恋爱头脑战～》的动画制作公司是哪家？
+  expect_contains:
+  - A-1 Pictures
+  min_tools: 1
+  note: 'auto: subject→persons(动画制作)'
+  truth_entities:
+  - type: person
+    id: 3525
+    name: A-1 Pictures
+    aliases:
+    - A-1 Pictures
+  truth_path:
+  - - subject
+    - 248175
+  - - person
+    - 3525
+- id: gen_38326_year
+  question: 动画《JOJO的奇妙冒险》是哪一年首播的？
+  kind: single_hop
+  expect_contains:
+  - '1993'
+  min_tools: 1
+  note: 'auto: subject.date'
+  truth_path:
+  - - subject
+    - 38326
+- id: gen_38326_cv
+  question: 动画《JOJO的奇妙冒险》里 空条承太郎 的声优是谁？
+  expect_contains:
+  - 小杉十郎太
+  min_tools: 1
+  note: 'auto: subject→character→actor'
+  truth_entities:
+  - type: person
+    id: 4302
+    name: 小杉十郎太
+    aliases:
+    - 小杉十郎太
+  truth_path:
+  - - subject
+    - 38326
+  - - character
+    - 878
+  - - person
+    - 4302
+- id: gen_38326_studio
+  question: 动画《JOJO的奇妙冒险》的动画制作公司是哪家？
+  expect_contains:
+  - A.P.P.P.
+  min_tools: 1
+  note: 'auto: subject→persons(动画制作)'
+  truth_entities:
+  - type: person
+    id: 718
+    name: A.P.P.P.
+    aliases:
+    - A.P.P.P.
+  truth_path:
+  - - subject
+    - 38326
+  - - person
+    - 718
+- id: gen_245665_year
+  question: 动画《鬼灭之刃》是哪一年首播的？
+  kind: single_hop
+  expect_contains:
+  - '2019'
+  min_tools: 1
+  note: 'auto: subject.date'
+  truth_path:
+  - - subject
+    - 245665
+- id: gen_245665_cv
+  question: 动画《鬼灭之刃》里 竈門炭治郎 的声优是谁？
+  expect_contains:
+  - 佐藤聡美
+  min_tools: 1
+  note: 'auto: subject→character→actor'
+  truth_entities:
+  - type: person
+    id: 5003
+    name: 佐藤聡美
+    aliases:
+    - 佐藤聡美
+  truth_path:
+  - - subject
+    - 245665
+  - - character
+    - 57305
+  - - person
+    - 5003
+- id: gen_245665_studio
+  question: 动画《鬼灭之刃》的动画制作公司是哪家？
+  expect_contains:
+  - ufotable
+  min_tools: 1
+  note: 'auto: subject→persons(动画制作)'
+  truth_entities:
+  - type: person
+    id: 3059
+    name: ufotable
+    aliases:
+    - ufotable
+  truth_path:
+  - - subject
+    - 245665
+  - - person
+    - 3059
+- id: gen_54433_year
+  question: 动画《我的青春恋爱物语果然有问题》是哪一年首播的？
+  kind: single_hop
+  expect_contains:
+  - '2013'
+  min_tools: 1
+  note: 'auto: subject.date'
+  truth_path:
+  - - subject
+    - 54433
+- id: gen_54433_cv
+  question: 动画《我的青春恋爱物语果然有问题》里 比企谷八幡 的声优是谁？
+  expect_contains:
+  - 江口拓也
+  min_tools: 1
+  note: 'auto: subject→character→actor'
+  truth_entities:
+  - type: person
+    id: 5872
+    name: 江口拓也
+    aliases:
+    - 江口拓也
+  truth_path:
+  - - subject
+    - 54433
+  - - character
+    - 19039
+  - - person
+    - 5872
+- id: gen_54433_studio
+  question: 动画《我的青春恋爱物语果然有问题》的动画制作公司是哪家？
+  expect_contains:
+  - Brain's Base
+  min_tools: 1
+  note: 'auto: subject→persons(动画制作)'
+  truth_entities:
+  - type: person
+    id: 3329
+    name: Brain's Base
+    aliases:
+    - Brain's Base
+  truth_path:
+  - - subject
+    - 54433
+  - - person
+    - 3329
+- id: gen_243916_year
+  question: 动画《约定的梦幻岛》是哪一年首播的？
+  kind: single_hop
+  expect_contains:
+  - '2019'
+  min_tools: 1
+  note: 'auto: subject.date'
+  truth_path:
+  - - subject
+    - 243916
+- id: gen_243916_cv
+  question: 动画《约定的梦幻岛》里 エマ 的声优是谁？
+  expect_contains:
+  - 諸星すみれ
+  min_tools: 1
+  note: 'auto: subject→character→actor'
+  truth_entities:
+  - type: person
+    id: 5107
+    name: 諸星すみれ
+    aliases:
+    - 諸星すみれ
+  truth_path:
+  - - subject
+    - 243916
+  - - character
+    - 57376
+  - - person
+    - 5107
+- id: gen_243916_studio
+  question: 动画《约定的梦幻岛》的动画制作公司是哪家？
+  expect_contains:
+  - CloverWorks
+  min_tools: 1
+  note: 'auto: subject→persons(动画制作)'
+  truth_entities:
+  - type: person
+    id: 32356
+    name: CloverWorks
+    aliases:
+    - CloverWorks
+  truth_path:
+  - - subject
+    - 243916
+  - - person
+    - 32356
+- id: gen_329906_year
+  question: 动画《间谍过家家》是哪一年首播的？
+  kind: single_hop
+  expect_contains:
+  - '2022'
+  min_tools: 1
+  note: 'auto: subject.date'
+  truth_path:
+  - - subject
+    - 329906
+- id: gen_329906_cv
+  question: 动画《间谍过家家》里 ロイド・フォージャー 的声优是谁？
+  expect_contains:
+  - 江口拓也
+  min_tools: 1
+  note: 'auto: subject→character→actor'
+  truth_entities:
+  - type: person
+    id: 5872
+    name: 江口拓也
+    aliases:
+    - 江口拓也
+  truth_path:
+  - - subject
+    - 329906
+  - - character
+    - 71477
+  - - person
+    - 5872
+- id: gen_329906_studio
+  question: 动画《间谍过家家》的动画制作公司是哪家？
+  expect_contains:
+  - WIT STUDIO
+  min_tools: 1
+  note: 'auto: subject→persons(动画制作)'
+  truth_entities:
+  - type: person
+    id: 8481
+    name: WIT STUDIO
+    aliases:
+    - WIT STUDIO
+  truth_path:
+  - - subject
+    - 329906
+  - - person
+    - 8481

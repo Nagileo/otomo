@@ -16,6 +16,7 @@ from openai import AsyncOpenAI
 from .contracts import (
     AnswerDeltaEvent,
     Citation,
+    EntityRef,
     ObservationEvent,
     ToolCallEvent,
     ToolResult,
@@ -70,6 +71,37 @@ def summarize(result: ToolResult) -> str:
             names = [n for n in names if n]
             return f"{d.get('count', len(d[key]))} 条：{', '.join(names)}" if names else f"{d.get('count', 0)} 条"
     return d.get("name_cn") or d.get("name") or "ok"
+
+
+# 工具返回里承载实体的容器键 → 实体类型（items=recommend 结果，按 subject 计）
+_ENTITY_CONTAINERS = {
+    "subjects": "subject", "items": "subject",
+    "persons": "person", "characters": "character",
+}
+
+
+def _ref(it: dict, etype: str) -> EntityRef | None:
+    if not it.get("id"):
+        return None
+    name = it.get("name_cn") or it.get("name") or ""
+    aliases = [x for x in dict.fromkeys([it.get("name"), it.get("name_cn")]) if x]
+    return EntityRef(type=etype, id=int(it["id"]), name=name, aliases=aliases)
+
+
+def extract_entities(result: ToolResult) -> list[EntityRef]:
+    """从 typed ToolResult.data 提取 canonical 实体（图谱级校验 / 路径重建用，零额外 API）。"""
+    if not result.ok or result.data is None:
+        return []
+    d = result.data.model_dump(exclude_none=True)
+    out: list[EntityRef] = []
+    if d.get("id") and (d.get("name") or d.get("name_cn")):  # 单体详情（SubjectDetail 等）
+        if (r := _ref(d, "subject")):
+            out.append(r)
+    for key, etype in _ENTITY_CONTAINERS.items():            # 列表容器
+        for it in d.get(key) or []:
+            if isinstance(it, dict) and (r := _ref(it, etype)):
+                out.append(r)
+    return out
 
 
 def trim_messages(messages: list[dict], max_messages: int = 40) -> list[dict]:
@@ -127,7 +159,8 @@ async def step_tools(
                 seen_urls.add(c.url)
                 sources.append(c)
         yield ObservationEvent(
-            name=tc.function.name, ok=result.ok, summary=summarize(result), sources=result.sources
+            name=tc.function.name, ok=result.ok, summary=summarize(result),
+            sources=result.sources, entities=extract_entities(result),
         )
         messages.append({"role": "tool", "tool_call_id": tc.id, "content": result.to_observation()})
 
