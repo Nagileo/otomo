@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ...agent.contracts import Citation, Tool, ToolResult
 from ...config import settings
-from .._rag import chunk_text, rank_chunks
+from .._rag import chunk_text, hybrid_rank
 
 
 class WikiArgs(BaseModel):
@@ -74,7 +74,7 @@ class WikiSearchTool(Tool):
             extract = page.get("extract") or ""
             if not extract:
                 return ToolResult(ok=True, data=WikiResult(title=title, found=False))
-            snippets = rank_chunks(args.query, chunk_text(extract))
+            snippets = hybrid_rank(args.query, chunk_text(extract))
             cite = Citation(
                 title=f"维基百科 — {page.get('title', title)}",
                 url=page.get("fullurl") or page.get("canonicalurl") or "",

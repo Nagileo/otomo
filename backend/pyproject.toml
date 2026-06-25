@@ -22,6 +22,12 @@ dev = [
     "respx>=0.21",
     "ruff>=0.5",
 ]
+rag = [
+    # RAG 第二刀（hybrid + reranker）；不装则自动降级到 bigram 词法检索。
+    # torch 建议装 CPU 版：pip install torch --index-url https://download.pytorch.org/whl/cpu
+    "sentence-transformers>=3.0",
+    "rank-bm25>=0.2",
+]
 
 [project.scripts]
 otomo = "otomo.cli:main"

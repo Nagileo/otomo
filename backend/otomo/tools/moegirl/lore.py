@@ -8,7 +8,7 @@ from __future__ import annotations
 from pydantic import BaseModel, ConfigDict, Field
 
 from ...agent.contracts import Citation, Tool, ToolResult
-from .._rag import chunk_text, rank_chunks
+from .._rag import chunk_text, hybrid_rank
 from .client import MoegirlClient
 
 
@@ -50,7 +50,7 @@ class LoreSearchTool(Tool):
         if not page or not page.get("extract"):
             return ToolResult(ok=True, data=LoreResult(title=titles[0], found=False, snippets=[]))
 
-        snippets = rank_chunks(args.query, chunk_text(page["extract"]))
+        snippets = hybrid_rank(args.query, chunk_text(page["extract"]))
         cite = Citation(
             title=f"萌娘百科 — {page['title']}",
             url=page.get("fullurl") or "",

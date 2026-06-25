@@ -34,7 +34,8 @@ qdrant_storage/
 *.faiss
 *.index
 
-# 模型权重 / 训练产物
+# 模型权重 / 训练产物（含本地下载的 RAG 模型 otomo/models/，如 modelscope 拉的 bge）
+models/
 *.pt
 *.bin
 *.safetensors
