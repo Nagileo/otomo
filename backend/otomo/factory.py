@@ -18,6 +18,7 @@ from .tools.moegirl import build_moegirl_tools
 from .tools.moegirl.client import MoegirlClient
 from .tools.profile import build_profile_tools
 from .tools.recommend import build_recommend_tools
+from .tools.season import build_season_tools
 from .tools.videos import build_video_tools
 from .tools.vndb import build_vndb_tools
 from .tools.watchorder import build_watchorder_tools
@@ -51,6 +52,8 @@ def build_registry(
     for tool in build_profile_tools(client, ltm or LongTermMemory()):
         registry.register(tool)
     for tool in build_recommend_tools(client):
+        registry.register(tool)
+    for tool in build_season_tools(client):
         registry.register(tool)
     for tool in build_watchorder_tools(client):
         registry.register(tool)

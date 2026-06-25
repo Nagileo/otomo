@@ -125,6 +125,7 @@ class BangumiClient:
         limit: int = 10,
         tags: list[str] | None = None,
         offset: int = 0,
+        air_date: list[str] | None = None,
     ) -> Any:
         body: dict[str, Any] = {"keyword": keyword, "sort": sort}
         filt: dict[str, Any] = {}
@@ -132,6 +133,8 @@ class BangumiClient:
             filt["type"] = [subject_type]
         if tags:
             filt["tag"] = tags
+        if air_date:  # 季番查询：如 [">=2024-01-01", "<2024-04-01"]
+            filt["air_date"] = air_date
         if filt:
             body["filter"] = filt
         return await self._post(
