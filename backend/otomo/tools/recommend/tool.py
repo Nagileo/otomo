@@ -37,6 +37,8 @@ _CF_SEEDS = 8            # 取用户最爱的前 N 部作协同召回种子
 _CF_NBR = 20             # 每个种子取 i2i 的前 N 个邻居
 _CF_CAP = 1.5            # cf_bonus 封顶（协同是强个性化信号，略高于 graph 的 1.2）
 _SERIES_MAX_HOP = 2      # 系列入口回溯最大级数（S3→S2→S1 这种链）
+# 旁支关系（平行作品，不替换、只"提一嘴"）：外传 / 世界观分支 / 番外
+_SIDE_REL = {"外传", "相同世界观", "不同世界观", "番外篇"}
 
 _I2I_CACHE: dict[str, dict] = {}
 
@@ -230,17 +232,25 @@ class RecommendTool(Tool):
             except Exception:  # noqa: BLE001
                 pass
 
-    async def _resolve_entry(self, sid: int, stype: int, seen: set[int]):
-        """系列入口回溯：候选若是续集且前作未看，沿"前传"边回溯到入口作。
+    async def _series_context(self, sid: int, stype: int, seen: set[int]):
+        """一次查 relations，同时拿：①续集→回溯入口（顺序关系，要替换） ②同 IP 旁支（平行关系，只提示）。
 
-        无回溯返回 None；有则返回 (entry_sid, name, image, rating)。
-        前作已看则不回溯（推这部续集是合理的）。
+        返回 (entry, siblings)：
+          entry = (sid, name, image, rating)，或 None（本身是入口 / 前作已看，不替换）；
+          siblings = 旁支作品名列表（外传 / 世界观分支 / 番外，"提一嘴"用）。
         """
-        cur, last = sid, None
+        rels = await self.client.get_subject_relations(sid)
+        siblings = [
+            n for n in dict.fromkeys(
+                (r.get("name_cn") or r.get("name")) for r in (rels or [])
+                if r.get("relation") in _SIDE_REL and r.get("type") == stype and r.get("id")
+            ) if n
+        ][:3]
+
+        cur, last, cur_rels = sid, None, rels
         for _ in range(_SERIES_MAX_HOP):
-            rels = await self.client.get_subject_relations(cur)
             pre = next(
-                (r for r in (rels or [])
+                (r for r in (cur_rels or [])
                  if r.get("relation") == "前传" and r.get("type") == stype
                  and r.get("id") and r["id"] not in seen),
                 None,
@@ -248,15 +258,18 @@ class RecommendTool(Tool):
             if not pre:
                 break
             cur, last = pre["id"], pre
-        if last is None:
-            return None
-        try:
-            raw = await self.client.get_subject(cur)
-            img = raw.get("images") or {}
-            return (cur, raw.get("name_cn") or raw.get("name"),
-                    img.get("common") or img.get("medium"), raw.get("rating") or {})
-        except Exception:  # noqa: BLE001
-            return cur, (last.get("name_cn") or last.get("name")), None, {}
+            cur_rels = await self.client.get_subject_relations(cur)
+
+        entry = None
+        if last is not None:
+            try:
+                raw = await self.client.get_subject(cur)
+                img = raw.get("images") or {}
+                entry = (cur, raw.get("name_cn") or raw.get("name"),
+                         img.get("common") or img.get("medium"), raw.get("rating") or {})
+            except Exception:  # noqa: BLE001
+                entry = (cur, last.get("name_cn") or last.get("name"), None, {})
+        return entry, siblings
 
     async def run(self, args: RecommendArgs) -> ToolResult[RecommendResult]:
         stype = SUBJECT_TYPE[args.subject_type]
@@ -328,10 +341,12 @@ class RecommendTool(Tool):
                 continue  # 协同召回候选未被 enrich 补到名，跳过
             r_id, r_name, r_img, r_rating, extra = sid, c["name"], c.get("image"), c["rating"], []
             if args.use_series:
-                entry = await self._resolve_entry(sid, stype, seen)
-                if entry:  # 是续集且前作未看 → 换成入口作
+                entry, siblings = await self._series_context(sid, stype, seen)
+                if entry:  # 续集且前作未看 → 换成入口作（顺序关系）
                     r_id, r_name, r_img, r_rating = entry
-                    extra = [f"系列入口（《{c['name']}》的前作，建议从这部入坑）"]
+                    extra.append(f"系列入口（《{c['name']}》的前作，建议从这部入坑）")
+                if siblings:  # 同 IP 旁支 → 提一嘴（平行关系，不替换）
+                    extra.append("同 IP 还有：" + "、".join(f"《{s}》" for s in siblings))
             sk = _series_key(r_name)
             if r_id in seen_ids or sk in seen_series:  # 入口去重（多个续集回溯到同一入口）
                 continue
