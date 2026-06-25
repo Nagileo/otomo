@@ -58,9 +58,10 @@ class Check(BaseModel):
 
 
 class Metrics(BaseModel):
-    set_precision: float | None = None
+    set_precision: float | None = None  # 聚焦度（答案对齐真值的纯度，含"真值外真实实体"扣分）
     set_recall: float | None = None
     set_f1: float | None = None
+    hallucinated: int | None = None     # 幻觉实体数（Bangumi 搜不到=编造）；真值外但真实的不计入
     path_valid: bool | None = None
 
 
@@ -170,7 +171,10 @@ async def _set_f1(answer: str, truth: list[EntityRef], llm: AsyncOpenAI, model: 
     p = tp / denom_p if denom_p else 0.0
     r = tp / len(truth_ids) if truth_ids else 0.0
     f1 = 2 * p * r / (p + r) if (p + r) else 0.0
-    return Metrics(set_precision=round(p, 3), set_recall=round(r, 3), set_f1=round(f1, 3))
+    return Metrics(
+        set_precision=round(p, 3), set_recall=round(r, 3), set_f1=round(f1, 3),
+        hallucinated=hallucinated,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -207,9 +211,12 @@ async def verify(
     checks = _legacy_checks(case, answer, tools_called)
     metrics = Metrics()
 
-    if case.truth_entities and llm and client:  # 图谱级 set-F1（需依赖就绪）
+    if case.truth_entities and llm and client:  # 图谱级：多答真实信息不算错 → 答全真值(recall) + 不编造(零幻觉)
         metrics = await _set_f1(answer, case.truth_entities, llm, model, client)
-        checks.append(Check(label=f"set-F1≥0.5（={metrics.set_f1}）", passed=(metrics.set_f1 or 0) >= 0.5))
+        ok = (metrics.set_recall or 0) >= 0.5 and (metrics.hallucinated or 0) == 0
+        checks.append(Check(
+            label=f"recall≥0.5 且无幻觉（R={metrics.set_recall} 幻觉={metrics.hallucinated}）", passed=ok,
+        ))
     if case.truth_path and trace:  # 图谱级路径有效性
         metrics.path_valid = _path_valid(trace, case.truth_path)
         checks.append(Check(label="路径有效（覆盖真值图谱节点）", passed=metrics.path_valid))

@@ -12,16 +12,16 @@ class Settings(BaseSettings):
     # ---- Bangumi ----
     bangumi_api_base: str = "https://api.bgm.tv"
     # 强制 User-Agent，通用 UA 会被 Bangumi 拒绝
-    bangumi_user_agent: str = "otomo-dev/otomo/0.1 (+https://github.com/yourname/otomo)"
+    bangumi_user_agent: str = "Nagileo/otomo (+https://github.com/Nagileo/otomo)"
     bangumi_token: str | None = None
 
     # ---- 萌娘百科 RAG（按需取+缓存，绝不入库；见 docs/02）----
     moegirl_api_base: str = "https://zh.moegirl.org.cn/api.php"
-    moegirl_user_agent: str = "otomo-rag/0.1 (+https://github.com/otomo-dev/otomo; non-commercial research)"
+    moegirl_user_agent: str = "Nagileo/otomo-rag (+https://github.com/Nagileo/otomo; non-commercial research)"
 
     # ---- 中文维基 RAG（CC BY-SA，有全文搜索；补关系/剧情）----
     wiki_api_base: str = "https://zh.wikipedia.org/w/api.php"
-    wiki_user_agent: str = "otomo-rag/0.1 (+https://github.com/otomo-dev/otomo)"
+    wiki_user_agent: str = "Nagileo/otomo-rag (+https://github.com/Nagileo/otomo)"
 
     # ---- LLM（OpenAI 兼容，默认 DeepSeek）----
     llm_base_url: str = "https://api.deepseek.com"

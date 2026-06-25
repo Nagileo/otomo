@@ -79,7 +79,7 @@ async def main_async(args: argparse.Namespace) -> int:
             print(f"  {mark}  {DIM}tools={res.tools_called}{RESET}")
             m = res.metrics
             if m.set_f1 is not None:
-                print(f"  {DIM}set-F1={m.set_f1}  (P={m.set_precision} R={m.set_recall}){RESET}")
+                print(f"  {DIM}set-F1={m.set_f1}  (P={m.set_precision} R={m.set_recall} 幻觉={m.hallucinated}){RESET}")
             if m.path_valid is not None:
                 pv = f"{GREEN}✓{RESET}" if m.path_valid else f"{RED}✗{RESET}"
                 print(f"  {DIM}路径有效 {pv}{RESET}")
