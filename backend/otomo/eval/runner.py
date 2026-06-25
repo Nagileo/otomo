@@ -116,7 +116,7 @@ def main() -> None:
     ap.add_argument("--path", default=str(DEFAULT_CASES))
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--id", default="")
-    ap.add_argument("--runner", choices=["react", "plan", "adaptive"], default="react")
+    ap.add_argument("--runner", choices=["react", "plan", "adaptive", "langgraph"], default="react")
     args = ap.parse_args()
     raise SystemExit(asyncio.run(main_async(args)))
 

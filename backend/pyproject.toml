@@ -32,6 +32,11 @@ obs = [
     # 可选 Langfuse 上报（配 LANGFUSE_* 才生效；不装则只用本地 trace JSONL）
     "langfuse>=2.0",
 ]
+langgraph = [
+    # 框架对照实现（手搓 vs LangGraph 对比，见 docs/09）；不装则只用手搓 runner
+    "langgraph>=0.2",
+    "langchain-openai>=0.2",
+]
 
 [project.scripts]
 otomo = "otomo.cli:main"

@@ -21,7 +21,7 @@ from .tools.watchorder import build_watchorder_tools
 from .tools.websearch import build_websearch_tools
 from .tools.wiki import build_wiki_tools
 
-RunnerKind = Literal["react", "plan", "adaptive"]
+RunnerKind = Literal["react", "plan", "adaptive", "langgraph"]
 
 
 def build_registry(
@@ -60,4 +60,7 @@ def build_runner(
         return PlanExecuteRunner(registry)
     if kind == "react":
         return ReActRunner(registry)
+    if kind == "langgraph":  # 框架对照实现（需 pip install -e ".[langgraph]"）
+        from .agent.langgraph_runner import LangGraphRunner
+        return LangGraphRunner(registry)
     return AdaptiveRunner(registry)
