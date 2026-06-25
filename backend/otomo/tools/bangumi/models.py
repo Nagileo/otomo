@@ -152,3 +152,43 @@ class RelatedSubjectsResult(BaseModel):
     subject_id: int
     count: int
     relations: list[RelatedSubject] = Field(default_factory=list)
+
+
+_EP_TYPE_NAME = {0: "正片", 1: "SP", 2: "OP", 3: "ED", 4: "预告/其他", 6: "其他"}
+
+
+class EpisodeBrief(BaseModel):
+    """分集：ep_id + 集号 + 标题 + 首播 + 讨论数（讨论数即"分集口碑雷达"的结构化信号）。"""
+
+    model_config = _BASE
+    id: int                       # ep_id
+    sort: float = 0               # 全局序
+    ep: float | None = None       # 本类型内集号
+    type: int = 0
+    type_name: str = ""
+    airdate: str = ""
+    name: str = ""
+    name_cn: str = ""
+    comment: int = 0              # 讨论数（哪集最热/最有争议的免费信号）
+
+    @classmethod
+    def from_raw(cls, raw: dict) -> "EpisodeBrief":
+        t = raw.get("type") or 0
+        return cls(
+            id=raw.get("id"),
+            sort=raw.get("sort") or 0,
+            ep=raw.get("ep"),
+            type=t,
+            type_name=_EP_TYPE_NAME.get(t, "其他"),
+            airdate=raw.get("airdate") or "",
+            name=raw.get("name") or "",
+            name_cn=raw.get("name_cn") or "",
+            comment=raw.get("comment") or 0,
+        )
+
+
+class EpisodeListResult(BaseModel):
+    model_config = _BASE
+    subject_id: int
+    total: int = 0
+    episodes: list[EpisodeBrief] = Field(default_factory=list)

@@ -153,6 +153,16 @@ class BangumiClient:
         （galgame↔动画↔小说↔音乐）。每条带 relation=关系、type=条目类型。"""
         return await self._get(f"/v0/subjects/{subject_id}/subjects")
 
+    async def get_episodes(
+        self, subject_id: int, ep_type: int | None = None, limit: int = 100, offset: int = 0
+    ) -> Any:
+        """作品分集列表：每集 id(ep_id)/sort(全局序)/ep(本类型内集号)/type/airdate/name/comment(讨论数)。
+        ep_type: 0 正片 / 1 SP / 2 OP / 3 ED / 4 预告等（不传=全部）。"""
+        params: dict[str, Any] = {"subject_id": subject_id, "limit": min(limit, 200), "offset": offset}
+        if ep_type is not None:
+            params["type"] = ep_type
+        return await self._get("/v0/episodes", params)
+
     async def search_characters(self, keyword: str, limit: int = 10) -> Any:
         return await self._post(
             "/v0/search/characters", {"keyword": keyword}, params={"limit": min(limit, 50)}

@@ -13,6 +13,8 @@ from .client import SUBJECT_TYPE, BangumiClient
 from .models import (
     CharacterBrief,
     CharacterListResult,
+    EpisodeBrief,
+    EpisodeListResult,
     PersonBrief,
     PersonListResult,
     RelatedSubject,
@@ -273,6 +275,39 @@ class GetSubjectRelationsTool(Tool):
         )
 
 
+class EpisodesArgs(BaseModel):
+    subject_id: int = Field(..., description="Bangumi 条目 ID")
+    type: int | None = Field(
+        None, description="集类型：0 正片 / 1 SP / 2 OP / 3 ED；不传=全部。问『第几集 / 哪集讨论最热』通常用 0 正片"
+    )
+    limit: int = Field(30, ge=1, le=100)
+
+
+class GetEpisodesTool(Tool):
+    name = "get_subject_episodes"
+    description = (
+        "取作品的分集列表：每集 ep_id、集号、标题、首播日、**讨论数**。"
+        "用于『共多少集 / 第 X 集叫什么 / 各集播出时间 / 哪几集讨论最热（比讨论数）』，"
+        "也为分集讨论 / 防剧透提供 ep_id（按集号定位到具体 ep）。问正片传 type=0。"
+    )
+    args_model = EpisodesArgs
+    result_model = EpisodeListResult
+
+    def __init__(self, client: BangumiClient) -> None:
+        self.client = client
+
+    async def run(self, args: EpisodesArgs) -> ToolResult[EpisodeListResult]:
+        raw = await self.client.get_episodes(args.subject_id, args.type, limit=args.limit)
+        eps = [EpisodeBrief.from_raw(e) for e in (raw.get("data") or []) if e.get("id")]
+        return ToolResult(
+            ok=True,
+            data=EpisodeListResult(
+                subject_id=args.subject_id, total=raw.get("total") or len(eps), episodes=eps
+            ),
+            sources=[_subject_citation(args.subject_id, f"subject {args.subject_id} · 分集")],
+        )
+
+
 def build_bangumi_tools(client: BangumiClient) -> list[Tool]:
     return [
         SearchSubjectsTool(client),
@@ -280,6 +315,7 @@ def build_bangumi_tools(client: BangumiClient) -> list[Tool]:
         GetSubjectCharactersTool(client),
         GetSubjectPersonsTool(client),
         GetSubjectRelationsTool(client),
+        GetEpisodesTool(client),
         SearchCharactersTool(client),
         GetCharacterPersonsTool(client),
         SearchPersonsTool(client),
