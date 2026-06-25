@@ -75,7 +75,7 @@ def summarize(result: ToolResult) -> str:
 
 # 工具返回里承载实体的容器键 → 实体类型（items=recommend 结果，按 subject 计）
 _ENTITY_CONTAINERS = {
-    "subjects": "subject", "items": "subject",
+    "subjects": "subject", "items": "subject", "relations": "subject",
     "persons": "person", "characters": "character",
 }
 

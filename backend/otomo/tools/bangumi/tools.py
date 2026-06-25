@@ -15,6 +15,8 @@ from .models import (
     CharacterListResult,
     PersonBrief,
     PersonListResult,
+    RelatedSubject,
+    RelatedSubjectsResult,
     SubjectBrief,
     SubjectDetail,
     SubjectListResult,
@@ -62,6 +64,14 @@ class PersonSubjectsArgs(BaseModel):
         None, description="限定作品类型；问『配过哪些动画』时传 anime（会过滤掉音乐专辑等）"
     )
     limit: int = Field(30, ge=1, le=100, description="最多返回多少部")
+
+
+class SubjectRelationsArgs(BaseModel):
+    subject_id: int = Field(..., description="Bangumi 条目 ID")
+    type: Literal["anime", "book", "music", "game", "real"] | None = Field(
+        None, description="只看某类型关联条目；『改编动画』传 anime、『原作小说/漫画』传 book、『原作 galgame』传 game"
+    )
+    limit: int = Field(30, ge=1, le=100)
 
 
 # --------------------------------------------------------------------------- #
@@ -234,12 +244,42 @@ class GetPersonSubjectsTool(Tool):
         )
 
 
+class GetSubjectRelationsTool(Tool):
+    name = "get_subject_relations"
+    description = (
+        "取作品的**关联条目（跨媒体图谱边）**：改编/原作/续集/不同演绎/系列等，可跨类型"
+        "（galgame↔动画↔小说↔漫画↔音乐）。用于『这部动画的原作（小说/galgame）是什么』"
+        "『这部 galgame 改编成了哪些动画』『XX 的续作/前作/系列作』『原声集/角色歌』等跨媒体追溯。"
+    )
+    args_model = SubjectRelationsArgs
+    result_model = RelatedSubjectsResult
+
+    def __init__(self, client: BangumiClient) -> None:
+        self.client = client
+
+    async def run(self, args: SubjectRelationsArgs) -> ToolResult[RelatedSubjectsResult]:
+        raw = await self.client.get_subject_relations(args.subject_id)
+        want = SUBJECT_TYPE.get(args.type) if args.type else None
+        items = [
+            RelatedSubject.from_raw(r)
+            for r in (raw or [])
+            if r.get("id") and (want is None or r.get("type") == want)
+        ]
+        items = items[: args.limit]
+        return ToolResult(
+            ok=True,
+            data=RelatedSubjectsResult(subject_id=args.subject_id, count=len(items), relations=items),
+            sources=[_subject_citation(r.id, r.name_cn or r.name, r.image) for r in items[:5]],
+        )
+
+
 def build_bangumi_tools(client: BangumiClient) -> list[Tool]:
     return [
         SearchSubjectsTool(client),
         GetSubjectTool(client),
         GetSubjectCharactersTool(client),
         GetSubjectPersonsTool(client),
+        GetSubjectRelationsTool(client),
         SearchCharactersTool(client),
         GetCharacterPersonsTool(client),
         SearchPersonsTool(client),

@@ -44,6 +44,24 @@
     - 328609
   - - person
     - 32356
+- id: gen_328609_cross
+  question: 动画《孤独摇滚！》的原作（小说 / 漫画）叫什么名字？
+  expect_contains:
+  - 孤独摇滚！
+  min_tools: 1
+  note: 'auto: subject→relations(cross-media)'
+  truth_entities:
+  - type: subject
+    id: 241088
+    name: 孤独摇滚！
+    aliases:
+    - ぼっち・ざ・ろっく！
+    - 孤独摇滚！
+  truth_path:
+  - - subject
+    - 328609
+  - - subject
+    - 241088
 - id: gen_400602_year
   question: 动画《葬送的芙莉莲》是哪一年首播的？
   kind: single_hop
@@ -90,6 +108,24 @@
     - 400602
   - - person
     - 603
+- id: gen_400602_cross
+  question: 动画《葬送的芙莉莲》的原作（小说 / 漫画）叫什么名字？
+  expect_contains:
+  - 葬送的芙莉莲
+  min_tools: 1
+  note: 'auto: subject→relations(cross-media)'
+  truth_entities:
+  - type: subject
+    id: 305429
+    name: 葬送的芙莉莲
+    aliases:
+    - 葬送のフリーレン
+    - 葬送的芙莉莲
+  truth_path:
+  - - subject
+    - 400602
+  - - subject
+    - 305429
 - id: gen_10380_year
   question: 动画《命运石之门》是哪一年首播的？
   kind: single_hop
@@ -136,6 +172,24 @@
     - 10380
   - - person
     - 7512
+- id: gen_10380_cross
+  question: 动画《命运石之门》的原作游戏叫什么名字？
+  expect_contains:
+  - 命运石之门
+  min_tools: 1
+  note: 'auto: subject→relations(cross-media)'
+  truth_entities:
+  - type: subject
+    id: 3154
+    name: 命运石之门
+    aliases:
+    - 命运石之门
+    - STEINS;GATE
+  truth_path:
+  - - subject
+    - 10380
+  - - subject
+    - 3154
 - id: gen_183878_year
   question: 动画《紫罗兰永恒花园》是哪一年首播的？
   kind: single_hop
@@ -182,6 +236,24 @@
     - 183878
   - - person
     - 2481
+- id: gen_183878_cross
+  question: 动画《紫罗兰永恒花园》的原作（小说 / 漫画）叫什么名字？
+  expect_contains:
+  - 紫罗兰永恒花园
+  min_tools: 1
+  note: 'auto: subject→relations(cross-media)'
+  truth_entities:
+  - type: subject
+    id: 160972
+    name: 紫罗兰永恒花园
+    aliases:
+    - ヴァイオレット・エヴァーガーデン
+    - 紫罗兰永恒花园
+  truth_path:
+  - - subject
+    - 183878
+  - - subject
+    - 160972
 - id: gen_207195_year
   question: 动画《摇曳露营△》是哪一年首播的？
   kind: single_hop
@@ -228,6 +300,24 @@
     - 207195
   - - person
     - 15461
+- id: gen_207195_cross
+  question: 动画《摇曳露营△》的原作（小说 / 漫画）叫什么名字？
+  expect_contains:
+  - 摇曳露营△
+  min_tools: 1
+  note: 'auto: subject→relations(cross-media)'
+  truth_entities:
+  - type: subject
+    id: 148732
+    name: 摇曳露营△
+    aliases:
+    - 摇曳露营△
+    - ゆるキャン△
+  truth_path:
+  - - subject
+    - 207195
+  - - subject
+    - 148732
 - id: gen_55770_year
   question: 动画《进击的巨人》是哪一年首播的？
   kind: single_hop
@@ -274,6 +364,24 @@
     - 55770
   - - person
     - 8481
+- id: gen_55770_cross
+  question: 动画《进击的巨人》的原作游戏叫什么名字？
+  expect_contains:
+  - 进击的巨人
+  min_tools: 1
+  note: 'auto: subject→relations(cross-media)'
+  truth_entities:
+  - type: subject
+    id: 161761
+    name: 进击的巨人
+    aliases:
+    - 進撃の巨人
+    - 进击的巨人
+  truth_path:
+  - - subject
+    - 55770
+  - - subject
+    - 161761
 - id: gen_51_year
   question: 动画《CLANNAD》是哪一年首播的？
   kind: single_hop
@@ -412,6 +520,23 @@
     - 364450
   - - person
     - 3525
+- id: gen_364450_cross
+  question: 动画《莉可丽丝》的原作（小说 / 漫画）叫什么名字？
+  expect_contains:
+  - リコリス・リコイル
+  min_tools: 1
+  note: 'auto: subject→relations(cross-media)'
+  truth_entities:
+  - type: subject
+    id: 604575
+    name: リコリス・リコイル
+    aliases:
+    - リコリス・リコイル
+  truth_path:
+  - - subject
+    - 364450
+  - - subject
+    - 604575
 - id: gen_248175_year
   question: 动画《辉夜大小姐想让我告白～天才们的恋爱头脑战～》是哪一年首播的？
   kind: single_hop
@@ -458,6 +583,24 @@
     - 248175
   - - person
     - 3525
+- id: gen_248175_cross
+  question: 动画《辉夜大小姐想让我告白～天才们的恋爱头脑战～》的原作（小说 / 漫画）叫什么名字？
+  expect_contains:
+  - 辉夜大小姐想让我告白 ~天才们的恋爱头脑战~
+  min_tools: 1
+  note: 'auto: subject→relations(cross-media)'
+  truth_entities:
+  - type: subject
+    id: 135218
+    name: 辉夜大小姐想让我告白 ~天才们的恋爱头脑战~
+    aliases:
+    - かぐや様は告らせたい～天才たちの恋愛頭脳戦～
+    - 辉夜大小姐想让我告白 ~天才们的恋爱头脑战~
+  truth_path:
+  - - subject
+    - 248175
+  - - subject
+    - 135218
 - id: gen_38326_year
   question: 动画《JOJO的奇妙冒险》是哪一年首播的？
   kind: single_hop
@@ -550,6 +693,24 @@
     - 245665
   - - person
     - 3059
+- id: gen_245665_cross
+  question: 动画《鬼灭之刃》的原作（小说 / 漫画）叫什么名字？
+  expect_contains:
+  - 鬼灭之刃
+  min_tools: 1
+  note: 'auto: subject→relations(cross-media)'
+  truth_entities:
+  - type: subject
+    id: 168891
+    name: 鬼灭之刃
+    aliases:
+    - 鬼灭之刃
+    - 鬼滅の刃
+  truth_path:
+  - - subject
+    - 245665
+  - - subject
+    - 168891
 - id: gen_54433_year
   question: 动画《我的青春恋爱物语果然有问题》是哪一年首播的？
   kind: single_hop
@@ -596,6 +757,24 @@
     - 54433
   - - person
     - 3329
+- id: gen_54433_cross
+  question: 动画《我的青春恋爱物语果然有问题》的原作（小说 / 漫画）叫什么名字？
+  expect_contains:
+  - 我的青春恋爱物语果然有问题
+  min_tools: 1
+  note: 'auto: subject→relations(cross-media)'
+  truth_entities:
+  - type: subject
+    id: 19441
+    name: 我的青春恋爱物语果然有问题
+    aliases:
+    - やはり俺の青春ラブコメはまちがっている。
+    - 我的青春恋爱物语果然有问题
+  truth_path:
+  - - subject
+    - 54433
+  - - subject
+    - 19441
 - id: gen_243916_year
   question: 动画《约定的梦幻岛》是哪一年首播的？
   kind: single_hop
@@ -642,6 +821,24 @@
     - 243916
   - - person
     - 32356
+- id: gen_243916_cross
+  question: 动画《约定的梦幻岛》的原作（小说 / 漫画）叫什么名字？
+  expect_contains:
+  - 约定的梦幻岛
+  min_tools: 1
+  note: 'auto: subject→relations(cross-media)'
+  truth_entities:
+  - type: subject
+    id: 188254
+    name: 约定的梦幻岛
+    aliases:
+    - 約束のネバーランド
+    - 约定的梦幻岛
+  truth_path:
+  - - subject
+    - 243916
+  - - subject
+    - 188254
 - id: gen_329906_year
   question: 动画《间谍过家家》是哪一年首播的？
   kind: single_hop
@@ -688,3 +885,21 @@
     - 329906
   - - person
     - 8481
+- id: gen_329906_cross
+  question: 动画《间谍过家家》的原作（小说 / 漫画）叫什么名字？
+  expect_contains:
+  - 间谍过家家
+  min_tools: 1
+  note: 'auto: subject→relations(cross-media)'
+  truth_entities:
+  - type: subject
+    id: 279379
+    name: 间谍过家家
+    aliases:
+    - 间谍过家家
+    - SPY×FAMILY
+  truth_path:
+  - - subject
+    - 329906
+  - - subject
+    - 279379

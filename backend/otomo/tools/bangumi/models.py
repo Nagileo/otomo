@@ -119,3 +119,36 @@ class PersonListResult(BaseModel):
     model_config = _BASE
     count: int
     persons: list[PersonBrief] = Field(default_factory=list)
+
+
+class RelatedSubject(BaseModel):
+    """关联条目（跨媒体边）：某作品改编/原作/续集/不同演绎等指向的另一条目，可跨 type。"""
+
+    model_config = _BASE
+    id: int
+    name: str = ""
+    name_cn: str = ""
+    relation: str = ""        # 改编 / 原作 / 续集 / 不同演绎 / 系列 / 角色歌 ...
+    type: int | None = None
+    type_name: str | None = None
+    image: str | None = None
+
+    @classmethod
+    def from_raw(cls, raw: dict) -> "RelatedSubject":
+        t = raw.get("type")
+        return cls(
+            id=raw.get("id"),
+            name=raw.get("name", "") or "",
+            name_cn=raw.get("name_cn", "") or "",
+            relation=raw.get("relation", "") or "",
+            type=t,
+            type_name=SUBJECT_TYPE_NAME.get(t) if t else None,
+            image=_image_of(raw),
+        )
+
+
+class RelatedSubjectsResult(BaseModel):
+    model_config = _BASE
+    subject_id: int
+    count: int
+    relations: list[RelatedSubject] = Field(default_factory=list)

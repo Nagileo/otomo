@@ -94,6 +94,32 @@ async def gen_for_keyword(client: BangumiClient, kw: str) -> list[GoldenCase]:
             truth_entities=te, truth_path=tp,
             note="auto: subject→persons(动画制作)",
         ))
+
+    # 4) 跨媒体关联（cross-type）—— 动画 → **原作**（galgame / 小说 / 漫画）。
+    #    relation 不标"原作"（只标目标类型"书籍/游戏"），但原作几乎总与动画**同名** →
+    #    用同名锚定，排除攻略本/音乐集/联动等不同名的衍生条目。
+    relations = await client.get_subject_relations(sid)
+    a_cn, a_jp = s.get("name_cn") or "", s.get("name") or ""
+    cross = next(
+        (r for r in (relations or [])
+         if r.get("id") and r.get("type") in (1, 4)
+         and ((a_cn and r.get("name_cn") == a_cn) or (a_jp and r.get("name") == a_jp))),
+        None,
+    )
+    if cross:
+        c_id, c_name = cross["id"], (cross.get("name_cn") or cross.get("name"))
+        word = {1: "原作（小说 / 漫画）", 4: "原作游戏"}.get(cross.get("type"), "原作")
+        cases.append(GoldenCase(
+            id=f"gen_{sid}_cross",
+            question=f"动画《{name}》的{word}叫什么名字？",
+            kind="two_hop", expect_contains=[c_name], min_tools=1,
+            truth_entities=[EntityRef(
+                type="subject", id=c_id, name=c_name,
+                aliases=[x for x in {c_name, cross.get("name", "")} if x],
+            )],
+            truth_path=[("subject", sid), ("subject", c_id)],
+            note="auto: subject→relations(cross-media)",
+        ))
     return cases
 
 

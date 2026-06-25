@@ -148,6 +148,11 @@ class BangumiClient:
         """该作品的 staff（导演/脚本/原作/动画制作公司等），每条带 relation=职责。"""
         return await self._get(f"/v0/subjects/{subject_id}/persons")
 
+    async def get_subject_relations(self, subject_id: int) -> Any:
+        """该作品的**关联条目（跨媒体）**：改编/原作/续集/不同演绎等，可跨 type
+        （galgame↔动画↔小说↔音乐）。每条带 relation=关系、type=条目类型。"""
+        return await self._get(f"/v0/subjects/{subject_id}/subjects")
+
     async def search_characters(self, keyword: str, limit: int = 10) -> Any:
         return await self._post(
             "/v0/search/characters", {"keyword": keyword}, params={"limit": min(limit, 50)}
