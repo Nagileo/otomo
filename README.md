@@ -36,12 +36,13 @@
 ## 代码结构
 
 ```
-backend/    Python + FastAPI Agent 后端（手搓 ReAct + 自建 Bangumi 工具 + SSE）
-frontend/   最简 Next.js chat（消费 SSE，含 trace 面板）
-docs/       方案文档（地基）
+backend/        Python + FastAPI Agent 后端（手搓 ReAct/Plan-Execute/Adaptive + 自建工具 + SSE）
+frontend/       Next.js chat（消费 SSE：流式答案 / trace / sources / followups）
+recsys-offline/ 离线推荐（Track B）：评测套件 + CF/MF/LTR + Bangumi 原生 CF 闭环
+docs/           方案文档（地基）
 ```
 
-## 快速开始（A1）
+## 快速开始
 
 ```bash
 # 一次性：建专用 conda 环境（python + node 都在里面）
@@ -61,8 +62,12 @@ cd frontend && npm install && npm run dev                       # http://localho
 
 ## 状态
 
-🚧 **Track A1 骨架已落地**（手搓 ReAct + 7 个 Bangumi 图谱工具 + SSE + 最简前端）。
-下一步按 [07-roadmap](docs/07-roadmap.md)：A2（Plan-Execute + typed Verifier + 30 golden cases）。
+**Agent 主体 + 推荐双轨已落地**，正按 [07-roadmap](docs/07-roadmap.md) 推进：
+
+- **Track A（Agent 脊柱）**：手搓 ReAct / Plan-Execute / Adaptive 三种 runner（结构化 trace，不外露裸 CoT）；8 个 Bangumi 图谱工具 + 萌娘 / 中文维基 RAG + web search + 短评 / B站外链 / 口味画像；FastAPI SSE + Next.js（流式答案 / trace / sources / followups）；typed Verifier + 手写 17 + 自动生成 24 条 golden cases。
+- **Track B（推荐）**：离线 S0–S2（流行度基线 → ItemCF / ALS / BPR → ALS 召回 + LambdaMART 重排）；**Bangumi 原生 CF 闭环**——自采公开收藏训 ALS（NDCG@10 +199% 超基线）→ 导出 i2i → 在线协同召回 provider，离线真正反哺在线。
+
+**下一步**：① 图谱级 Verifier（canonical ID / 路径边 / set-F1 / 路径有效率）→ ② 产品面 + 工程纵深 → ③ Agentic-RL（capstone，待算力就绪）。
 
 ## 许可证
 

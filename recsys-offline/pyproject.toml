@@ -1,0 +1,34 @@
+[project]
+name = "recsys-offline"
+version = "0.1.0"
+description = "Otomo 离线推荐（Track B）：评测套件 + 流行度基线 + CF/MF/LTR + Bangumi 原生 CF 闭环"
+requires-python = ">=3.11"
+dependencies = [
+    "pandas>=2.0",
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "implicit>=0.7",      # ItemCF / ALS / BPR（S1、Bangumi CF）
+    "lightgbm>=4.0",      # LambdaMART 重排（S2）
+    "scikit-learn>=1.3",  # LGBMRanker sklearn 接口
+    "kaggle>=1.6",        # 下载公开数据集
+    "httpx>=0.27",        # Bangumi 原生收藏采集（bangumi_collect）
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["recsys_offline"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

@@ -1,6 +1,6 @@
-# Otomo Backend (A1 骨架)
+# Otomo Backend
 
-Python + FastAPI 的 Agent 后端。A1 实现：手搓 ReAct runner + 自建 Bangumi 只读图谱工具 + SSE 流式。
+Python + FastAPI 的 Agent 后端：手搓 ReAct / Plan-Execute / Adaptive 三种 runner + 自建工具层（Bangumi 图谱 + 萌娘 / 维基 RAG + web search + 推荐）+ SSE 流式 + typed Verifier。
 
 ## 结构
 
@@ -10,13 +10,19 @@ otomo/
 ├─ llm.py               # OpenAI 兼容 LLM（默认 DeepSeek，一键换本地 Qwen）
 ├─ agent/
 │  ├─ contracts.py      # Tool / ToolResult / AgentState / AgentEvent / AgentRunner
-│  ├─ registry.py       # 工具注册表 + 分发
 │  ├─ react.py          # 手搓 ReAct（两阶段：工具循环 → 流式答案，CoT 不外露）
-│  └─ prompts.py
-├─ tools/bangumi/       # 自建 thin client + typed models + 7 个图谱工具
+│  ├─ plan_execute.py   # Plan-Execute（plan→execute→reflect→补救→compose）
+│  ├─ adaptive.py       # 路由器：按复杂度分流 SIMPLE / SYNTHESIS / 复杂 plan
+│  └─ registry.py · prompts.py · _common.py
+├─ tools/               # 自建工具层（每个 typed result，禁裸 Any）
+│  ├─ bangumi/          # thin client + 8 个图谱工具
+│  ├─ moegirl/ wiki/    # 萌娘 / 中文维基 RAG（按需取不入库 + 来源引用）
+│  ├─ websearch/        # 全网兜底（tavily/serper/exa/bocha 抽象 + 降级）
+│  ├─ recommend/        # 多策略召回推荐（标签 / 图谱 / 协同 + 平衡打分）
+│  └─ profile/ comments/ videos/   # 口味画像 / 短评 / B站外链
+├─ eval/                # typed Verifier + golden cases + 自动生成器 + runner
 ├─ api/app.py           # FastAPI：/health + /chat (SSE)
-├─ factory.py           # 组装 runner
-└─ cli.py               # 命令行跑通整条链路
+└─ factory.py · cli.py  # 组装 runner / 命令行跑通整条链路
 ```
 
 ## 跑起来
@@ -50,7 +56,7 @@ uvicorn otomo.api.app:app --reload --port 8000
 - **工具全自建**：不接 Bangumi-MCP/bgm-cli；手写 thin async httpx client，**强制 User-Agent**，进程内 TTL 缓存占位（A5 换 Redis）。
 - **typed result**：每个工具自定义 Pydantic result schema，禁裸 Any。
 - **CoT 不外露**：trace 只含 tool_call/observation/answer 结构化事件；最终答案在「无工具」阶段流式生成。
-- **可验证**：答案基于 Bangumi 图谱真值；后续接 Verifier 与自动 benchmark（Track A2/A3）。
+- **可验证**：答案基于 Bangumi 图谱真值；typed Verifier + 手写 17 / 自动 24 golden cases 已落地（正升级到图谱级 set-F1 / 路径验证）。
 
 ## 测试
 

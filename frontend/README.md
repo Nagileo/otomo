@@ -1,6 +1,6 @@
-# Otomo Frontend (A1 骨架)
+# Otomo Frontend
 
-最简 Next.js (App Router) chat，消费后端 `/chat` 的 SSE：左侧流式对话 + 右侧执行轨迹 (trace)。
+Next.js (App Router) chat，消费后端 `/chat` 的 SSE：左侧流式对话 + 右侧执行轨迹 (trace)。
 后续按 docs/01 升级到 shadcn/ui + Vercel AI SDK。
 
 ## 跑起来
@@ -16,5 +16,6 @@ npm run dev            # http://localhost:3000
 
 ## 现状
 
-- `app/page.tsx`：手写 SSE 解析（fetch + ReadableStream），渲染 `tool_call/observation/answer_delta/final` 事件。
-- 仅验证链路，样式极简；trace 面板是后续「手搓 vs LangGraph」对比的展示位。
+- `app/page.tsx`：手写 SSE 解析（fetch + ReadableStream），渲染 tool_call/observation/answer_delta/final/followup 事件。
+- 回答 markdown 渲染（react-markdown）；来源挂 Bangumi 封面图卡片；追问 chips；右侧 trace 面板（后续「手搓 vs LangGraph」对比展示位）。
+- 样式仍偏简，产品化（session_id 透传、卡片打磨）排在 Phase 2。
