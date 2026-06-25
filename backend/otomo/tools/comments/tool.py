@@ -19,6 +19,7 @@ _BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHT
 _TAG = re.compile(r"<[^>]+>")
 _COMMENT = re.compile(r'<p class="comment">(.*?)</p>', re.S)
 _STARS = re.compile(r'starstop[^"]*sstars(\d+)')  # 部分短评带评分
+_EP_REPLY = re.compile(r'<div class="reply_content">(.*?)</div>', re.S)  # 分集吐槽箱正文
 
 
 class CommentsArgs(BaseModel):
@@ -78,5 +79,62 @@ class GetCommentsTool(Tool):
         )
 
 
+class EpisodeCommentsArgs(BaseModel):
+    ep_id: int = Field(..., description="分集 ep_id（先用 get_subject_episodes 按集号拿到）")
+    query: str | None = Field(
+        None, description="想了解的方面（如『名场面』『作画』『结局』『为什么这集评价高/有争议』）；传则语义检索相关讨论"
+    )
+    limit: int = Field(12, ge=1, le=30)
+
+
+class EpisodeCommentsResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    ep_id: int
+    query: str | None = None
+    count: int
+    comments: list[str] = Field(default_factory=list)
+
+
+class GetEpisodeCommentsTool(Tool):
+    name = "get_episode_comments"
+    description = (
+        "抓取**某一集**的吐槽箱讨论（bgm.tv/ep/{ep_id}），看这一集大家的真实反应。"
+        "问『第 X 集大家怎么看 / 某集口碑 / 名场面 / 为什么这集评价高或有争议』时用"
+        "（先 get_subject_episodes 按集号拿 ep_id）。传 query 语义检索相关讨论。"
+        "拿到后提炼夸点/吐槽点 + 留意剧透，注明来自 Bangumi 分集吐槽。"
+    )
+    args_model = EpisodeCommentsArgs
+    result_model = EpisodeCommentsResult
+
+    async def run(self, args: EpisodeCommentsArgs) -> ToolResult[EpisodeCommentsResult]:
+        url = f"https://bgm.tv/ep/{args.ep_id}"
+        try:
+            async with httpx.AsyncClient(
+                timeout=settings.http_timeout, headers={"User-Agent": _BROWSER_UA}, follow_redirects=True
+            ) as c:
+                r = await c.get(url)
+                r.raise_for_status()
+                page = r.text
+        except (httpx.HTTPError, httpx.TransportError) as e:
+            return ToolResult(ok=False, error=f"分集讨论抓取失败：{type(e).__name__}")
+
+        all_comments: list[str] = []
+        for raw in _EP_REPLY.findall(page):
+            text = html.unescape(_TAG.sub("", raw)).strip()
+            if text:
+                all_comments.append(text)
+        if args.query and len(all_comments) > args.limit:
+            comments = hybrid_rank(args.query, all_comments, top_k=args.limit)
+        else:
+            comments = all_comments[: args.limit]
+        return ToolResult(
+            ok=True,
+            data=EpisodeCommentsResult(
+                ep_id=args.ep_id, query=args.query, count=len(comments), comments=comments
+            ),
+            sources=[Citation(title=f"Bangumi 分集吐槽 · ep {args.ep_id}", url=url, source="bangumi")],
+        )
+
+
 def build_comment_tools() -> list[Tool]:
-    return [GetCommentsTool()]
+    return [GetCommentsTool(), GetEpisodeCommentsTool()]
