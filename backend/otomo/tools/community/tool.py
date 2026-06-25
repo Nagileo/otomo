@@ -87,7 +87,7 @@ class VerticalLinksTool(Tool):
                 add("末日动漫", "https://share.acgnx.se/", "BT 资源（备选，站内搜）")
         if want("guide") and t == "anime":
             add("名作之壁吧", "https://space.bilibili.com/2859372", "数据向新番导视（最推）")
-            add("新番时间表", "https://yuc.wiki/", "长门有 C 放送时间表/RSS")
+            add("新番时间表", "https://yuc.wiki/", "长门番堂放送时间表/RSS；需要读取当季表时用 list_yuc_season")
             if intent == "guide":
                 add("泛式", "https://space.bilibili.com/63231", "评价向漫评/导视 UP")
                 add("瓶子君152", "https://space.bilibili.com/730732", "评价向漫评 UP")
@@ -99,7 +99,7 @@ class VerticalLinksTool(Tool):
                         add(s, u, n)
             if t == "game":  # galgame 圈
                 add("VNDB", f"https://vndb.org/v?q={q}", "galgame 权威库（评分/资料，亦有 search_visual_novels 工具）")
-                add("批判空间", "https://erogamescape.dyndns.org/~ap2/ero/toukei_kaiseki/", "日系 galgame 打分站（权威评分）")
+                add("批判空间", f"https://erogamescape.dyndns.org/~ap2/ero/toukei_kaiseki/kensaku.php?mode=normal&category=game&word_category=name&word={q}", "日系 galgame 打分站；需要评分证据时用 search_erogamescape")
                 add("绯月 Kf", "https://bbs.kfpromax.com/", "galgame 社区/补丁")
                 add("月幕", "https://www.ymgal.games/", "galgame 资料/汉化")
                 add("galgame 吧", _tieba("galgame"), "galgame 讨论（贴吧）")

@@ -14,6 +14,7 @@ from .tools.comments import build_comment_tools
 from .tools.community import build_community_tools
 from .tools.bangumi import build_bangumi_tools
 from .tools.bangumi.client import BangumiClient
+from .tools.erogamescape import build_erogamescape_tools
 from .tools.moegirl import build_moegirl_tools
 from .tools.moegirl.client import MoegirlClient
 from .tools.profile import build_profile_tools
@@ -24,6 +25,7 @@ from .tools.vndb import build_vndb_tools
 from .tools.watchorder import build_watchorder_tools
 from .tools.websearch import build_websearch_tools
 from .tools.wiki import build_wiki_tools
+from .tools.yuc import build_yuc_tools
 
 RunnerKind = Literal["react", "plan", "adaptive", "langgraph"]
 
@@ -47,6 +49,8 @@ def build_registry(
         registry.register(tool)
     for tool in build_vndb_tools():
         registry.register(tool)
+    for tool in build_erogamescape_tools():
+        registry.register(tool)
     for tool in build_anilist_tools():
         registry.register(tool)
     for tool in build_profile_tools(client, ltm or LongTermMemory()):
@@ -54,6 +58,8 @@ def build_registry(
     for tool in build_recommend_tools(client):
         registry.register(tool)
     for tool in build_season_tools(client):
+        registry.register(tool)
+    for tool in build_yuc_tools():
         registry.register(tool)
     for tool in build_watchorder_tools(client):
         registry.register(tool)

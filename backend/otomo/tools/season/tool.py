@@ -29,7 +29,7 @@ def _guides(year: int, month: int) -> list["GuideLink"]:
     rq = quote(f"{year}年{month}月 新番 推荐")
     return [
         GuideLink(site="名作之壁吧", url=f"https://search.bilibili.com/all?keyword={gq}", note="数据向新番导视（最推）"),
-        GuideLink(site="yuc.wiki", url="https://yuc.wiki/", note="放送时间表/数据（按季归档）"),
+        GuideLink(site="yuc.wiki", url=f"https://yuc.wiki/{year}{month:02d}/", note="放送时间表/数据（可用 list_yuc_season 读取）"),
         GuideLink(site="漫评 UP（泛式/瓶子君/台长等）", url=f"https://search.bilibili.com/all?keyword={rq}", note="评价向导视/推荐视频"),
     ]
 
