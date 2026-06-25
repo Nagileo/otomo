@@ -56,6 +56,11 @@ class Settings(BaseSettings):
     # 文件缺失则该路召回静默跳过（优雅降级，不影响标签/图谱召回）。
     cf_i2i_dir: str = "otomo/data"
 
+    # ---- 可观测（可选 Langfuse；不配则只用本地 trace JSONL，见 obs.py）----
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_host: str = "https://cloud.langfuse.com"
+
     # ---- Agent / HTTP ----
     agent_max_iters: int = 8
     http_timeout: float = 30.0

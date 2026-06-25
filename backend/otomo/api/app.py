@@ -14,6 +14,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from ..agent.adaptive import AdaptiveRunner
 from ..agent.contracts import AgentState
+from ..obs import traced_stream
 from ..factory import build_registry
 from ..agent.plan_execute import PlanExecuteRunner
 from ..agent.react import ReActRunner
@@ -69,7 +70,8 @@ async def chat(req: ChatRequest):
         state = app.state.sessions.setdefault(req.session_id, AgentState())
 
     async def event_gen() -> AsyncIterator[dict]:
-        async for ev in runner.stream(req.message, state):
+        meta = {"session_id": req.session_id or "", "runner": req.runner}
+        async for ev in traced_stream(runner, req.message, state, meta):
             yield {"event": ev.type, "data": ev.model_dump_json()}
 
     return EventSourceResponse(event_gen())

@@ -28,6 +28,10 @@ rag = [
     "sentence-transformers>=3.0",
     "rank-bm25>=0.2",
 ]
+obs = [
+    # 可选 Langfuse 上报（配 LANGFUSE_* 才生效；不装则只用本地 trace JSONL）
+    "langfuse>=2.0",
+]
 
 [project.scripts]
 otomo = "otomo.cli:main"
