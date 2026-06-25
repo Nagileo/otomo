@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ...agent.contracts import Citation, Tool, ToolResult
 from ...config import settings
+from .._rag import hybrid_rank
 
 _BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 _TAG = re.compile(r"<[^>]+>")
@@ -22,12 +23,16 @@ _STARS = re.compile(r'starstop[^"]*sstars(\d+)')  # 部分短评带评分
 
 class CommentsArgs(BaseModel):
     subject_id: int = Field(..., description="Bangumi 条目 ID")
-    limit: int = Field(15, ge=1, le=30)
+    query: str | None = Field(
+        None, description="想了解的方面（如『作画』『剧情』『结局』『值不值得看』）；传则语义检索最相关短评，不传取最新一批"
+    )
+    limit: int = Field(12, ge=1, le=30)
 
 
 class CommentsResult(BaseModel):
     model_config = ConfigDict(extra="ignore")
     subject_id: int
+    query: str | None = None
     count: int
     comments: list[str] = Field(default_factory=list)
 
@@ -36,7 +41,8 @@ class GetCommentsTool(Tool):
     name = "get_subject_comments"
     description = (
         "抓取作品在 Bangumi 的用户短评（吐槽），看真实民意/口碑质性。"
-        "回答'口碑/评价/大家怎么说'时，配合 get_subject 的评分分布一起用，引用时注明来自 Bangumi 短评。"
+        "问某方面口碑（作画/剧情/结局/配乐…）时传 query，会从短评里**语义检索**最相关的几条。"
+        "拿到后请**提炼大家夸什么、吐槽什么**并引用代表短评，配合 get_subject 的评分分布一起用，注明来自 Bangumi 短评。"
     )
     args_model = CommentsArgs
     result_model = CommentsResult
@@ -53,15 +59,21 @@ class GetCommentsTool(Tool):
         except (httpx.HTTPError, httpx.TransportError) as e:
             return ToolResult(ok=False, error=f"短评抓取失败：{type(e).__name__}")
 
-        comments: list[str] = []
+        all_comments: list[str] = []
         for raw in _COMMENT.findall(page):
             text = html.unescape(_TAG.sub("", raw)).strip()
             if text:
-                comments.append(text)
-        comments = comments[: args.limit]
+                all_comments.append(text)
+        # 有 query → 短评纳入 hybrid 检索，捞最相关的几条；否则取最新一批
+        if args.query and len(all_comments) > args.limit:
+            comments = hybrid_rank(args.query, all_comments, top_k=args.limit)
+        else:
+            comments = all_comments[: args.limit]
         return ToolResult(
             ok=True,
-            data=CommentsResult(subject_id=args.subject_id, count=len(comments), comments=comments),
+            data=CommentsResult(
+                subject_id=args.subject_id, query=args.query, count=len(comments), comments=comments
+            ),
             sources=[Citation(title=f"Bangumi 短评 · subject {args.subject_id}", url=url, source="bangumi")],
         )
 
