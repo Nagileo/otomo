@@ -30,6 +30,7 @@ export default function Home() {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const answerRef = useRef("");
+  const sessionId = useRef("");  // 多轮会话 id（首次发送时生成；"新对话"会重置）
 
   async function send(override?: string) {
     const q = (override ?? input).trim();
@@ -42,12 +43,13 @@ export default function Home() {
     setAnswer("");
     answerRef.current = "";
     setBusy(true);
+    if (!sessionId.current) sessionId.current = crypto.randomUUID();  // 客户端 lazy 生成，避免 SSR mismatch
 
     try {
       const res = await fetch(`${BACKEND}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: q }),
+        body: JSON.stringify({ message: q, session_id: sessionId.current }),
       });
       if (!res.body) throw new Error("no response body");
 
@@ -116,10 +118,25 @@ export default function Home() {
     }
   }
 
+  function newChat() {
+    sessionId.current = "";  // 重置 → 下次发送会生成新会话 id（清空多轮上下文）
+    setMessages([]);
+    setTrace([]);
+    setSources([]);
+    setFollowups([]);
+    setAnswer("");
+    answerRef.current = "";
+  }
+
   return (
     <div className="wrap">
-      <div className="title">Otomo · 番组搭子</div>
-      <div className="sub">ACGN Knowledge-Graph Agent — A1 骨架（Bangumi 多跳问答）</div>
+      <div className="topbar">
+        <div>
+          <div className="title">Otomo · 番组搭子</div>
+          <div className="sub">ACGN 知识图谱 Agent — 多跳问答 / 跨媒体追溯 / 语义 RAG / 个性化推荐</div>
+        </div>
+        <button className="ghost" onClick={newChat} disabled={busy}>+ 新对话</button>
+      </div>
 
       <div className="grid">
         <div className="panel">

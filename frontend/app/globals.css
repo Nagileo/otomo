@@ -19,8 +19,15 @@ body {
 }
 
 .wrap { max-width: 1000px; margin: 0 auto; padding: 24px; }
+.topbar { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
 .title { font-size: 20px; font-weight: 700; }
 .sub { color: var(--dim); font-size: 13px; margin-bottom: 16px; }
+.ghost {
+  background: transparent; color: var(--dim); border: 1px solid var(--border);
+  border-radius: 8px; padding: 6px 12px; font-size: 13px; font-weight: 500; cursor: pointer;
+  white-space: nowrap;
+}
+.ghost:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
 
 .grid { display: grid; grid-template-columns: 1fr 360px; gap: 16px; }
 @media (max-width: 820px) { .grid { grid-template-columns: 1fr; } }
