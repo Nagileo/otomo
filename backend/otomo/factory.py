@@ -9,6 +9,7 @@ from .agent.plan_execute import PlanExecuteRunner
 from .agent.react import ReActRunner
 from .agent.registry import ToolRegistry
 from .memory import LongTermMemory
+from .tools.anilist import build_anilist_tools
 from .tools.comments import build_comment_tools
 from .tools.community import build_community_tools
 from .tools.bangumi import build_bangumi_tools
@@ -44,6 +45,8 @@ def build_registry(
     for tool in build_community_tools():
         registry.register(tool)
     for tool in build_vndb_tools():
+        registry.register(tool)
+    for tool in build_anilist_tools():
         registry.register(tool)
     for tool in build_profile_tools(client, ltm or LongTermMemory()):
         registry.register(tool)

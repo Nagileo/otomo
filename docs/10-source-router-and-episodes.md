@@ -70,6 +70,15 @@ B站 = 视频搜索 + 创作者社区 + 评论语料。**分阶段**，不一上
 - 讨论/评论作 RAG 语料、不进训练；必标来源。
 - 圈层 provider 走白名单映射，**不做全网乱搜**（兜底才用 web_search）。
 
+### B.7 定论（2026-06-25，与用户敲定）
+**Source Router = 策略层 / 评测层，不是运行时大对象**：
+- **内部源选择**：靠 prompt 源分层原则 + 工具 `description`，**不造 `route_sources` 大工具**（agent 选工具本身就是 routing；大对象只会多一跳、多误判、多延迟）。
+- **外链精选**：`get_vertical_links` 是合理的"外链层 Source Router"——它不是告诉 agent 用什么工具，而是**替用户精选 2-4 个外部站点**（输入意图、输出链接），是产品能力不是多余路由。
+- **评测层（关键）**：把 source routing 做成 **eval 维度**——检查"该用 Bangumi 没乱用 web""问分集有没有查 `episode_comments`""问 galgame 是否用 VNDB"。既不多一跳、又让"选对源"可验证，**直接接上 Agentic-RL 的 source routing reward**（路由从运行时负担变成可评测/可训练的能力）。
+- **后期边界**：工具涨到 40-60 个时，可加**非用户可见的轻量 tool-subset selector**（只为减少暴露给 LLM 的 schema 数、降延迟），是性能优化、不是现在的产品功能。
+- **AniList / Fandom**：作 Canonical / Lore 的**兜底添头**（主源查不到再补），主体不动摇。
+- **B站评论**：v0 保持 link-out + UP 白名单；**未来重点**——用户给 BV → 单视频摘要 / 评论摘要，乃至视频评论作 RAG 知识库（如问新番时补充评论观点）。保持不大规模爬（反爬 / 账号风险）。
+
 ## C. 算法层（Agentic-RL 平移，拓宽 moat）
 把可验证奖励从"图谱多跳"扩展到垂直 agent 的更多维度：
 - **source routing reward**：事实问题该走图谱、口碑问题该走讨论——选对源给奖励。
