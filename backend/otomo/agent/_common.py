@@ -163,6 +163,14 @@ def summarize(result: ToolResult) -> str:
     if d.get("opinion_summary"):
         joined = "；".join(str(x) for x in d["opinion_summary"][:3])
         return f"{d.get('count', 0)} 条；{joined}"
+    if d.get("aspect_summary"):
+        parts = []
+        for x in d["aspect_summary"][:3]:
+            label = x.get("label") or x.get("aspect")
+            sentiment = x.get("dominant_sentiment")
+            total = x.get("total")
+            parts.append(f"{label}:{sentiment}({total})")
+        return "方面摘要：" + "；".join(parts)
     if d.get("aspect_opinions"):
         return f"{len(d['aspect_opinions'])} 条方面观点"
     for key in ("subjects", "characters", "persons"):

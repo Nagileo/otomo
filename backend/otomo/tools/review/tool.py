@@ -63,6 +63,20 @@ class AspectOpinion(BaseModel):
     confidence: Literal["low", "medium", "high"] = "low"
 
 
+class AspectSummary(BaseModel):
+    aspect: Literal["story", "character", "pacing", "visual", "music", "direction", "text", "system", "voice", "general"]
+    label: str
+    positive: int = 0
+    negative: int = 0
+    mixed: int = 0
+    total: int = 0
+    dominant_sentiment: Literal["positive", "negative", "mixed"] = "mixed"
+    spoiler_risk: Literal["low", "medium", "high"] = "low"
+    confidence: Literal["low", "medium", "high"] = "low"
+    sources: list[str] = Field(default_factory=list)
+    sample_snippets: list[str] = Field(default_factory=list)
+
+
 class SourceAvailability(BaseModel):
     source: str
     role: str
@@ -81,6 +95,7 @@ class ReviewFusionResult(BaseModel):
     praise: list[ReviewAspect] = Field(default_factory=list)
     criticism: list[ReviewAspect] = Field(default_factory=list)
     aspect_opinions: list[AspectOpinion] = Field(default_factory=list)
+    aspect_summary: list[AspectSummary] = Field(default_factory=list)
     consensus: str = ""
     confidence: Literal["low", "medium", "high"] = "low"
     caveats: list[str] = Field(default_factory=list)
@@ -161,6 +176,20 @@ _ASPECT_HINTS: dict[str, tuple[str, ...]] = {
     "voice": ("声优", "配音", "CV", "演技"),
 }
 _SPOILER_HINTS = ("结局", "反转", "真相", "黑幕", "凶手", "死", "后面", "后期", "终章")
+_ASPECT_LABELS = {
+    "story": "剧情",
+    "character": "角色",
+    "pacing": "节奏",
+    "visual": "画面/作画",
+    "music": "音乐",
+    "direction": "制作/演出",
+    "text": "文本",
+    "system": "系统/玩法",
+    "voice": "声优",
+    "general": "整体观感",
+}
+_SENTIMENT_LABELS = {"positive": "正向", "negative": "负向", "mixed": "分歧"}
+_RISK_ORDER = {"low": 0, "medium": 1, "high": 2}
 
 
 def _aspect_confidence(n: int) -> str:
@@ -224,6 +253,50 @@ def _extract_aspect_opinions(comments: list[CommentEvidence]) -> list[AspectOpin
                     )
                 )
     return opinions[:12]
+
+
+def _build_aspect_summary(opinions: list[AspectOpinion]) -> list[AspectSummary]:
+    grouped: dict[str, list[AspectOpinion]] = {}
+    for op in opinions:
+        grouped.setdefault(op.aspect, []).append(op)
+    out: list[AspectSummary] = []
+    for aspect, items in grouped.items():
+        positive = sum(1 for x in items if x.sentiment == "positive")
+        negative = sum(1 for x in items if x.sentiment == "negative")
+        mixed = sum(1 for x in items if x.sentiment == "mixed")
+        counts = {"positive": positive, "negative": negative, "mixed": mixed}
+        dominant = max(counts.items(), key=lambda kv: (kv[1], kv[0] == "mixed"))[0]
+        if positive and negative and abs(positive - negative) <= 1:
+            dominant = "mixed"
+        risk = max((x.spoiler_risk for x in items), key=lambda x: _RISK_ORDER[x], default="low")
+        sources = list(dict.fromkeys(x.source for x in items if x.source))
+        snippets = list(dict.fromkeys(x.evidence_snippet for x in items if x.evidence_snippet))[:3]
+        confidence = "high" if len(items) >= 5 and len(sources) >= 2 else ("medium" if len(items) >= 2 else "low")
+        out.append(
+            AspectSummary(
+                aspect=aspect,  # type: ignore[arg-type]
+                label=_ASPECT_LABELS.get(aspect, aspect),
+                positive=positive,
+                negative=negative,
+                mixed=mixed,
+                total=len(items),
+                dominant_sentiment=dominant,  # type: ignore[arg-type]
+                spoiler_risk=risk,  # type: ignore[arg-type]
+                confidence=confidence,
+                sources=sources,
+                sample_snippets=snippets,
+            )
+        )
+    out.sort(key=lambda x: (-x.total, x.label))
+    return out[:8]
+
+
+def _format_aspect_summary(summary: list[AspectSummary]) -> list[str]:
+    return [
+        f"{s.label}：{_SENTIMENT_LABELS.get(s.dominant_sentiment, s.dominant_sentiment)}"
+        f"（+{s.positive}/-{s.negative}/±{s.mixed}，{s.confidence}）"
+        for s in summary[:6]
+    ]
 
 
 def _pick_aspects(comments: list[CommentEvidence]) -> tuple[list[ReviewAspect], list[ReviewAspect]]:
@@ -452,6 +525,7 @@ class ReviewSubjectTool(Tool):
             caveats.append("galgame 评价需区分中文 Bangumi、日本批判空间、国际 VNDB 三个圈层。")
         praise, criticism = _pick_aspects(comments)
         aspect_opinions = _extract_aspect_opinions(comments)
+        aspect_summary = _build_aspect_summary(aspect_opinions)
 
         result = ReviewFusionResult(
             subject_id=detail.id,
@@ -463,6 +537,7 @@ class ReviewSubjectTool(Tool):
             praise=praise,
             criticism=criticism,
             aspect_opinions=aspect_opinions,
+            aspect_summary=aspect_summary,
             consensus=_consensus(ratings),
             confidence=_confidence(ratings, comments),
             caveats=caveats,

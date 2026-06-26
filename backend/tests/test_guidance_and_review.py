@@ -12,9 +12,12 @@ from otomo.tools.recommend.tool import RecEvidence, _egs_mapping_confidence, _qu
 from otomo.tools.review.tool import (
     CommentEvidence,
     RatingEvidence,
+    ReviewFusionResult,
     _bangumi_signal,
+    _build_aspect_summary,
     _consensus,
     _extract_aspect_opinions,
+    _format_aspect_summary,
     _pick_aspects,
     _score_signal,
 )
@@ -107,6 +110,44 @@ def test_review_detailed_aspect_opinions():
     assert any("剧情" in x or "画面" in x for x in summary)
 
 
+def test_review_aspect_summary_groups_sentiment_and_spoiler_risk():
+    opinions = _extract_aspect_opinions([
+        CommentEvidence(
+            source="Bangumi 短评",
+            samples=[
+                "剧情展开很精彩，角色塑造也很舒服",
+                "剧情后半反转太雷，比较失望",
+                "音乐很神，配乐稳定",
+            ],
+        )
+    ])
+    summary = _build_aspect_summary(opinions)
+    story = next(x for x in summary if x.aspect == "story")
+    assert story.total >= 2
+    assert story.dominant_sentiment == "mixed"
+    assert story.spoiler_risk == "high"
+    formatted = _format_aspect_summary(summary)
+    assert any("剧情" in x for x in formatted)
+
+
+def test_trace_summary_prefers_aspect_summary():
+    opinions = _extract_aspect_opinions([
+        CommentEvidence(source="B站评论", samples=["画面作画很稳，音乐也可以"])
+    ])
+    res = ToolResult(
+        ok=True,
+        data=ReviewFusionResult(
+            subject_id=1,
+            title="占位",
+            subject_type="anime",
+            spoiler_level="none",
+            aspect_opinions=opinions,
+            aspect_summary=_build_aspect_summary(opinions),
+        ),
+    )
+    assert summarize(res).startswith("方面摘要：")
+
+
 def test_season_guide_comment_digest_summary():
     res = ToolResult(
         ok=True,
@@ -138,8 +179,38 @@ def test_peer_affinity_detects_sync_and_disagreement():
     affinity = _build_affinity("peer", own, peer)
     assert affinity.common_rated == 4
     assert affinity.rating_similarity > 0
+    assert affinity.collection_similarity > 0
+    assert affinity.user_space_similarity > 0
+    assert affinity.extreme_similarity > 0
     assert affinity.liked_together[0].name == "A"
     assert affinity.biggest_disagreements[0].name == "D"
+
+
+def test_peer_affinity_uses_unrated_collection_space():
+    def row(sid: int, name: str, rate: int = 0) -> dict:
+        return {"rate": rate, "subject": {"id": sid, "name": name, "images": {}}}
+
+    own = [row(1, "A", 0), row(2, "B", 0), row(3, "C", 9)]
+    peer = [row(1, "A", 0), row(2, "B", 0), row(4, "D", 9)]
+    affinity = _build_affinity("peer", own, peer)
+    assert affinity.common_rated == 0
+    assert affinity.common_collections == 2
+    assert affinity.rating_similarity == 0
+    assert affinity.collection_similarity > 0
+    assert affinity.peer_weight > 0
+    assert affinity.confidence == "low"
+
+
+def test_peer_affinity_confidence_penalizes_collection_gap():
+    def row(sid: int, name: str, rate: int = 0) -> dict:
+        return {"rate": rate, "subject": {"id": sid, "name": name, "images": {}}}
+
+    own = [row(i, f"A{i}", 8 if i <= 6 else 0) for i in range(1, 31)]
+    peer = [row(i, f"A{i}", 8 if i <= 6 else 0) for i in range(1, 7)]
+    affinity = _build_affinity("peer", own, peer)
+    assert affinity.common_rated == 6
+    assert affinity.collection_size_ratio < 0.5
+    assert any("收藏量" in x for x in affinity.confidence_reasons)
 
 
 def test_episode_comments_blocks_future_episode():

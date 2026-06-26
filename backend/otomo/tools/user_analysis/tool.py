@@ -19,7 +19,7 @@ from ...agent.contracts import Citation, Tool, ToolResult
 from ...config import settings
 from ..comments.tool import EpisodeCommentsArgs, GetEpisodeCommentsTool
 from ..bangumi.client import SUBJECT_TYPE, BangumiClient
-from ..review.tool import AspectOpinion, CommentEvidence, _extract_aspect_opinions
+from ..review.tool import AspectOpinion, AspectSummary, CommentEvidence, _build_aspect_summary, _extract_aspect_opinions
 
 _MAX_ITEMS = 1000
 _BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
@@ -49,6 +49,7 @@ class UserOpinionResult(BaseModel):
     positive_comment_samples: list[str] = Field(default_factory=list)
     negative_comment_samples: list[str] = Field(default_factory=list)
     aspect_opinions: list[AspectOpinion] = Field(default_factory=list)
+    aspect_summary: list[AspectSummary] = Field(default_factory=list)
     caveats: list[str] = Field(default_factory=list)
 
 
@@ -70,14 +71,21 @@ class SharedRatingItem(BaseModel):
 class PeerAffinity(BaseModel):
     username: str
     rating_similarity: float
+    collection_similarity: float = 0.0
+    user_space_similarity: float = 0.0
     own_space_similarity: float
     peer_space_similarity: float
+    extreme_similarity: float = 0.0
     union_similarity: float
     common_rated: int
     own_rated: int
     peer_rated: int
     common_collections: int
+    own_collections: int = 0
+    peer_collections: int = 0
+    collection_size_ratio: float = 0.0
     confidence: Literal["low", "medium", "high"] = "low"
+    confidence_reasons: list[str] = Field(default_factory=list)
     peer_weight: float = 0.0
     liked_together: list[SharedRatingItem] = Field(default_factory=list)
     disliked_together: list[SharedRatingItem] = Field(default_factory=list)
@@ -228,6 +236,16 @@ def _rating_value(rate: int | float | None) -> float:
     return (float(rate) - 5.5) / 4.5
 
 
+def _collection_value(item: dict) -> float:
+    """Vector value for collection-space similarity.
+
+    Rated items use a 0-1 preference scale; unrated collected items are treated
+    as neutral interest so pure收藏重叠仍能提供 weak evidence.
+    """
+    rate = item.get("rate") or 0
+    return float(rate) / 10.0 if rate else 0.55
+
+
 def _cosine(a: dict[int, float], b: dict[int, float], keys: set[int]) -> float:
     if not keys:
         return 0.0
@@ -239,12 +257,55 @@ def _cosine(a: dict[int, float], b: dict[int, float], keys: set[int]) -> float:
     return dot / (na * nb)
 
 
-def _confidence(common_rated: int) -> str:
+def _confidence(
+    common_rated: int,
+    common_collections: int = 0,
+    own_total: int = 0,
+    peer_total: int = 0,
+) -> tuple[str, list[str], float]:
+    reasons: list[str] = []
+    score = 0.0
     if common_rated >= 40:
-        return "high"
-    if common_rated >= 12:
-        return "medium"
-    return "low"
+        score += 2.0
+        reasons.append(f"共同评分 {common_rated} 个，评分样本充足")
+    elif common_rated >= 12:
+        score += 1.2
+        reasons.append(f"共同评分 {common_rated} 个，可中等参考")
+    elif common_rated >= 5:
+        score += 0.5
+        reasons.append(f"共同评分 {common_rated} 个，样本偏少")
+    else:
+        reasons.append(f"共同评分仅 {common_rated} 个")
+
+    if common_collections >= 80:
+        score += 1.4
+        reasons.append(f"共同收藏 {common_collections} 个，收藏空间重叠明显")
+    elif common_collections >= 30:
+        score += 0.9
+        reasons.append(f"共同收藏 {common_collections} 个")
+    elif common_collections >= 10:
+        score += 0.4
+        reasons.append(f"共同收藏 {common_collections} 个，弱重叠")
+
+    if own_total and peer_total:
+        ratio = min(own_total, peer_total) / max(own_total, peer_total)
+        if ratio < 0.25:
+            score -= 0.8
+            reasons.append("双方收藏量差距很大，降低置信度")
+        elif ratio < 0.5:
+            score -= 0.35
+            reasons.append("双方收藏量有差距，略降权")
+    else:
+        ratio = 0.0
+        reasons.append("有一方收藏空间为空")
+
+    if score >= 2.6 and common_rated >= 12:
+        label = "high"
+    elif score >= 1.1 and (common_rated >= 5 or common_collections >= 20):
+        label = "medium"
+    else:
+        label = "low"
+    return label, reasons, ratio
 
 
 def _confidence_factor(label: str) -> float:
@@ -278,8 +339,28 @@ def _build_affinity(peer_username: str, own_items: list[dict], peer_items: list[
     own_space = base * math.sqrt(len(common) / len(own_keys)) if own_keys and common else 0.0
     peer_space = base * math.sqrt(len(common) / len(peer_keys)) if peer_keys and common else 0.0
     union_space = base * (len(common) / len(union)) if union else 0.0
-    confidence = _confidence(len(common))
-    peer_weight = max(0.0, base) * _confidence_factor(confidence)
+    own_collected_items = {sid: item for item in own_items if (sid := _subject_id(item))}
+    peer_collected_items = {sid: item for item in peer_items if (sid := _subject_id(item))}
+    own_collections = set(own_collected_items)
+    peer_collections = set(peer_collected_items)
+    common_collection_ids = own_collections & peer_collections
+    collection_union = own_collections | peer_collections
+    own_collection_vec = {sid: _collection_value(item) for sid, item in own_collected_items.items()}
+    peer_collection_vec = {sid: _collection_value(item) for sid, item in peer_collected_items.items()}
+    collection_similarity = _cosine(own_collection_vec, peer_collection_vec, common_collection_ids)
+    user_space_similarity = _cosine(own_collection_vec, peer_collection_vec, own_collections)
+    peer_collection_space = _cosine(own_collection_vec, peer_collection_vec, peer_collections)
+    extreme_similarity = _cosine(own_collection_vec, peer_collection_vec, collection_union)
+    confidence, confidence_reasons, collection_size_ratio = _confidence(
+        len(common),
+        len(common_collection_ids),
+        len(own_collections),
+        len(peer_collections),
+    )
+    peer_weight = (
+        max(0.0, base) * 0.72
+        + max(0.0, extreme_similarity) * 0.28
+    ) * _confidence_factor(confidence)
 
     shared = [_shared_item(own_rated_items[sid], peer_rated_items[sid]) for sid in common]
     liked = sorted(
@@ -291,14 +372,17 @@ def _build_affinity(peer_username: str, own_items: list[dict], peer_items: list[
         key=lambda x: (x.user_rate + x.peer_rate, x.delta, x.name),
     )[:5]
     disagreements = sorted(shared, key=lambda x: (-x.delta, -max(x.user_rate, x.peer_rate), x.name))[:5]
-    own_collections = _collection_ids(own_items)
-    peer_collections = _collection_ids(peer_items)
-    common_collections = len(own_collections & peer_collections)
+    common_collections = len(common_collection_ids)
 
     if len(common) == 0:
-        explanation = "没有共同评分，无法判断同步率。"
+        if extreme_similarity > 0.25:
+            explanation = "共同评分不足，但收藏空间有重叠，只能作为弱同好推荐源。"
+        else:
+            explanation = "没有共同评分，且收藏空间重叠不足，无法判断同步率。"
+    elif base >= 0.65 and extreme_similarity >= 0.2:
+        explanation = "共同评分口味高度同步，收藏空间也有重叠，适合作为强同好推荐源。"
     elif base >= 0.65:
-        explanation = "共同评分上的口味高度同步，适合作为强同好推荐源。"
+        explanation = "共同评分口味高度同步，但收藏空间覆盖有限，适合作为中高置信同好推荐源。"
     elif base >= 0.35:
         explanation = "共同评分上的口味有一定同步，可作为中等置信同好推荐源。"
     elif base > 0:
@@ -309,14 +393,21 @@ def _build_affinity(peer_username: str, own_items: list[dict], peer_items: list[
     return PeerAffinity(
         username=peer_username,
         rating_similarity=round(base, 4),
+        collection_similarity=round(collection_similarity, 4),
+        user_space_similarity=round(user_space_similarity, 4),
         own_space_similarity=round(own_space, 4),
-        peer_space_similarity=round(peer_space, 4),
+        peer_space_similarity=round(peer_collection_space or peer_space, 4),
+        extreme_similarity=round(extreme_similarity, 4),
         union_similarity=round(union_space, 4),
         common_rated=len(common),
         own_rated=len(own_keys),
         peer_rated=len(peer_keys),
         common_collections=common_collections,
+        own_collections=len(own_collections),
+        peer_collections=len(peer_collections),
+        collection_size_ratio=round(collection_size_ratio, 4),
         confidence=confidence,
+        confidence_reasons=confidence_reasons,
         peer_weight=round(peer_weight, 4),
         liked_together=liked,
         disliked_together=disliked,
@@ -454,6 +545,9 @@ class UserOpinionTool(Tool):
                 neg_tags.update(_tags(item))
                 if comment:
                     neg_samples.append(f"{_subject_name(item)}：{comment[:120]}")
+        aspect_opinions = _extract_aspect_opinions([
+            CommentEvidence(source="Bangumi 用户私评", samples=all_comment_samples[:80])
+        ])
         result = UserOpinionResult(
             username=username,
             subject_type=args.subject_type,
@@ -463,9 +557,8 @@ class UserOpinionTool(Tool):
             negative_tags=[OpinionSignal(label=k, count=v) for k, v in neg_tags.most_common(10)],
             positive_comment_samples=pos_samples[:8],
             negative_comment_samples=neg_samples[:8],
-            aspect_opinions=_extract_aspect_opinions([
-                CommentEvidence(source="Bangumi 用户私评", samples=all_comment_samples[:80])
-            ]),
+            aspect_opinions=aspect_opinions,
+            aspect_summary=_build_aspect_summary(aspect_opinions),
             caveats=[
                 "用户私评字段不一定公开或稳定返回；没有私评时主要依据评分。",
                 "情感分析是关键词级弱信号，只能作为推荐解释辅助。",
@@ -512,7 +605,7 @@ class ListBangumiFriendsTool(Tool):
 class CompareUserTasteTool(Tool):
     name = "compare_user_taste"
     description = (
-        "计算两个 Bangumi 用户在指定类型上的评分同步率/口味夹角：共同评分余弦、个人空间、对方空间、并集空间，"
+        "计算两个 Bangumi 用户在指定类型上的评分同步率/口味夹角：共同评分余弦、收藏空间、个人空间、对方空间、极限空间，"
         "并返回共同高分、共同低分和最大分歧。用于解释好友/同好是否适合作为推荐来源。"
     )
     args_model = TasteCompareArgs
@@ -536,7 +629,7 @@ class CompareUserTasteTool(Tool):
                 affinity=affinity,
                 caveats=[
                     "同步率基于公开/授权收藏评分；私有收藏不可见时会降低置信度。",
-                    "评分向量以 5.5 为中性点，余弦越高代表共同评分越同喜同悲；负值代表口味方向相反。",
+                    "评分向量以 5.5 为中性点；收藏空间向量把未评分收藏按中性兴趣处理，用于判断谁覆盖了谁的收藏空间。",
                 ],
             ),
             sources=[
@@ -644,7 +737,7 @@ class SyncRecommendTool(Tool):
                 items=items,
                 caveats=caveats + [
                     "同步推荐基于公开/授权收藏；好友页解析不是官方 v0 API。",
-                    "peer_weight 来自共同评分余弦相似度和样本置信度；共同评分太少时会被自动降权。",
+                    "peer_weight 来自共同评分余弦、极限收藏空间相似度和样本置信度；共同评分太少或收藏量差距大时会被自动降权。",
                 ],
             ),
             sources=[Citation(title=f"Bangumi @{username}", url=f"https://bgm.tv/user/{username}", source="bangumi")]

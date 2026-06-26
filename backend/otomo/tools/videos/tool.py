@@ -16,7 +16,14 @@ from pydantic import BaseModel, Field
 
 from ...agent.contracts import Citation, Tool, ToolResult
 from ...config import settings
-from ..review.tool import AspectOpinion, CommentEvidence, _extract_aspect_opinions
+from ..review.tool import (
+    AspectOpinion,
+    AspectSummary,
+    CommentEvidence,
+    _build_aspect_summary,
+    _extract_aspect_opinions,
+    _format_aspect_summary,
+)
 
 _BILI_SEARCH_API = "https://api.bilibili.com/x/web-interface/search/type"
 _BILI_REPLY_API = "https://api.bilibili.com/x/v2/reply"
@@ -89,6 +96,7 @@ class BiliVideoCommentsResult(BaseModel):
     count: int
     comments: list[str] = Field(default_factory=list)
     aspect_opinions: list[AspectOpinion] = Field(default_factory=list)
+    aspect_summary: list[AspectSummary] = Field(default_factory=list)
     opinion_summary: list[str] = Field(default_factory=list)
     source_url: str
     caveats: list[str] = Field(default_factory=list)
@@ -271,28 +279,7 @@ def _sync_bili_replies(aid: int, limit: int) -> dict:
 
 
 def _summarize_aspect_opinions(opinions: list[AspectOpinion]) -> list[str]:
-    counter: dict[tuple[str, str], int] = {}
-    for op in opinions:
-        key = (op.aspect, op.sentiment)
-        counter[key] = counter.get(key, 0) + 1
-    ranked = sorted(counter.items(), key=lambda kv: (-kv[1], kv[0][0], kv[0][1]))
-    labels = {
-        "story": "剧情",
-        "character": "角色",
-        "pacing": "节奏",
-        "visual": "画面/作画",
-        "music": "音乐",
-        "direction": "制作/演出",
-        "text": "文本",
-        "system": "系统/玩法",
-        "voice": "声优",
-        "general": "整体观感",
-    }
-    sentiment = {"positive": "正向", "negative": "负向", "mixed": "分歧"}
-    return [
-        f"{labels.get(aspect, aspect)}：{sentiment.get(sig, sig)} × {count}"
-        for (aspect, sig), count in ranked[:6]
-    ]
+    return _format_aspect_summary(_build_aspect_summary(opinions))
 
 
 class FindVideosTool(Tool):
@@ -454,6 +441,7 @@ class GetBiliVideoCommentsTool(Tool):
         aspect_opinions = _extract_aspect_opinions([
             CommentEvidence(source="B站评论", samples=comments)
         ])
+        aspect_summary = _build_aspect_summary(aspect_opinions)
         url = f"https://www.bilibili.com/video/av{args.aid}"
         return ToolResult(
             ok=True,
@@ -462,7 +450,8 @@ class GetBiliVideoCommentsTool(Tool):
                 count=len(comments),
                 comments=comments,
                 aspect_opinions=aspect_opinions,
-                opinion_summary=_summarize_aspect_opinions(aspect_opinions),
+                aspect_summary=aspect_summary,
+                opinion_summary=_format_aspect_summary(aspect_summary),
                 source_url=url,
                 caveats=[
                     "B站评论是话语源，不是事实源。",

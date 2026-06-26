@@ -108,11 +108,13 @@ B站 = 视频搜索 + 创作者社区 + 评论语料。**分阶段**，不一上
 - `get_bilibili_video_comments` 已复用方面级抽取，返回 `aspect_opinions` 与 `opinion_summary`，用于总结导视/漫评评论区的期待点、担心点和争议点。
 - `season_guide_brief(include_video_comments=true)` 已能把白名单导视视频评论摘要接入新番导视结果，默认仍不抓评论以控制成本和风险。
 - `explain_acgn_meme` 已接入萌娘百科，用于梗/术语/出处解释。
-- `review_subject` 已增加方面级口碑雏形：story/character/pacing/visual/music/direction/text/system/voice/general + positive/negative/mixed + spoiler_risk。
-- `analyze_user_opinions` 已返回用户私评的 `aspect_opinions`，可用于解释用户具体喜欢/讨厌的是剧情、角色、节奏、作画等哪个方面。
+- `review_subject` 已增加方面级口碑摘要：story/character/pacing/visual/music/direction/text/system/voice/general + positive/negative/mixed + spoiler_risk，并聚合为 `aspect_summary`。
+- `analyze_user_opinions` 与 `get_bilibili_video_comments` 已返回 `aspect_summary`，可用于解释用户/评论区具体喜欢或担心的是剧情、角色、节奏、作画等哪个方面。
+- `compare_user_taste` 已升级同步率 v2：共同评分余弦 + 收藏空间相似度 + user/peer space + extreme/union 空间，并用共同评分数、共同收藏数和收藏量差距生成置信度解释。
+- `sync_user_recommendations` 已用 `peer_weight` 做好友推荐重排，权重综合评分同步、极限收藏空间相似度和样本置信度。
 
 仍保守处理：
 - B站视频内容/字幕、百合会/S1/NGA/贴吧等全文话语源 RAG 暂不做大规模抓取。
 - MusicBrainz 只作为音乐元数据源，不作为音乐口碑评分源；VGMdb 暂不接第三方非官方镜像。
-- 用户私评情感仍是关键词级弱信号，后续再集中升级为方面级情感抽取。
+- 用户私评/评论情感仍是规则版弱信号，后续可升级为 LLM 或 embedding 方面抽取。
 - 同步率仍是在线实时计算，好友页来自 HTML best-effort 解析；后续可加入缓存、更多 peer 筛选策略和更接近 Your Angle 的报告页。
