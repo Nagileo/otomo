@@ -26,6 +26,21 @@ class LoreResult(BaseModel):
     snippets: list[str] = Field(default_factory=list)
 
 
+class MemeExplainArgs(BaseModel):
+    query: str = Field(..., description="meme / slang / neta query")
+    title_hint: str | None = Field(None, description="optional exact Moegirl page title")
+    spoiler_level: str = Field("none", description="none/mild/full; meme pages may include spoilers")
+
+
+class MemeExplainResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    title: str
+    found: bool
+    snippets: list[str] = Field(default_factory=list)
+    explain_frame: list[str] = Field(default_factory=list)
+    spoiler_risk: str = "medium"
+
+
 class LoreSearchTool(Tool):
     name = "lore_search"
     description = (
@@ -63,5 +78,49 @@ class LoreSearchTool(Tool):
         )
 
 
+class MemeExplainTool(Tool):
+    name = "explain_acgn_meme"
+    description = (
+        "Explain ACGN memes/slang/neta via Moegirl page snippets. Use for questions like "
+        "'这个梗什么意思/出处是什么/为什么这么叫'. Treat meme pages as spoiler-prone discourse/lore."
+    )
+    args_model = MemeExplainArgs
+    result_model = MemeExplainResult
+
+    def __init__(self, client: MoegirlClient) -> None:
+        self.client = client
+
+    async def run(self, args: MemeExplainArgs) -> ToolResult[MemeExplainResult]:
+        seed = args.title_hint or args.query
+        titles = await self.client.opensearch(seed, limit=5)
+        if not titles:
+            return ToolResult(ok=True, data=MemeExplainResult(title="", found=False))
+        page = await self.client.extract(titles[0], intro_only=False)
+        if not page or not page.get("extract"):
+            return ToolResult(ok=True, data=MemeExplainResult(title=titles[0], found=False))
+        snippets = hybrid_rank(args.query, chunk_text(page["extract"]))[:6]
+        frame = [
+            "先说明字面含义/使用场景。",
+            "再说明来源或常见关联作品/角色。",
+            "最后标注不确定性；若涉及剧情反转，按 spoiler_level 收敛细节。",
+        ]
+        cite = Citation(
+            title=f"萌娘百科 - {page['title']}",
+            url=page.get("fullurl") or "",
+            source="moegirl",
+        )
+        return ToolResult(
+            ok=True,
+            data=MemeExplainResult(
+                title=page["title"],
+                found=True,
+                snippets=snippets,
+                explain_frame=frame,
+                spoiler_risk="high" if args.spoiler_level == "none" else "medium",
+            ),
+            sources=[cite],
+        )
+
+
 def build_moegirl_tools(client: MoegirlClient) -> list[Tool]:
-    return [LoreSearchTool(client)]
+    return [LoreSearchTool(client), MemeExplainTool(client)]

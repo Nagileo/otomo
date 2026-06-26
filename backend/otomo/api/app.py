@@ -54,6 +54,8 @@ class ChatRequest(BaseModel):
     message: str
     runner: Literal["react", "plan", "adaptive"] = "adaptive"
     session_id: str | None = None  # 传则跨请求复用会话（短期记忆）
+    spoiler_mode: Literal["none", "mild", "full"] | None = None
+    progress_episode: int | None = None
 
 
 @app.get("/health")
@@ -68,6 +70,15 @@ async def chat(req: ChatRequest):
     state = None
     if req.session_id:
         state = app.state.sessions.setdefault(req.session_id, AgentState())
+    elif req.spoiler_mode or req.progress_episode is not None:
+        state = AgentState()
+    if state is not None and (req.spoiler_mode or req.progress_episode is not None):
+        current = dict(state.short_term.get("spoiler") or {})
+        if req.spoiler_mode:
+            current["mode"] = req.spoiler_mode
+        if req.progress_episode is not None:
+            current["progress_episode"] = req.progress_episode
+        state.short_term["spoiler"] = current
 
     async def event_gen() -> AsyncIterator[dict]:
         meta = {"session_id": req.session_id or "", "runner": req.runner}

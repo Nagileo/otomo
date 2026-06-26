@@ -31,6 +31,80 @@ CORRECT_FC = (
 )
 
 
+def _legacy_runtime_state_prompt(state: Any | None) -> str:
+    """Serialize short-term runtime controls that should affect this turn."""
+    if state is None:
+        return ""
+    st = getattr(state, "short_term", {}) or {}
+    spoiler = st.get("spoiler") or {}
+    if not spoiler:
+        return ""
+    mode = spoiler.get("mode") or "none"
+    progress = spoiler.get("progress_episode")
+    parts = [
+        "运行时用户偏好：",
+        f"- spoiler_mode={mode}（none=无剧透，mild=轻微剧透，full=允许完整剧透）。",
+    ]
+    if progress is not None:
+        parts.append(f"- progress_episode={progress}；分集讨论/剧情回答不得越过该集。")
+    if spoiler.get("pending_followup"):
+        parts.append("- 本轮问题可能要求后续剧情/结局，但用户未授权剧透；先追问无剧透/轻微/完整剧透，不要直接回答剧透内容。")
+    parts.append("- 调 get_episode_comments 时，如果涉及分集进度，必须传 max_episode_sort/progress 对应参数。")
+    return "\n".join(parts)
+
+
+def update_spoiler_state_from_input(state: Any | None, user_input: str) -> None:
+    """Update conversation-level spoiler controls from explicit natural-language signals."""
+    if state is None:
+        return
+    from ..tools.spoiler.tool import assess_spoiler_policy
+
+    st = getattr(state, "short_term", None)
+    if st is None:
+        return
+    spoiler = dict(st.get("spoiler") or {"mode": "none"})
+    default = spoiler.get("mode") or "none"
+    policy = assess_spoiler_policy(user_input, default)
+    if policy.progress_episode is not None:
+        spoiler["progress_episode"] = policy.progress_episode
+    if policy.level in {"none", "mild", "full"} and not policy.needs_followup:
+        spoiler["mode"] = policy.level
+    spoiler["pending_followup"] = bool(policy.needs_followup and policy.level != "full")
+    if policy.needs_followup and policy.followup_question:
+        spoiler["followup_question"] = policy.followup_question
+    else:
+        spoiler.pop("followup_question", None)
+    st["spoiler"] = spoiler
+
+
+def runtime_state_prompt(state: Any | None) -> str:
+    """Serialize short-term runtime controls that should affect this turn."""
+    if state is None:
+        return ""
+    st = getattr(state, "short_term", {}) or {}
+    spoiler = st.get("spoiler") or {}
+    if not spoiler:
+        return ""
+    mode = spoiler.get("mode") or "none"
+    progress = spoiler.get("progress_episode")
+    parts = [
+        "运行时用户偏好：",
+        f"- spoiler_mode={mode}（none=无剧透，mild=轻微剧透，full=允许完整剧透）。",
+    ]
+    if progress is not None:
+        parts.append(f"- progress_episode={progress}；分集讨论和剧情回答不得越过该集。")
+    if spoiler.get("pending_followup"):
+        parts.append("- 本轮问题可能要求后续剧情/结局，但用户未授权剧透；先追问无剧透/轻微/完整剧透，不要直接回答剧透内容。")
+    parts.append("- 调 get_episode_comments 时，如果涉及分集进度，必须传 max_episode_sort/progress 对应参数。")
+    return "\n".join(parts)
+
+
+def inject_runtime_state(messages: list[dict], state: Any | None) -> None:
+    prompt = runtime_state_prompt(state)
+    if prompt:
+        messages.append({"role": "system", "content": prompt})
+
+
 def has_leak(text: str | None) -> bool:
     return bool(text) and any(m in text for m in LEAK_MARKERS)
 
@@ -78,6 +152,19 @@ def summarize(result: ToolResult) -> str:
     if result.data is None:
         return "ok（无数据）"
     d = result.data.model_dump(exclude_none=True)
+    if d.get("guide_comment_digests"):
+        digests = d["guide_comment_digests"]
+        parts = []
+        for x in digests[:2]:
+            summary = "；".join(str(s) for s in (x.get("opinion_summary") or [])[:2])
+            label = x.get("author") or x.get("video_title") or "B站导视"
+            parts.append(f"{label}：{summary}" if summary else str(label))
+        return f"{d.get('count', 0)} 部；导视评论 {len(digests)} 个视频；" + " / ".join(parts)
+    if d.get("opinion_summary"):
+        joined = "；".join(str(x) for x in d["opinion_summary"][:3])
+        return f"{d.get('count', 0)} 条；{joined}"
+    if d.get("aspect_opinions"):
+        return f"{len(d['aspect_opinions'])} 条方面观点"
     for key in ("subjects", "characters", "persons"):
         if key in d and isinstance(d[key], list):
             names = [it.get("name_cn") or it.get("name") for it in d[key][:5]]

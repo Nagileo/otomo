@@ -59,6 +59,8 @@ class PlanExecuteRunner(AgentRunner):
         state = state or AgentState()
         if not state.messages:
             state.messages.append({"role": "system", "content": SYSTEM_PROMPT})
+        C.update_spoiler_state_from_input(state, user_input)
+        C.inject_runtime_state(state.messages, state)
         state.messages.append({"role": "user", "content": user_input})
 
         tools = self.registry.openai_tools()
@@ -68,13 +70,15 @@ class PlanExecuteRunner(AgentRunner):
 
         try:
             # ---- 1. PLAN ---- #
-            plan_resp = await self._chat(
-                [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "system", "content": PLAN_PROMPT},
-                    {"role": "user", "content": user_input},
-                ]
-            )
+            runtime_prompt = C.runtime_state_prompt(state)
+            plan_messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": PLAN_PROMPT},
+            ]
+            if runtime_prompt:
+                plan_messages.append({"role": "system", "content": runtime_prompt})
+            plan_messages.append({"role": "user", "content": user_input})
+            plan_resp = await self._chat(plan_messages)
             plan_text = C.strip_leak(plan_resp.choices[0].message.content or "")
             yield PlanEvent(summary=plan_text[:400])
             state.messages.append(

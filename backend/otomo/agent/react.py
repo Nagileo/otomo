@@ -48,6 +48,8 @@ class ReActRunner(AgentRunner):
         state = state or AgentState()
         if not state.messages:
             state.messages.append({"role": "system", "content": SYSTEM_PROMPT})
+        C.update_spoiler_state_from_input(state, user_input)
+        C.inject_runtime_state(state.messages, state)
         state.messages.append({"role": "user", "content": user_input})
 
         tools = self.registry.openai_tools()

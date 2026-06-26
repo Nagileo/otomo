@@ -60,6 +60,8 @@ class AdaptiveRunner(AgentRunner):
         state = state or AgentState()
         if not state.messages:
             state.messages.append({"role": "system", "content": SYSTEM_PROMPT})
+        C.update_spoiler_state_from_input(state, user_input)
+        C.inject_runtime_state(state.messages, state)
         state.messages.append({"role": "user", "content": user_input})
 
         tools = self.registry.openai_tools()
@@ -69,13 +71,15 @@ class AdaptiveRunner(AgentRunner):
 
         try:
             # ---- 路由：简单→SIMPLE / 复杂→计划 ---- #
-            router = await self._chat(
-                [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "system", "content": ROUTER_PLAN_PROMPT},
-                    {"role": "user", "content": user_input},
-                ]
-            )
+            runtime_prompt = C.runtime_state_prompt(state)
+            router_messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": ROUTER_PLAN_PROMPT},
+            ]
+            if runtime_prompt:
+                router_messages.append({"role": "system", "content": runtime_prompt})
+            router_messages.append({"role": "user", "content": user_input})
+            router = await self._chat(router_messages)
             routed = C.strip_leak(router.choices[0].message.content or "")
             up = routed.strip().upper()
             compose_prompt = COMPOSE_PROMPT

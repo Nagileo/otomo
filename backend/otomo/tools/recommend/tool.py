@@ -24,6 +24,8 @@ from ...agent.contracts import Citation, Tool, ToolResult
 from ...config import settings
 from ...profile import compute_taste_profile
 from ..bangumi.client import SUBJECT_TYPE, BangumiClient
+from ..erogamescape.tool import EGSRankArgs, RankErogameScapeTool
+from ..review.tool import ReviewSubjectArgs, ReviewSubjectTool
 
 _RECALL_PER_TAG = 50
 _MAX_RECALL_TAGS = 8
@@ -76,6 +78,47 @@ def _series_key(name: str) -> str:
     return _SERIES_RE.sub("", name or "").strip().lower()
 
 
+def _norm_title(value: str | None) -> str:
+    if not value:
+        return ""
+    return "".join(ch.lower() for ch in value if ch.isalnum())
+
+
+_SAFE_EDITION_TOKENS = (
+    "extendededition", "全年龄版", "通常版", "完全版", "remaster", "remastered", "hd",
+    "ps4", "ps3", "psv", "switch", "ns", "pc", "steam", "edition", "版",
+)
+
+
+def _safe_edition_delta(longer: str, shorter: str) -> bool:
+    if not longer.startswith(shorter):
+        return False
+    delta = longer[len(shorter):]
+    return bool(delta) and any(tok in delta for tok in _SAFE_EDITION_TOKENS)
+
+
+def _egs_mapping_confidence(egs_title: str, subject: dict) -> tuple[float, str]:
+    """Return confidence for EGS title -> Bangumi subject.
+
+    We deliberately reject loose partial matches. A wrong galgame mapping is worse than no mapping:
+    ランス10 must not become ランス9, and サクラノ刻 must not become サクラノ詩.
+    """
+    egs_key = _norm_title(egs_title)
+    if not egs_key:
+        return 0.0, "empty_egs_title"
+    keys = {
+        _norm_title(subject.get("name")),
+        _norm_title(subject.get("name_cn")),
+    }
+    keys.discard("")
+    if egs_key in keys:
+        return 1.0, "exact_title"
+    for key in keys:
+        if _safe_edition_delta(key, egs_key) or _safe_edition_delta(egs_key, key):
+            return 0.86, "edition_delta"
+    return 0.0, "title_mismatch"
+
+
 def _expand_moods(tags: list[str]) -> list[str]:
     out: list[str] = []
     for t in tags:
@@ -107,6 +150,8 @@ def _blank(x: dict) -> dict:
         "rating": x.get("rating") or {},
         "image": img.get("common") or img.get("medium") or img.get("grid"),
         "cf": 0.0, "cf_from": set(),
+        "external": set(), "external_evidence": [], "external_boost": 0.0,
+        "external_mappings": [],
     }
 
 
@@ -115,6 +160,8 @@ def _blank_id() -> dict:
     return {
         "name": None, "matched": set(), "graph": set(), "weight": 0.0,
         "rating": {}, "image": None, "cf": 0.0, "cf_from": set(),
+        "external": set(), "external_evidence": [], "external_boost": 0.0,
+        "external_mappings": [],
     }
 
 
@@ -130,6 +177,27 @@ class RecommendArgs(BaseModel):
     use_graph: bool = Field(True, description="图谱召回：从你最爱作品的监督/制作组找其未看的其他作品")
     use_cf: bool = Field(True, description="协同召回：看过你爱的作品的人还看了啥（离线 CF，需 i2i 表；无表则自动跳过）")
     use_series: bool = Field(True, description="系列入口回溯：若推荐项是续集而你没看前作，自动换成入口作（别莫名其妙推你第二季）")
+    use_external_recall: bool = Field(True, description="game/galgame 推荐时，是否用批判空间排行做前置召回并映射回 Bangumi")
+    enrich_evidence: bool = Field(True, description="为推荐结果补充统一评价证据；game 会补批判空间/VNDB，默认开启")
+
+
+class RecEvidence(BaseModel):
+    source: str
+    score: float | None = None
+    scale: int | None = None
+    count: int | None = None
+    signal: str = "unknown"
+    note: str = ""
+
+
+class ExternalMappingEvidence(BaseModel):
+    source: str
+    external_title: str
+    external_id: int | str | None = None
+    bangumi_id: int
+    mapping_confidence: float
+    matched_by: str
+    conflict_reason: str | None = None
 
 
 class RecItem(BaseModel):
@@ -138,9 +206,14 @@ class RecItem(BaseModel):
     name: str
     score: float
     reasons: list[str]
+    explicit_tag_matches: list[str] = Field(default_factory=list)
     bangumi_score: float | None = None
     rank: int | None = None
     image: str | None = None
+    review_consensus: str | None = None
+    evidence: list[RecEvidence] = Field(default_factory=list)
+    external_mappings: list[ExternalMappingEvidence] = Field(default_factory=list)
+    quality_badges: list[str] = Field(default_factory=list)
 
 
 class RecommendResult(BaseModel):
@@ -148,6 +221,7 @@ class RecommendResult(BaseModel):
     based_on_tags: list[str]
     mode: str = "normal"
     items: list[RecItem] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
 
 
 class RecommendTool(Tool):
@@ -163,21 +237,28 @@ class RecommendTool(Tool):
 
     def __init__(self, client: BangumiClient) -> None:
         self.client = client
+        self.reviewer = ReviewSubjectTool(client)
+        self.egs_rank = RankErogameScapeTool()
 
     async def _tag_recall(self, cand, stype, recall_tags, user_tags, maxw, mood, seen, niche):
         offset = _NICHE_OFFSET if niche else 0
         for tag in recall_tags:
-            res = await self.client.search_subjects(
-                "", stype, sort="heat", limit=_RECALL_PER_TAG, tags=[tag], offset=offset
-            )
             w = maxw if tag in mood else user_tags.get(tag, 1.0)
-            for x in res.get("data", []):
-                sid = x.get("id")
-                if not sid or sid in seen:
-                    continue
-                c = cand.setdefault(sid, _blank(x))
-                c["matched"].add(tag)
-                c["weight"] += w
+            offsets = [0, 50, 100] if tag in mood else [offset]
+            for off in offsets:
+                res = await self.client.search_subjects(
+                    "", stype, sort="heat", limit=_RECALL_PER_TAG, tags=[tag], offset=off
+                )
+                batch = res.get("data", []) or []
+                for x in batch:
+                    sid = x.get("id")
+                    if not sid or sid in seen:
+                        continue
+                    c = cand.setdefault(sid, _blank(x))
+                    c["matched"].add(tag)
+                    c["weight"] += w
+                if len(batch) < _RECALL_PER_TAG:
+                    break
 
     async def _graph_recall(self, cand, stype, fav_ids, seen):
         for sid in fav_ids[:_GRAPH_FAV]:
@@ -212,6 +293,61 @@ class RecommendTool(Tool):
                     c = cand[nbr_sid] = _blank_id()
                 c["cf"] += 1.0 / (1 + rank)
                 c["cf_from"].add(sid)
+
+    async def _external_game_recall(self, cand: dict, seen: set[int], limit: int) -> None:
+        """Use EGS ranking as a front recall source, then anchor candidates back to Bangumi IDs."""
+        res = await self.egs_rank.run(
+            EGSRankArgs(sort="median", limit=min(max(limit * 4, 12), 40), min_votes=80, erogame_only=True)
+        )
+        if not res.ok or not res.data:
+            return
+        for egs in res.data.results[: min(limit * 3, 18)]:
+            try:
+                raw = await self.client.search_subjects(egs.title, SUBJECT_TYPE["game"], limit=5)
+            except Exception:  # noqa: BLE001
+                continue
+            subjects = raw.get("data") or []
+            matches: list[tuple[float, str, dict]] = []
+            for s in subjects:
+                conf, matched_by = _egs_mapping_confidence(egs.title, s)
+                if conf >= 0.85:
+                    matches.append((conf, matched_by, s))
+            matches.sort(key=lambda x: -x[0])
+            if not matches:
+                continue
+            if len(matches) > 1 and matches[0][0] == matches[1][0]:
+                continue
+            conf, matched_by, best = matches[0]
+            if not best or not best.get("id") or best["id"] in seen:
+                continue
+            sid = best["id"]
+            c = cand.setdefault(sid, _blank(best))
+            rank = f"#{egs.rank_position}" if egs.rank_position else "排行候选"
+            c["external"].add(
+                f"批判空间{rank} 中央值 {egs.median or '未知'} / 数据数 {egs.vote_count or 0}"
+                f"（EGS《{egs.title}》→ Bangumi，{matched_by}, conf={conf:.2f}）"
+            )
+            c["external_boost"] = max(c.get("external_boost", 0.0), min(((egs.median or 0) / 100) * 0.65, 0.65))
+            c["external_evidence"].append(
+                RecEvidence(
+                    source="ErogameScape/批判空间",
+                    score=egs.median,
+                    scale=100,
+                    count=egs.vote_count,
+                    signal="strong" if (egs.median or 0) >= 80 and (egs.vote_count or 0) >= 80 else "positive",
+                    note=f"{rank}；品牌 {egs.brand or '未知'}；映射 {matched_by} conf={conf:.2f}；EGS题名《{egs.title}》",
+                )
+            )
+            c["external_mappings"].append(
+                ExternalMappingEvidence(
+                    source="ErogameScape/批判空间",
+                    external_title=egs.title,
+                    external_id=egs.id,
+                    bangumi_id=sid,
+                    mapping_confidence=round(conf, 4),
+                    matched_by=matched_by,
+                )
+            )
 
     async def _enrich(self, ranked_ids: list[tuple[int, dict]]) -> None:
         """对前 N 个信息不全（缺评分或缺名，多来自图谱/协同召回）的候选按需补 get_subject。"""
@@ -289,6 +425,8 @@ class RecommendTool(Tool):
 
         cand: dict[int, dict] = {}
         await self._tag_recall(cand, stype, recall_tags, user_tags, maxw, mood, seen, args.niche)
+        if args.subject_type == "game" and args.use_external_recall:
+            await self._external_game_recall(cand, seen, args.limit)
 
         # 用户最爱作品（按评分降序）——图谱召回与协同召回共用作种子
         fav_sorted = sorted(watched, key=lambda it: -(it.get("rate") or 0))
@@ -312,17 +450,39 @@ class RecommendTool(Tool):
         def cf_bonus(c: dict) -> float:
             return min(c.get("cf", 0.0), _CF_CAP)  # 封顶，避免协同召回压过标签口味
 
+        def external_bonus(c: dict) -> float:
+            return min(c.get("external_boost", 0.0), 0.65)
+
+        mood_set = set(mood)
+
+        def explicit_tag_adjust(c: dict) -> float:
+            """用户这轮显式说的口味/心境要比历史画像更硬。
+
+            例如"今天想看治愈"时，历史画像里的热血/战斗候选不能靠总画像分数顶上来。
+            """
+            if not mood_set:
+                return 0.0
+            return 0.8 if c["matched"] & mood_set else -1.2
+
         # 预排（不含质量）→ 给 top 候选补名/评分 → 终排（含质量）
         prelim = sorted(
-            cand.items(), key=lambda kv: -(affinity(kv[1]) + graph_bonus(kv[1]) + cf_bonus(kv[1]))
-        )[:30]
+            cand.items(),
+            key=lambda kv: -(
+                affinity(kv[1]) + graph_bonus(kv[1]) + cf_bonus(kv[1])
+                + external_bonus(kv[1]) + explicit_tag_adjust(kv[1])
+            ),
+        )[:40]
         await self._enrich(prelim)
 
         def score(c: dict) -> float:
             if args.niche:  # 挖冷门：协同偏热门，权重压低
                 return (0.5 * affinity(c) + 0.5 * graph_bonus(c)
-                        + 0.4 * cf_bonus(c) + 2.0 * _quality_niche(c["rating"]))
-            return affinity(c) + graph_bonus(c) + cf_bonus(c) + 1.2 * _quality_popular(c["rating"])
+                        + 0.4 * cf_bonus(c) + external_bonus(c)
+                        + explicit_tag_adjust(c) + 2.0 * _quality_niche(c["rating"]))
+            return (
+                affinity(c) + graph_bonus(c) + cf_bonus(c) + external_bonus(c)
+                + explicit_tag_adjust(c) + 1.2 * _quality_popular(c["rating"])
+            )
 
         def cf_reason(c: dict) -> list[str]:
             if not c["cf_from"]:
@@ -336,6 +496,7 @@ class RecommendTool(Tool):
         out: list[RecItem] = []
         seen_series: set[str] = set()
         seen_ids: set[int] = set()
+        pool_limit = min(args.limit * 2, 20) if args.enrich_evidence else args.limit
         for sid, c in ranked:
             if not c["name"]:
                 continue  # 协同召回候选未被 enrich 补到名，跳过
@@ -352,24 +513,105 @@ class RecommendTool(Tool):
                 continue
             seen_ids.add(r_id)
             seen_series.add(sk)
+            explicit_matches = sorted(c["matched"] & mood_set)
+            reasons = sorted(c["matched"]) + sorted(c["graph"]) + sorted(c.get("external", set())) + cf_reason(c) + extra
+            if mood_set and not explicit_matches:
+                reasons.append("未命中本轮显式标签，作为画像邻近补充")
             out.append(RecItem(
                 id=r_id, name=r_name, score=round(score(c), 3),
-                reasons=sorted(c["matched"]) + sorted(c["graph"]) + cf_reason(c) + extra,
+                reasons=reasons,
+                explicit_tag_matches=explicit_matches,
                 bangumi_score=(r_rating or {}).get("score"),
                 rank=(r_rating or {}).get("rank"),
                 image=r_img,
+                evidence=list(c.get("external_evidence", [])),
+                external_mappings=list(c.get("external_mappings", [])),
             ))
-            if len(out) >= args.limit:
+            if len(out) >= pool_limit:
                 break
 
+        if args.enrich_evidence:
+            await self._enrich_review_evidence(out)
+            out.sort(key=lambda x: -x.score)
+            out = out[: args.limit]
+
         mode = "niche" if args.niche else ("explore" if args.explore else "normal")
+        notes: list[str] = []
+        if mood_set:
+            strict_count = sum(1 for it in out if it.explicit_tag_matches)
+            if strict_count == 0:
+                notes.append("没有找到未看且命中本轮显式标签的高置信候选；当前结果为画像邻近补充。")
+            elif strict_count < len(out):
+                notes.append("部分候选未命中本轮显式标签，只能作为画像邻近补充。")
         return ToolResult(
             ok=True,
             data=RecommendResult(
-                subject_type=args.subject_type, based_on_tags=recall_tags, mode=mode, items=out
+                subject_type=args.subject_type, based_on_tags=recall_tags, mode=mode, items=out, notes=notes
             ),
             sources=[
                 Citation(title=it.name, url=f"https://bgm.tv/subject/{it.id}", source="bangumi", image=it.image)
                 for it in out
             ],
         )
+
+    async def _enrich_review_evidence(self, items: list[RecItem]) -> None:
+        for item in items:
+            try:
+                res = await self.reviewer.run(
+                    ReviewSubjectArgs(
+                        subject_id=item.id,
+                        title_hint=item.name,
+                        include_comments=False,
+                        spoiler_level="none",
+                    )
+                )
+            except Exception:  # noqa: BLE001
+                continue
+            if not res.ok or not res.data:
+                continue
+            item.review_consensus = res.data.consensus
+            review_evidence = [
+                RecEvidence(
+                    source=r.source,
+                    score=r.score,
+                    scale=r.scale,
+                    count=r.count,
+                    signal=r.signal,
+                    note=r.note,
+                )
+                for r in res.data.ratings
+            ]
+            seen = {(e.source, e.score, e.scale, e.count, e.note) for e in item.evidence}
+            item.evidence.extend(
+                e for e in review_evidence if (e.source, e.score, e.scale, e.count, e.note) not in seen
+            )
+            bonus = _review_bonus(item.evidence)
+            if bonus:
+                item.score = round(item.score + bonus, 3)
+            item.quality_badges = _quality_badges(item.evidence)
+            item.reasons.extend(item.quality_badges)
+
+
+def _review_bonus(evidence: list[RecEvidence]) -> float:
+    total = 0.0
+    for ev in evidence:
+        if ev.signal == "strong":
+            total += 0.18
+        elif ev.signal == "positive":
+            total += 0.1
+        elif ev.signal == "mixed":
+            total -= 0.06
+        elif ev.signal == "weak":
+            total -= 0.18
+    return max(min(total, 0.45), -0.35)
+
+
+def _quality_badges(evidence: list[RecEvidence]) -> list[str]:
+    badges: list[str] = []
+    for ev in evidence:
+        if ev.signal in {"strong", "positive"}:
+            score = f"{ev.score:g}/{ev.scale}" if ev.score is not None and ev.scale else "口碑正向"
+            badges.append(f"{ev.source} {score}")
+        elif ev.signal in {"mixed", "weak"}:
+            badges.append(f"{ev.source} 口碑有争议")
+    return badges[:3]

@@ -49,7 +49,10 @@ export default function Home() {
       const res = await fetch(`${BACKEND}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: q, session_id: sessionId.current }),
+        body: JSON.stringify({
+          message: q,
+          session_id: sessionId.current,
+        }),
       });
       if (!res.body) throw new Error("no response body");
 

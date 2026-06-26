@@ -17,9 +17,13 @@ from .tools.bangumi.client import BangumiClient
 from .tools.erogamescape import build_erogamescape_tools
 from .tools.moegirl import build_moegirl_tools
 from .tools.moegirl.client import MoegirlClient
+from .tools.musicbrainz import build_musicbrainz_tools
 from .tools.profile import build_profile_tools
 from .tools.recommend import build_recommend_tools
+from .tools.review import build_review_tools
 from .tools.season import build_season_tools
+from .tools.spoiler import build_spoiler_tools
+from .tools.user_analysis import build_user_analysis_tools
 from .tools.videos import build_video_tools
 from .tools.vndb import build_vndb_tools
 from .tools.watchorder import build_watchorder_tools
@@ -43,7 +47,7 @@ def build_registry(
             registry.register(tool)
     for tool in build_wiki_tools():
         registry.register(tool)
-    for tool in build_comment_tools():
+    for tool in build_comment_tools(client):
         registry.register(tool)
     for tool in build_community_tools():
         registry.register(tool)
@@ -51,13 +55,21 @@ def build_registry(
         registry.register(tool)
     for tool in build_erogamescape_tools():
         registry.register(tool)
+    for tool in build_musicbrainz_tools():
+        registry.register(tool)
     for tool in build_anilist_tools():
         registry.register(tool)
     for tool in build_profile_tools(client, ltm or LongTermMemory()):
         registry.register(tool)
     for tool in build_recommend_tools(client):
         registry.register(tool)
+    for tool in build_review_tools(client):
+        registry.register(tool)
     for tool in build_season_tools(client):
+        registry.register(tool)
+    for tool in build_spoiler_tools():
+        registry.register(tool)
+    for tool in build_user_analysis_tools(client):
         registry.register(tool)
     for tool in build_yuc_tools():
         registry.register(tool)

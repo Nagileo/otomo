@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ...agent.contracts import Citation, Tool, ToolResult
 from ...config import settings
 from .._rag import hybrid_rank
+from ..bangumi.client import BangumiClient
 
 _BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 _TAG = re.compile(r"<[^>]+>")
@@ -81,6 +82,9 @@ class GetCommentsTool(Tool):
 
 class EpisodeCommentsArgs(BaseModel):
     ep_id: int = Field(..., description="分集 ep_id（先用 get_subject_episodes 按集号拿到）")
+    subject_id: int | None = Field(None, description="可选 Bangumi 条目 ID；用于工具层校验分集序号")
+    episode_sort: float | None = Field(None, description="当前 ep 的 sort/集号；用于防剧透硬限制")
+    max_episode_sort: float | None = Field(None, description="用户最多看到第几集；若 episode_sort 超过该值，工具拒绝抓取")
     query: str | None = Field(
         None, description="想了解的方面（如『名场面』『作画』『结局』『为什么这集评价高/有争议』）；传则语义检索相关讨论"
     )
@@ -93,6 +97,8 @@ class EpisodeCommentsResult(BaseModel):
     query: str | None = None
     count: int
     comments: list[str] = Field(default_factory=list)
+    blocked_by_spoiler: bool = False
+    note: str = ""
 
 
 class GetEpisodeCommentsTool(Tool):
@@ -106,7 +112,32 @@ class GetEpisodeCommentsTool(Tool):
     args_model = EpisodeCommentsArgs
     result_model = EpisodeCommentsResult
 
+    def __init__(self, client: BangumiClient | None = None) -> None:
+        self.client = client
+
     async def run(self, args: EpisodeCommentsArgs) -> ToolResult[EpisodeCommentsResult]:
+        episode_sort = args.episode_sort
+        if episode_sort is None and self.client is not None and args.subject_id is not None:
+            try:
+                raw = await self.client.get_episodes(args.subject_id, ep_type=0, limit=200)
+                for ep in raw.get("data") or []:
+                    if ep.get("id") == args.ep_id:
+                        episode_sort = ep.get("sort") or ep.get("ep")
+                        break
+            except Exception:  # noqa: BLE001
+                episode_sort = None
+        if args.max_episode_sort is not None and episode_sort is not None and episode_sort > args.max_episode_sort:
+            return ToolResult(
+                ok=True,
+                data=EpisodeCommentsResult(
+                    ep_id=args.ep_id,
+                    query=args.query,
+                    count=0,
+                    comments=[],
+                    blocked_by_spoiler=True,
+                    note=f"已按用户进度过滤：请求第 {episode_sort:g} 集，超过允许的第 {args.max_episode_sort:g} 集。",
+                ),
+            )
         url = f"https://bgm.tv/ep/{args.ep_id}"
         try:
             async with httpx.AsyncClient(
@@ -136,5 +167,5 @@ class GetEpisodeCommentsTool(Tool):
         )
 
 
-def build_comment_tools() -> list[Tool]:
-    return [GetCommentsTool(), GetEpisodeCommentsTool()]
+def build_comment_tools(client: BangumiClient | None = None) -> list[Tool]:
+    return [GetCommentsTool(), GetEpisodeCommentsTool(client)]

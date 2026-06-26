@@ -62,7 +62,7 @@
 ### B.5 B站定位（不是普通外链）
 B站 = 视频搜索 + 创作者社区 + 评论语料。**分阶段**，不一上来爬全站（反爬/账号风险）：
 - **v0**：搜索外链卡片 + **UP 白名单**（按题材：泛式/瓶子=综合漫评，FlowerMX=百合，芳文观星台/大猫猫组=芳文，名作之壁吧=数据导视）。
-- **v1**：用户给定 BV/URL → 取元数据/标题/简介/公开评论摘要；有字幕优先摘字幕。
+- **v1**：用户给定 BV/URL 或新番导视场景 → 取元数据/标题/公开评论摘要；有字幕优先摘字幕。
 - **v2**：可合规拿字幕/弹幕/评论再做视频 RAG，否则只 link-out。
 
 ### B.6 红线
@@ -77,7 +77,7 @@ B站 = 视频搜索 + 创作者社区 + 评论语料。**分阶段**，不一上
 - **评测层（关键）**：把 source routing 做成 **eval 维度**——检查"该用 Bangumi 没乱用 web""问分集有没有查 `episode_comments`""问 galgame 是否用 VNDB"。既不多一跳、又让"选对源"可验证，**直接接上 Agentic-RL 的 source routing reward**（路由从运行时负担变成可评测/可训练的能力）。
 - **后期边界**：工具涨到 40-60 个时，可加**非用户可见的轻量 tool-subset selector**（只为减少暴露给 LLM 的 schema 数、降延迟），是性能优化、不是现在的产品功能。
 - **AniList / Fandom**：作 Canonical / Lore 的**兜底添头**（主源查不到再补），主体不动摇。
-- **B站评论**：v0 保持 link-out + UP 白名单；**未来重点**——用户给 BV → 单视频摘要 / 评论摘要，乃至视频评论作 RAG 知识库（如问新番时补充评论观点）。保持不大规模爬（反爬 / 账号风险）。
+- **B站评论**：保持 link-out + UP 白名单为默认；已开始支持用户给定视频/新番导视场景的单页公开评论摘要。未来再考虑视频评论作 RAG 知识库。保持不大规模爬（反爬 / 账号风险）。
 
 ## C. 算法层（Agentic-RL 平移，拓宽 moat）
 把可验证奖励从"图谱多跳"扩展到垂直 agent 的更多维度：
@@ -95,3 +95,24 @@ B站 = 视频搜索 + 创作者社区 + 评论语料。**分阶段**，不一上
 5. VNDB API 接入（galgame canonical 补 Bangumi）。
 6. B站 v0（搜索外链 + UP 白名单）；v1/v2 视合规推进。
 7. 算法：上述 reward 纳入 verifier / RL（待 Phase 3）。
+## E. 2026-06-26 落地状态
+
+已实现：
+- `recommend_subjects` 的 galgame EGS 前置召回已有严格 EGS 标题 -> Bangumi ID 对齐：只接受 exact title 或安全版本差异，避免《兰斯10》误配《兰斯9》、《樱之刻》误配《樱之诗》。
+- `review_subject` 已做统一评价矩阵雏形：Bangumi 为主，anime/book 补 AniList，game/galgame 补 EGS/VNDB，music 补 MusicBrainz 元数据。
+- `list_bangumi_friends` / `sync_user_recommendations(auto_friends=true)` 已支持 best-effort 解析 Bangumi 好友页并做同好高分未看推荐。
+- `compare_user_taste` 已支持 Your Angle 风格的同步率雏形：共同评分余弦、用户空间/peer 空间/并集空间相似度、共同高低分、最大分歧；`sync_user_recommendations` 已用 `peer_weight` 做好友推荐加权。
+- `assess_spoiler_policy` 已支持自然语言剧透状态：默认无剧透，识别“看到第 N 集/别剧透/可以剧透/结局”等信号，并写入会话运行时状态。
+- `get_episode_comments` 已有工具层 `max_episode_sort` 硬过滤；`analyze_abandoned_subjects` 可结合 `ep_status` 和附近分集讨论做弃坑节点分析。
+- `search_bilibili_guide_videos` 已返回 B站白名单导视视频元数据，`get_bilibili_video_comments` 已能抽取单视频公开评论样本。
+- `get_bilibili_video_comments` 已复用方面级抽取，返回 `aspect_opinions` 与 `opinion_summary`，用于总结导视/漫评评论区的期待点、担心点和争议点。
+- `season_guide_brief(include_video_comments=true)` 已能把白名单导视视频评论摘要接入新番导视结果，默认仍不抓评论以控制成本和风险。
+- `explain_acgn_meme` 已接入萌娘百科，用于梗/术语/出处解释。
+- `review_subject` 已增加方面级口碑雏形：story/character/pacing/visual/music/direction/text/system/voice/general + positive/negative/mixed + spoiler_risk。
+- `analyze_user_opinions` 已返回用户私评的 `aspect_opinions`，可用于解释用户具体喜欢/讨厌的是剧情、角色、节奏、作画等哪个方面。
+
+仍保守处理：
+- B站视频内容/字幕、百合会/S1/NGA/贴吧等全文话语源 RAG 暂不做大规模抓取。
+- MusicBrainz 只作为音乐元数据源，不作为音乐口碑评分源；VGMdb 暂不接第三方非官方镜像。
+- 用户私评情感仍是关键词级弱信号，后续再集中升级为方面级情感抽取。
+- 同步率仍是在线实时计算，好友页来自 HTML best-effort 解析；后续可加入缓存、更多 peer 筛选策略和更接近 Your Angle 的报告页。
