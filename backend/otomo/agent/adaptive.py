@@ -70,6 +70,9 @@ class AdaptiveRunner(AgentRunner):
         steps = 0
 
         try:
+            for ev in C.runtime_state_events(state):
+                yield ev
+
             # ---- 路由：简单→SIMPLE / 复杂→计划 ---- #
             runtime_prompt = C.runtime_state_prompt(state)
             router_messages = [

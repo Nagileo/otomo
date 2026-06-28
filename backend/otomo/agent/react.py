@@ -59,6 +59,9 @@ class ReActRunner(AgentRunner):
         corrections = 0
 
         try:
+            for ev in C.runtime_state_events(state):
+                yield ev
+
             # ---- 阶段 1：工具循环 ---- #
             for _ in range(self.max_iters):
                 resp = await self.llm.chat.completions.create(

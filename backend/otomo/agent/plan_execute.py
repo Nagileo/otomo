@@ -69,6 +69,9 @@ class PlanExecuteRunner(AgentRunner):
         steps = 0
 
         try:
+            for ev in C.runtime_state_events(state):
+                yield ev
+
             # ---- 1. PLAN ---- #
             runtime_prompt = C.runtime_state_prompt(state)
             plan_messages = [

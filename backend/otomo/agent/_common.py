@@ -18,6 +18,7 @@ from .contracts import (
     Citation,
     EntityRef,
     ObservationEvent,
+    StateEvent,
     ToolCallEvent,
     ToolResult,
 )
@@ -105,6 +106,28 @@ def inject_runtime_state(messages: list[dict], state: Any | None) -> None:
         messages.append({"role": "system", "content": prompt})
 
 
+def runtime_state_events(state: Any | None) -> list[StateEvent]:
+    """Expose runtime state to the UI before the model starts a turn."""
+    if state is None:
+        return []
+    st = getattr(state, "short_term", {}) or {}
+    events: list[StateEvent] = []
+    spoiler = st.get("spoiler") or {}
+    if spoiler:
+        events.append(
+            StateEvent(
+                scope="spoiler",
+                snapshot={
+                    "mode": spoiler.get("mode") or "none",
+                    "progress_episode": spoiler.get("progress_episode"),
+                    "pending_followup": bool(spoiler.get("pending_followup")),
+                    "followup_question": spoiler.get("followup_question"),
+                },
+            )
+        )
+    return events
+
+
 def has_leak(text: str | None) -> bool:
     return bool(text) and any(m in text for m in LEAK_MARKERS)
 
@@ -179,6 +202,135 @@ def summarize(result: ToolResult) -> str:
             names = [n for n in names if n]
             return f"{d.get('count', len(d[key]))} 条：{', '.join(names)}" if names else f"{d.get('count', 0)} 条"
     return d.get("name_cn") or d.get("name") or "ok"
+
+
+_PANEL_TOOLS = {"review_subject", "compare_user_taste", "season_guide_brief", "recommend_subjects"}
+
+
+def _trim_text(value: Any, limit: int = 220) -> str:
+    text = str(value or "").strip()
+    return text[:limit]
+
+
+def _trim_strings(values: Any, *, limit: int = 6, text_limit: int = 220) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    return [_trim_text(v, text_limit) for v in values[:limit] if str(v or "").strip()]
+
+
+def _trim_dicts(values: Any, *, limit: int = 12) -> list[dict[str, Any]]:
+    return [v for v in (values or [])[:limit] if isinstance(v, dict)]
+
+
+def _safe_review_payload(data: dict[str, Any]) -> dict[str, Any]:
+    comments = []
+    for item in _trim_dicts(data.get("comments"), limit=4):
+        comments.append({
+            **item,
+            "samples": _trim_strings(item.get("samples"), limit=3, text_limit=180),
+        })
+    return {
+        "subject_id": data.get("subject_id"),
+        "title": data.get("title"),
+        "subject_type": data.get("subject_type"),
+        "spoiler_level": data.get("spoiler_level"),
+        "ratings": _trim_dicts(data.get("ratings"), limit=8),
+        "comments": comments,
+        "praise": _trim_dicts(data.get("praise"), limit=4),
+        "criticism": _trim_dicts(data.get("criticism"), limit=4),
+        "aspect_summary": _trim_dicts(data.get("aspect_summary"), limit=8),
+        "consensus": data.get("consensus"),
+        "confidence": data.get("confidence"),
+        "caveats": _trim_strings(data.get("caveats"), limit=8),
+        "source_matrix": _trim_dicts(data.get("source_matrix"), limit=10),
+        "suggested_summary_points": _trim_strings(data.get("suggested_summary_points"), limit=8),
+    }
+
+
+def _safe_taste_payload(data: dict[str, Any]) -> dict[str, Any]:
+    affinity = dict(data.get("affinity") or {})
+    for key in ("liked_together", "disliked_together", "biggest_disagreements"):
+        affinity[key] = _trim_dicts(affinity.get(key), limit=6)
+    affinity["confidence_reasons"] = _trim_strings(affinity.get("confidence_reasons"), limit=6)
+    return {
+        "username": data.get("username"),
+        "peer_username": data.get("peer_username"),
+        "subject_type": data.get("subject_type"),
+        "affinity": affinity,
+        "caveats": _trim_strings(data.get("caveats"), limit=6),
+    }
+
+
+def _safe_season_payload(data: dict[str, Any]) -> dict[str, Any]:
+    items = []
+    for item in _trim_dicts(data.get("items"), limit=20):
+        copied = dict(item)
+        copied["tags"] = _trim_strings(copied.get("tags"), limit=10, text_limit=40)
+        copied["match_tags"] = _trim_strings(copied.get("match_tags"), limit=6, text_limit=40)
+        copied["evidence"] = _trim_strings(copied.get("evidence"), limit=6, text_limit=160)
+        copied["guide_videos"] = _trim_dicts(copied.get("guide_videos"), limit=3)
+        items.append(copied)
+    digests = []
+    for item in _trim_dicts(data.get("guide_comment_digests"), limit=3):
+        digests.append({
+            **item,
+            "opinion_summary": _trim_strings(item.get("opinion_summary"), limit=6, text_limit=160),
+            "caveats": _trim_strings(item.get("caveats"), limit=4, text_limit=160),
+        })
+    return {
+        "season": data.get("season"),
+        "count": data.get("count"),
+        "personalized": data.get("personalized"),
+        "profile_tags": _trim_strings(data.get("profile_tags"), limit=12, text_limit=40),
+        "focus_tags": _trim_strings(data.get("focus_tags"), limit=8, text_limit=40),
+        "items": items,
+        "guide_videos": _trim_dicts(data.get("guide_videos"), limit=8),
+        "guide_comment_digests": digests,
+        "notes": _trim_strings(data.get("notes"), limit=6, text_limit=220),
+    }
+
+
+def _safe_recommend_payload(data: dict[str, Any]) -> dict[str, Any]:
+    items = []
+    for item in _trim_dicts(data.get("items"), limit=20):
+        copied = dict(item)
+        copied["reasons"] = _trim_strings(copied.get("reasons"), limit=8, text_limit=160)
+        copied["explicit_tag_matches"] = _trim_strings(copied.get("explicit_tag_matches"), limit=8, text_limit=40)
+        copied["evidence"] = _trim_dicts(copied.get("evidence"), limit=8)
+        copied["external_mappings"] = _trim_dicts(copied.get("external_mappings"), limit=6)
+        copied["quality_badges"] = _trim_strings(copied.get("quality_badges"), limit=5, text_limit=120)
+        items.append(copied)
+    return {
+        "subject_type": data.get("subject_type"),
+        "based_on_tags": _trim_strings(data.get("based_on_tags"), limit=12, text_limit=40),
+        "mode": data.get("mode"),
+        "items": items,
+        "notes": _trim_strings(data.get("notes"), limit=6, text_limit=220),
+    }
+
+
+def panel_data_from_payload(name: str, payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return UI-safe structured payload for tools that have dedicated evidence panels."""
+    if name not in _PANEL_TOOLS or not isinstance(payload, dict):
+        return None
+    data = payload.get("data") if "data" in payload else payload
+    if not isinstance(data, dict):
+        return None
+    if name == "review_subject":
+        return _safe_review_payload(data)
+    if name == "compare_user_taste":
+        return _safe_taste_payload(data)
+    if name == "season_guide_brief":
+        return _safe_season_payload(data)
+    if name == "recommend_subjects":
+        return _safe_recommend_payload(data)
+    return None
+
+
+def panel_data(name: str, result: ToolResult) -> dict[str, Any] | None:
+    if name not in _PANEL_TOOLS or not result.ok or result.data is None:
+        return None
+    return panel_data_from_payload(name, result.data.model_dump(mode="json", exclude_none=True))
 
 
 # 工具返回里承载实体的容器键 → 实体类型（items=recommend 结果，按 subject 计）
@@ -269,6 +421,7 @@ async def step_tools(
         yield ObservationEvent(
             name=tc.function.name, ok=result.ok, summary=summarize(result),
             sources=result.sources, entities=extract_entities(result),
+            data=panel_data(tc.function.name, result),
         )
         messages.append({"role": "tool", "tool_call_id": tc.id, "content": result.to_observation()})
 

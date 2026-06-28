@@ -3,6 +3,7 @@
 import { useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { EvidencePanels, SpoilerBadge } from "./evidence-panels";
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND ?? "http://localhost:8000";
 
@@ -20,12 +21,21 @@ type TraceItem =
   | { kind: "obs"; name: string; ok: boolean; summary: string }
   | { kind: "note"; text: string };
 type Msg = { role: "user" | "assistant"; content: string };
+type EvidenceMap = Record<string, Record<string, any>[]>;
+type SpoilerState = {
+  mode?: string;
+  progress_episode?: number;
+  pending_followup?: boolean;
+  followup_question?: string;
+};
 
 export default function Home() {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [trace, setTrace] = useState<TraceItem[]>([]);
   const [answer, setAnswer] = useState("");
   const [sources, setSources] = useState<Source[]>([]);
+  const [evidence, setEvidence] = useState<EvidenceMap>({});
+  const [spoiler, setSpoiler] = useState<SpoilerState | null>(null);
   const [followups, setFollowups] = useState<string[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -39,6 +49,7 @@ export default function Home() {
     setMessages((m) => [...m, { role: "user", content: q }]);
     setTrace([]);
     setSources([]);
+    setEvidence({});
     setFollowups([]);
     setAnswer("");
     answerRef.current = "";
@@ -100,6 +111,15 @@ export default function Home() {
         break;
       case "observation":
         setTrace((t) => [...t, { kind: "obs", name: ev.name, ok: ev.ok, summary: ev.summary }]);
+        if (ev.data) {
+          setEvidence((prev) => ({
+            ...prev,
+            [ev.name]: [...(prev[ev.name] ?? []), ev.data],
+          }));
+        }
+        break;
+      case "state":
+        if (ev.scope === "spoiler") setSpoiler(ev.snapshot ?? null);
         break;
       case "answer_delta":
         answerRef.current += ev.text;
@@ -126,6 +146,8 @@ export default function Home() {
     setMessages([]);
     setTrace([]);
     setSources([]);
+    setEvidence({});
+    setSpoiler(null);
     setFollowups([]);
     setAnswer("");
     answerRef.current = "";
@@ -137,6 +159,7 @@ export default function Home() {
         <div>
           <div className="title">Otomo · 番组搭子</div>
           <div className="sub">ACGN 知识图谱 Agent — 多跳问答 / 跨媒体追溯 / 语义 RAG / 个性化推荐</div>
+          <SpoilerBadge spoiler={spoiler} />
         </div>
         <button className="ghost" onClick={newChat} disabled={busy}>+ 新对话</button>
       </div>
@@ -177,6 +200,7 @@ export default function Home() {
               </div>
             </div>
           )}
+          <EvidencePanels evidence={evidence} />
           {followups.length > 0 && (
             <div className="followups">
               {followups.map((q, i) => (

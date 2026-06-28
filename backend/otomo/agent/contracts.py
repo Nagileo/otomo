@@ -127,6 +127,15 @@ class ObservationEvent(BaseModel):
     summary: str
     sources: list[Citation] = Field(default_factory=list)
     entities: list[EntityRef] = Field(default_factory=list)  # 该步返回的 canonical 实体（路径重建/校验用）
+    data: dict[str, Any] | None = None  # 面板白名单工具的结构化 payload，供前端渲染证据卡片
+
+
+class StateEvent(BaseModel):
+    """运行时状态快照。用于把剧透/记忆/画像这类跨轮状态显式暴露给前端。"""
+
+    type: Literal["state"] = "state"
+    scope: Literal["spoiler", "memory", "profile"]
+    snapshot: dict[str, Any] = Field(default_factory=dict)
 
 
 class ReflectEvent(BaseModel):
@@ -161,6 +170,7 @@ AgentEvent = (
     PlanEvent
     | ToolCallEvent
     | ObservationEvent
+    | StateEvent
     | ReflectEvent
     | AnswerDeltaEvent
     | FinalEvent

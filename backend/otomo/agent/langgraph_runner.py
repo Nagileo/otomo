@@ -11,6 +11,7 @@ import json
 from typing import AsyncIterator
 
 from ..config import settings
+from . import _common as C
 from .contracts import (
     AgentEvent,
     AgentRunner,
@@ -63,7 +64,17 @@ class LangGraphRunner(AgentRunner):
         from langchain_core.messages import AIMessage, ToolMessage
 
         try:
-            result = await self.agent.ainvoke({"messages": [("user", user_input)]})
+            state = state or AgentState()
+            C.update_spoiler_state_from_input(state, user_input)
+            for ev in C.runtime_state_events(state):
+                yield ev
+
+            messages = []
+            runtime_prompt = C.runtime_state_prompt(state)
+            if runtime_prompt:
+                messages.append(("system", runtime_prompt))
+            messages.append(("user", user_input))
+            result = await self.agent.ainvoke({"messages": messages})
             steps = 0
             answer = ""
             for m in result.get("messages", []):
@@ -72,8 +83,14 @@ class LangGraphRunner(AgentRunner):
                         steps += 1
                         yield ToolCallEvent(name=tc["name"], args=tc.get("args", {}))
                 elif isinstance(m, ToolMessage):
+                    name = getattr(m, "name", "tool")
+                    payload = C.safe_json(str(m.content))
+                    ok = payload.get("ok", True) if isinstance(payload, dict) else True
                     yield ObservationEvent(
-                        name=getattr(m, "name", "tool"), ok=True, summary=str(m.content)[:200]
+                        name=name,
+                        ok=ok,
+                        summary=str(m.content)[:200],
+                        data=C.panel_data_from_payload(name, payload) if ok else None,
                     )
                 elif isinstance(m, AIMessage) and not m.tool_calls and m.content:
                     answer = m.content if isinstance(m.content, str) else str(m.content)
