@@ -256,6 +256,18 @@ def _whitelist_by_name() -> dict[str, dict]:
     return {u["name"]: u for u in _GUIDE_UPS}
 
 
+def _bili_json(data: dict) -> dict:
+    """B站把风控/错误放在 200 响应体的 code 字段（-412 风控 / -404 等），HTTP 状态仍是 200。
+
+    code!=0 时抛 ValueError，让上层的 except 统一按"抓取失败"降级，而不是静默返回空列表
+    （否则 agent 会误以为"没有导视视频/没有评论"）。
+    """
+    code = data.get("code", 0)
+    if code not in (0, None):
+        raise ValueError(f"bilibili code={code}: {data.get('message') or ''}")
+    return data
+
+
 def _sync_bili_search(query: str) -> dict:
     r = httpx.get(
         _BILI_SEARCH_API,
@@ -264,7 +276,7 @@ def _sync_bili_search(query: str) -> dict:
         timeout=settings.http_timeout,
     )
     r.raise_for_status()
-    return r.json()
+    return _bili_json(r.json())
 
 
 def _sync_bili_replies(aid: int, limit: int) -> dict:
@@ -275,7 +287,7 @@ def _sync_bili_replies(aid: int, limit: int) -> dict:
         timeout=settings.http_timeout,
     )
     r.raise_for_status()
-    return r.json()
+    return _bili_json(r.json())
 
 
 def _summarize_aspect_opinions(opinions: list[AspectOpinion]) -> list[str]:
@@ -349,7 +361,7 @@ class SearchBiliGuideVideosTool(Tool):
                     params={"search_type": "video", "keyword": q, "page": 1},
                 )
                 r.raise_for_status()
-                data = r.json()
+                data = _bili_json(r.json())
         except httpx.HTTPStatusError as e:
             if e.response.status_code != 412:
                 return ToolResult(ok=False, error=f"B站导视元数据搜索失败：HTTP {e.response.status_code}")

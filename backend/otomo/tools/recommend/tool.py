@@ -409,7 +409,17 @@ class RecommendTool(Tool):
 
     async def run(self, args: RecommendArgs) -> ToolResult[RecommendResult]:
         stype = SUBJECT_TYPE[args.subject_type]
-        username = args.username or (await self.client.get_me()).get("username")
+        if args.username:
+            username = args.username
+        else:
+            try:
+                me = await self.client.get_me()
+            except Exception:  # noqa: BLE001
+                return ToolResult(
+                    ok=False,
+                    error="未提供 username 且无法获取当前账号（需要有效 BANGUMI_TOKEN）；请改用 username 指定要推荐的用户。",
+                )
+            username = me.get("username") or str(me.get("id"))
 
         items = await self.client.get_all_user_collections(username, stype, None, max_items=_MAX_COLLECT)
         seen = {it["subject"]["id"] for it in items if it.get("subject", {}).get("id")}

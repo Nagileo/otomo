@@ -222,6 +222,7 @@ class RankErogameScapeTool(Tool):
     description = (
         "读取 ErogameScape / 批判空间排行榜，返回排名位、中央値、平均值、标准差、数据数。"
         "用于 galgame 推荐的前置召回、口碑排行、按年份查高口碑作品。外站可能访问不稳定；引用需注明批判空间。"
+        "rank_position 是批判空间原始榜位，已按 min_votes 过滤掉低样本作品，故序号可能不连续（跳号属正常）。"
     )
     args_model = EGSRankArgs
     result_model = EGSRankResult

@@ -411,6 +411,7 @@ class SeasonGuideBriefTool(Tool):
             guide_comment_digests=guide_comment_digests,
             notes=[
                 "Bangumi 提供条目/评分/收藏锚点，yuc 提供放送表/官网/PV/制作阵容。",
+                "本季分诊以 Bangumi 已收录且有播出日期的条目为骨架，yuc 仅补充放送/制作信息；Bangumi 未收录的番不会出现在分诊里，冷门或尚未收录的新番可能遗漏，可对照 yuc.wiki 原表。",
                 (
                     "B站导视评论已抽样读取；它们是话语源，不是事实源，且可能包含剧透/玩梗。"
                     if guide_comment_digests else

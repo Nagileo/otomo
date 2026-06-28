@@ -522,7 +522,11 @@ class ReviewSubjectTool(Tool):
         if args.spoiler_level == "none":
             caveats.append("无剧透模式：不要展开结局、反转、后期真相。")
         if detail.type == 4:
-            caveats.append("galgame 评价需区分中文 Bangumi、日本批判空间、国际 VNDB 三个圈层。")
+            has_vn_evidence = any(r.source in {"ErogameScape/批判空间", "VNDB"} for r in ratings)
+            if has_vn_evidence:
+                caveats.append("galgame/视觉小说评价需区分中文 Bangumi、日本批判空间、国际 VNDB 三个圈层。")
+            else:
+                caveats.append("本作未在批判空间/VNDB 命中，可能不是 galgame/视觉小说；gal 圈外部评分不适用，以 Bangumi game 数据为准。")
         praise, criticism = _pick_aspects(comments)
         aspect_opinions = _extract_aspect_opinions(comments)
         aspect_summary = _build_aspect_summary(aspect_opinions)

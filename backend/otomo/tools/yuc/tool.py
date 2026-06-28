@@ -80,10 +80,13 @@ def _links(table: str) -> tuple[str | None, str | None]:
 def _studio(staff: str | None) -> str | None:
     if not staff:
         return None
-    m = re.search(r"动画制作[:：]\s*([^\n]+(?:\n[^\n]+)?)", staff)
+    # 动画制作后可能跟多家公司，yuc 用 <br>（_clean 后变换行）分隔；后续行不含字段冒号才算制作公司。
+    m = re.search(r"动画制作[:：]\s*([^\n]+(?:\n[^\n：:]+)*)", staff)
     if not m:
         return None
-    return re.sub(r"\s+", " ", m.group(1)).strip()
+    # 多家公司用顿号连接，避免"A-1 Pictures Psyde Kick Studio"被空格粘连成一家。
+    studios = [re.sub(r"\s+", " ", line).strip() for line in m.group(1).split("\n")]
+    return "、".join(dict.fromkeys(s for s in studios if s)) or None
 
 
 def _parse(html: str, limit: int) -> list[YucAnime]:
