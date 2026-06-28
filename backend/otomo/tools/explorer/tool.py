@@ -15,6 +15,7 @@ from ..bangumi.client import SUBJECT_TYPE, BangumiClient
 
 class ExploreVoiceNetworkArgs(BaseModel):
     person: str | None = Field(None, description="声优/人物名，如 花守ゆみり；看 TA 的出演网络")
+    character: str | None = Field(None, description="角色名，如 後藤ひとり；看角色→声优")
     subject_id: int | None = Field(None, description="作品 ID；看该作的角色-声优网络")
     subject_type: Literal["anime", "book", "music", "game", "real"] = Field(
         "anime", description="person 模式按此类型过滤出演作品"
@@ -35,7 +36,7 @@ class NetworkNode(BaseModel):
 
 class VoiceNetworkResult(BaseModel):
     anchor: str
-    anchor_kind: Literal["person", "subject"]
+    anchor_kind: Literal["person", "subject", "character"]
     anchor_id: int | None = None
     nodes: list[NetworkNode] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
@@ -49,9 +50,9 @@ def _img(images: dict | None) -> str | None:
 class ExploreVoiceNetworkTool(Tool):
     name = "explore_voice_network"
     description = (
-        "探索角色/声优图谱网络：给声优名看 TA 的出演作品网络（带角色、评分、按高分排）；"
-        "给作品 ID 看该作主要角色及其声优阵容。"
-        "用于『这个 CV 还配过哪些高分作 / 这部番声优阵容 / 角色声优漫游』。"
+        "探索角色/声优图谱网络：给声优名(person)看 TA 的出演网络（带角色、评分、按高分排）；"
+        "给角色名(character)看角色→声优；给作品 ID(subject_id)看该作角色声优阵容。"
+        "用于『这个 CV 还配过哪些高分作 / 某角色声优是谁 / 这部番声优阵容 / 角色声优漫游』。"
     )
     args_model = ExploreVoiceNetworkArgs
     result_model = VoiceNetworkResult
@@ -110,13 +111,37 @@ class ExploreVoiceNetworkTool(Tool):
             notes=[f"该作主要角色及声优阵容，共 {len(nodes)} 个"],
         )
 
+    async def _character_network(self, character: str, limit: int) -> VoiceNetworkResult:
+        res = await self.client.search_characters(character, limit=1)
+        cand = res.get("data") or []
+        if not cand or not cand[0].get("id"):
+            return VoiceNetworkResult(anchor=character, anchor_kind="character", notes=[f"未找到角色「{character}」"])
+        cid, cname = cand[0]["id"], cand[0].get("name") or character
+        persons = await self.client.get_character_persons(cid)
+        nodes: list[NetworkNode] = []
+        for p in (persons or [])[:limit]:
+            if not p.get("id"):
+                continue
+            ctx = p.get("subject_name_cn") or p.get("subject_name") or ""
+            nodes.append(NetworkNode(
+                kind="voice", id=p["id"], name=p.get("name") or "",
+                detail="CV" + (f" · {ctx}" if ctx else ""),
+                url=f"https://bgm.tv/person/{p['id']}",
+            ))
+        return VoiceNetworkResult(
+            anchor=cname, anchor_kind="character", anchor_id=cid, nodes=nodes,
+            notes=[f"{cname} 的声优 / 出演者，共 {len(nodes)} 位"],
+        )
+
     async def run(self, args: ExploreVoiceNetworkArgs) -> ToolResult[VoiceNetworkResult]:
         if args.person:
             data = await self._person_network(args.person, args.subject_type, args.limit, args.enrich_scores)
+        elif args.character:
+            data = await self._character_network(args.character, args.limit)
         elif args.subject_id:
             data = await self._subject_network(args.subject_id, args.limit)
         else:
-            return ToolResult(ok=False, error="需要 person（声优名）或 subject_id（作品）之一")
+            return ToolResult(ok=False, error="需要 person（声优名）/ character（角色名）/ subject_id（作品）之一")
         return ToolResult(
             ok=True,
             data=data,

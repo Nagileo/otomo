@@ -798,9 +798,16 @@ function EpisodeRadarPanel({ data }: { data: AnyRecord }) {
         ))}
       </div>
       <div className="section-title">高能集（讨论最热）</div>
-      <div className="compact-list">
+      <div className="compact-list" style={{ flexDirection: "column", alignItems: "stretch" }}>
         {peaks.map((p: AnyRecord, i: number) => (
-          <span key={i}>第 {p.sort} 集 · {text(p.name, "")} · {p.comments} 讨论</span>
+          <div key={i} style={{ marginBottom: 4 }}>
+            <span>第 {p.sort} 集 · {text(p.name, "")} · {p.comments} 讨论</span>
+            {list<string>(p.discussion).length > 0 && (
+              <div className="caveats" style={{ marginTop: 2 }}>
+                {list<string>(p.discussion).map((d, j) => <span key={j}>{d}</span>)}
+              </div>
+            )}
+          </div>
         ))}
       </div>
       {list<string>(data.notes).length > 0 && (

@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from ...agent.contracts import Citation, Tool, ToolResult
 from ...profile import compute_taste_profile
 from ..bangumi.client import SUBJECT_TYPE, BangumiClient
+from ..comments.tool import EpisodeCommentsArgs, GetEpisodeCommentsTool
 
 _SUBJECT_T = Literal["anime", "book", "music", "game", "real"]
 
@@ -23,6 +24,18 @@ async def _username(client: BangumiClient, username: str | None) -> str | None:
     except Exception:  # noqa: BLE001
         return None
     return me.get("username") or str(me.get("id")) or None
+
+
+def _tags_of(item: dict) -> set[str]:
+    return {
+        t.get("name") for t in ((item.get("subject") or {}).get("tags") or [])
+        if isinstance(t, dict) and t.get("name")
+    }
+
+
+def _subject_name(item: dict) -> str:
+    subj = item.get("subject") or {}
+    return subj.get("name_cn") or subj.get("name") or f"subject {subj.get('id')}"
 
 
 # --------------------------------------------------------------------------- #
@@ -41,6 +54,7 @@ class RatingPrediction(BaseModel):
     user_avg: float | None = None
     confidence: Literal["low", "medium", "high"] = "low"
     matched_tags: list[str] = Field(default_factory=list)
+    similar_works: list[dict] = Field(default_factory=list)  # 协同依据：你给相似已看作品的实际评分
     rationale: str = ""
     caveats: list[str] = Field(default_factory=list)
 
@@ -70,28 +84,54 @@ class PredictMyRatingTool(Tool):
         items = await self.client.get_all_user_collections(username, stype, collection_type=2, max_items=1000)
         rated = [it for it in items if it.get("rate")]
         user_avg = sum(int(it["rate"]) for it in rated) / len(rated) if rated else None
+        target_tags = set(subj_tags)
+
+        # 协同：找你看过、与目标标签相似(Jaccard)的作品，用你的真实评分加权——比纯画像更准、可解释。
+        sims: list[tuple[float, int, str]] = []
+        for it in rated:
+            it_tags = _tags_of(it)
+            union = target_tags | it_tags
+            if not union:
+                continue
+            jac = len(target_tags & it_tags) / len(union)
+            if jac >= 0.12:
+                sims.append((round(jac, 3), int(it["rate"]), _subject_name(it)))
+        sims.sort(key=lambda x: -x[0])
+        top = sims[:6]
+        collab = (sum(j * r for j, r, _ in top) / sum(j for j, _, _ in top)) if top else None
+
         profile = compute_taste_profile(username, items)
         user_tags = {t["tag"]: float(t["weight"]) for t in profile.top_tags}
         maxw = max(user_tags.values()) if user_tags else 1.0
         matched = [t for t in subj_tags if t in user_tags]
-        affinity = sum(user_tags.get(t, 0.0) for t in subj_tags) / maxw  # ≈ 命中加权标签数
-
         base = global_score if global_score else 7.0
-        severity = (user_avg - 7.2) if user_avg is not None else 0.0  # 用户比全站均分严/宽
-        predicted = base + min(affinity * 0.35, 1.2) - 0.4 + severity * 0.35
+
+        if collab is not None:  # 协同为主、全站为辅
+            predicted = 0.6 * collab + 0.4 * base
+            conf = "high" if len(top) >= 4 else "medium"
+            rationale = (
+                f"你给相似的《{top[0][2]}》打了 {top[0][1]} 分等 {len(top)} 部相似作品（协同预测主依据），"
+                f"全站 {global_score or '暂无'}"
+            )
+        else:  # 无相似已评作品 → 降级到画像 + 严格度
+            severity = (user_avg - 7.2) if user_avg is not None else 0.0
+            affinity = sum(user_tags.get(t, 0.0) for t in subj_tags) / maxw
+            predicted = base + min(affinity * 0.35, 1.2) - 0.4 + severity * 0.35
+            conf = "medium" if matched else "low"
+            rationale = (
+                f"没找到你看过的相似作品，按画像估：全站 {global_score or '暂无'}，"
+                f"你均分 {round(user_avg, 1) if user_avg else '未知'}，命中口味标签 {len(matched)} 个"
+            )
         predicted = round(max(1.0, min(10.0, predicted)), 1)
-        conf = "high" if len(matched) >= 3 and len(rated) >= 30 else ("medium" if matched else "low")
         return ToolResult(
             ok=True,
             data=RatingPrediction(
                 subject_id=args.subject_id, title=title, predicted_rating=predicted,
                 global_score=global_score, user_avg=round(user_avg, 2) if user_avg else None,
                 confidence=conf, matched_tags=matched[:8],
-                rationale=(
-                    f"全站 {global_score or '暂无'}，你均分 {round(user_avg, 1) if user_avg else '未知'}，"
-                    f"命中你口味标签 {len(matched)} 个"
-                ),
-                caveats=["预测是画像级弱信号，不代表真实观感；样本越多越准。"],
+                similar_works=[{"name": n, "your_rate": r, "similarity": j} for j, r, n in top],
+                rationale=rationale,
+                caveats=["预测是个性化估计，不代表真实观感；相似作品越多越准。"],
             ),
             sources=[Citation(title=f"Bangumi — {title}", url=f"https://bgm.tv/subject/{args.subject_id}", source="bangumi")],
         )
@@ -101,11 +141,13 @@ class PredictMyRatingTool(Tool):
 # 2) 萌点检索 / 复杂多维筛选
 # --------------------------------------------------------------------------- #
 class TraitSearchArgs(BaseModel):
-    tags: list[str] = Field(..., min_length=1, max_length=8, description="萌点/题材标签组合，如 ['百合','废萌','芳文社']")
+    tags: list[str] = Field(..., min_length=1, max_length=8, description="萌点/题材标签组合（取交集），如 ['百合','废萌','芳文社']")
+    exclude_tags: list[str] = Field(default_factory=list, max_length=8, description="排除含这些标签的作品，如 ['后宫','致郁']")
     subject_type: _SUBJECT_T = "anime"
     min_score: float = Field(0.0, ge=0.0, le=10.0, description="最低 Bangumi 评分")
     year_from: int | None = Field(None, description="起始年份（含）")
     year_to: int | None = Field(None, description="结束年份（含）")
+    sort: Literal["rank", "heat", "score"] = Field("rank", description="排序：rank 综合排名 / heat 热度 / score 评分")
     limit: int = Field(15, ge=1, le=30)
 
 
@@ -144,12 +186,19 @@ class SearchByTraitsTool(Tool):
             hi = f"<{(args.year_to + 1)}-01-01" if args.year_to else "<2100-01-01"
             air_date = [lo, hi]
         raw = await self.client.search_subjects(
-            "", SUBJECT_TYPE[args.subject_type], sort="rank", limit=min(args.limit * 2, 50),
+            "", SUBJECT_TYPE[args.subject_type], sort=args.sort, limit=min(args.limit * 3, 50),
             tags=args.tags, air_date=air_date,
         )
+        exclude = {e.strip() for e in args.exclude_tags if e.strip()}
         items: list[TraitItem] = []
         for s in (raw.get("data") or []):
             if not s.get("id"):
+                continue
+            s_tags = {
+                (t.get("name") if isinstance(t, dict) else str(t))
+                for t in (s.get("tags") or s.get("meta_tags") or [])
+            }
+            if exclude and (exclude & s_tags):
                 continue
             score = (s.get("rating") or {}).get("score") or s.get("score")
             if args.min_score and (score or 0) < args.min_score:
@@ -162,9 +211,11 @@ class SearchByTraitsTool(Tool):
             ))
             if len(items) >= args.limit:
                 break
-        notes = [f"标签交集 {args.tags}，按 Bangumi rank 排序"]
+        notes = [f"标签交集 {args.tags}，按 {args.sort} 排序"]
         if args.min_score:
             notes.append(f"已过滤评分 < {args.min_score}")
+        if exclude:
+            notes.append(f"已排除标签：{sorted(exclude)}")
         return ToolResult(
             ok=True,
             data=TraitSearchResult(tags=args.tags, count=len(items), items=items, notes=notes),
@@ -179,14 +230,17 @@ class EpisodeRadarArgs(BaseModel):
     subject_id: int = Field(..., description="Bangumi 条目 ID")
     progress_episode: int | None = Field(None, description="只看到第 N 集；防剧透，只返回 sort≤N 的集")
     top: int = Field(5, ge=1, le=10, description="返回讨论数最高的几集")
+    with_summary: bool = Field(False, description="是否对 top 高能集抓讨论样本做质性摘要（稍慢，默认关）")
 
 
 class EpisodePoint(BaseModel):
     sort: float
     ep: int | None = None
+    ep_id: int | None = None
     name: str = ""
     comments: int = 0
     airdate: str | None = None
+    discussion: list[str] = Field(default_factory=list)  # 质性摘要：讨论样本（with_summary 时）
 
 
 class EpisodeRadarResult(BaseModel):
@@ -210,6 +264,7 @@ class EpisodeBuzzRadarTool(Tool):
 
     def __init__(self, client: BangumiClient) -> None:
         self.client = client
+        self.episode_comments = GetEpisodeCommentsTool(client)
 
     async def run(self, args: EpisodeRadarArgs) -> ToolResult[EpisodeRadarResult]:
         raw = await self.client.get_episodes(args.subject_id, ep_type=0, limit=200)
@@ -220,7 +275,8 @@ class EpisodeBuzzRadarTool(Tool):
             if sort is None:
                 continue
             points.append(EpisodePoint(
-                sort=float(sort), ep=e.get("ep"), name=e.get("name_cn") or e.get("name") or "",
+                sort=float(sort), ep=e.get("ep"), ep_id=e.get("id"),
+                name=e.get("name_cn") or e.get("name") or "",
                 comments=int(e.get("comment") or 0), airdate=e.get("airdate") or None,
             ))
         filtered = None
@@ -233,6 +289,19 @@ class EpisodeBuzzRadarTool(Tool):
         notes = ["讨论数是热度/话题度信号，不等于质量；高能集可能含剧透。"]
         if filtered:
             notes.append(f"已按进度第 {args.progress_episode} 集过滤掉 {filtered} 个后续集。")
+        if args.with_summary:  # 对 top 2 高能集抓讨论样本（防剧透：max_episode_sort 受进度约束）
+            for p in peaks[:2]:
+                if not p.ep_id:
+                    continue
+                try:
+                    res = await self.episode_comments.run(EpisodeCommentsArgs(
+                        ep_id=p.ep_id, subject_id=args.subject_id, episode_sort=p.sort,
+                        max_episode_sort=args.progress_episode, limit=4,
+                    ))
+                    if res.ok and res.data and not getattr(res.data, "blocked_by_spoiler", False):
+                        p.discussion = list(res.data.comments)[:4]
+                except Exception:  # noqa: BLE001
+                    pass
         return ToolResult(
             ok=True,
             data=EpisodeRadarResult(
