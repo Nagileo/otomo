@@ -222,6 +222,7 @@ class RecommendResult(BaseModel):
     mode: str = "normal"
     items: list[RecItem] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
+    mapping_warnings: list[str] = Field(default_factory=list)  # EGS→Bangumi 未安全对齐/歧义（可观测，不静默丢）
 
 
 class RecommendTool(Tool):
@@ -294,13 +295,17 @@ class RecommendTool(Tool):
                 c["cf"] += 1.0 / (1 + rank)
                 c["cf_from"].add(sid)
 
-    async def _external_game_recall(self, cand: dict, seen: set[int], limit: int) -> None:
-        """Use EGS ranking as a front recall source, then anchor candidates back to Bangumi IDs."""
+    async def _external_game_recall(self, cand: dict, seen: set[int], limit: int) -> list[str]:
+        """Use EGS ranking as a front recall source, then anchor candidates back to Bangumi IDs.
+
+        返回 mapping_warnings：未能安全对齐 / 歧义的 EGS 条目（可观测，避免静默丢弃）。
+        """
+        warnings: list[str] = []
         res = await self.egs_rank.run(
             EGSRankArgs(sort="median", limit=min(max(limit * 4, 12), 40), min_votes=80, erogame_only=True)
         )
         if not res.ok or not res.data:
-            return
+            return warnings
         for egs in res.data.results[: min(limit * 3, 18)]:
             try:
                 raw = await self.client.search_subjects(egs.title, SUBJECT_TYPE["game"], limit=5)
@@ -314,8 +319,10 @@ class RecommendTool(Tool):
                     matches.append((conf, matched_by, s))
             matches.sort(key=lambda x: -x[0])
             if not matches:
+                warnings.append(f"批判空间《{egs.title}》(中央值 {egs.median or '?'}) 未能安全对齐 Bangumi 条目，已跳过")
                 continue
             if len(matches) > 1 and matches[0][0] == matches[1][0]:
+                warnings.append(f"批判空间《{egs.title}》匹配到多个同分 Bangumi 候选(歧义)，已跳过避免错配")
                 continue
             conf, matched_by, best = matches[0]
             if not best or not best.get("id") or best["id"] in seen:
@@ -348,6 +355,7 @@ class RecommendTool(Tool):
                     matched_by=matched_by,
                 )
             )
+        return warnings
 
     async def _enrich(self, ranked_ids: list[tuple[int, dict]]) -> None:
         """对前 N 个信息不全（缺评分或缺名，多来自图谱/协同召回）的候选按需补 get_subject。"""
@@ -435,8 +443,9 @@ class RecommendTool(Tool):
 
         cand: dict[int, dict] = {}
         await self._tag_recall(cand, stype, recall_tags, user_tags, maxw, mood, seen, args.niche)
+        mapping_warnings: list[str] = []
         if args.subject_type == "game" and args.use_external_recall:
-            await self._external_game_recall(cand, seen, args.limit)
+            mapping_warnings = await self._external_game_recall(cand, seen, args.limit)
 
         # 用户最爱作品（按评分降序）——图谱召回与协同召回共用作种子
         fav_sorted = sorted(watched, key=lambda it: -(it.get("rate") or 0))
@@ -556,7 +565,8 @@ class RecommendTool(Tool):
         return ToolResult(
             ok=True,
             data=RecommendResult(
-                subject_type=args.subject_type, based_on_tags=recall_tags, mode=mode, items=out, notes=notes
+                subject_type=args.subject_type, based_on_tags=recall_tags, mode=mode, items=out,
+                notes=notes, mapping_warnings=mapping_warnings,
             ),
             sources=[
                 Citation(title=it.name, url=f"https://bgm.tv/subject/{it.id}", source="bangumi", image=it.image)

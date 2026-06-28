@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 
 from ...agent.contracts import Citation, Tool, ToolResult
 from ...config import settings
+from .._cache import acached, scached
 from ..review.tool import (
     AspectOpinion,
     AspectSummary,
@@ -268,6 +269,7 @@ def _bili_json(data: dict) -> dict:
     return data
 
 
+@scached()
 def _sync_bili_search(query: str) -> dict:
     r = httpx.get(
         _BILI_SEARCH_API,
@@ -279,6 +281,7 @@ def _sync_bili_search(query: str) -> dict:
     return _bili_json(r.json())
 
 
+@scached()
 def _sync_bili_replies(aid: int, limit: int) -> dict:
     r = httpx.get(
         _BILI_REPLY_API,
@@ -288,6 +291,17 @@ def _sync_bili_replies(aid: int, limit: int) -> dict:
     )
     r.raise_for_status()
     return _bili_json(r.json())
+
+
+@acached()
+async def _bili_search_async(q: str) -> dict:
+    async with httpx.AsyncClient(
+        timeout=settings.http_timeout,
+        headers={"User-Agent": _BROWSER_UA, "Referer": "https://www.bilibili.com/"},
+    ) as c:
+        r = await c.get(_BILI_SEARCH_API, params={"search_type": "video", "keyword": q, "page": 1})
+        r.raise_for_status()
+        return _bili_json(r.json())
 
 
 def _summarize_aspect_opinions(opinions: list[AspectOpinion]) -> list[str]:
@@ -352,16 +366,7 @@ class SearchBiliGuideVideosTool(Tool):
         videos: list[BiliVideoMeta] = []
         seen: set[str] = set()
         try:
-            async with httpx.AsyncClient(
-                timeout=settings.http_timeout,
-                headers={"User-Agent": _BROWSER_UA, "Referer": "https://www.bilibili.com/"},
-            ) as c:
-                r = await c.get(
-                    _BILI_SEARCH_API,
-                    params={"search_type": "video", "keyword": q, "page": 1},
-                )
-                r.raise_for_status()
-                data = _bili_json(r.json())
+            data = await _bili_search_async(q)
         except httpx.HTTPStatusError as e:
             if e.response.status_code != 412:
                 return ToolResult(ok=False, error=f"B站导视元数据搜索失败：HTTP {e.response.status_code}")

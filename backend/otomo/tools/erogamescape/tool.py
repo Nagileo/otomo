@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ...agent.contracts import Citation, Tool, ToolResult
 from ...config import settings
+from .._cache import acached
 
 _BASE = "https://erogamescape.dyndns.org/~ap2/ero/toukei_kaiseki/"
 _SEARCH = (
@@ -184,6 +185,17 @@ def _parse_rank_results(html: str, limit: int, min_votes: int = 0) -> list[EGSGa
     return items
 
 
+@acached()
+async def _egs_fetch(url: str) -> str:
+    async with httpx.AsyncClient(
+        timeout=settings.http_timeout,
+        headers={"User-Agent": settings.bangumi_user_agent},
+    ) as c:
+        r = await c.get(url)
+        r.raise_for_status()
+        return r.text
+
+
 class SearchErogameScapeTool(Tool):
     name = "search_erogamescape"
     description = (
@@ -197,16 +209,11 @@ class SearchErogameScapeTool(Tool):
     async def run(self, args: EGSArgs) -> ToolResult[EGSResult]:
         url = _SEARCH.format(keyword=quote(args.keyword))
         try:
-            async with httpx.AsyncClient(
-                timeout=settings.http_timeout,
-                headers={"User-Agent": settings.bangumi_user_agent},
-            ) as c:
-                r = await c.get(url)
-                r.raise_for_status()
+            html = await _egs_fetch(url)
         except (httpx.HTTPError, httpx.TransportError) as e:
             return ToolResult(ok=False, error=f"ErogameScape 查询失败：{type(e).__name__}")
 
-        items = _parse_results(r.text, args.limit)
+        items = _parse_results(html, args.limit)
         return ToolResult(
             ok=True,
             data=EGSResult(query=args.keyword, count=len(items), source_url=url, results=items),
@@ -231,16 +238,11 @@ class RankErogameScapeTool(Tool):
         path = _rank_path(args)
         url = urljoin(_BASE, path)
         try:
-            async with httpx.AsyncClient(
-                timeout=settings.http_timeout,
-                headers={"User-Agent": settings.bangumi_user_agent},
-            ) as c:
-                r = await c.get(url)
-                r.raise_for_status()
+            html = await _egs_fetch(url)
         except (httpx.HTTPError, httpx.TransportError) as e:
             return ToolResult(ok=False, error=f"ErogameScape 排行查询失败：{type(e).__name__}")
 
-        items = _parse_rank_results(r.text, args.limit, args.min_votes)
+        items = _parse_rank_results(html, args.limit, args.min_votes)
         return ToolResult(
             ok=True,
             data=EGSRankResult(

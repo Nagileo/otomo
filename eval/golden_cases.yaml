@@ -115,3 +115,30 @@
   expect_tools: ["lore_search"]
   min_tools: 1
   note: RAG——设定/外号需查萌娘百科，并应挂来源
+
+# —— Phase 1 证据面板 cases（断言 source routing 命中 + 结构化面板 data 产出；不断言不稳定的推荐/评价内容）——
+- id: panel_review_bocchi
+  question: 如何评价动画《孤独摇滚！》？从多个来源综合说说口碑。
+  kind: two_hop
+  expect_tools: ["review_subject"]
+  expect_panels: ["review_subject"]
+  note: 评价矩阵——应调 review_subject 产出 ratings/aspect_summary 面板
+- id: panel_season_2026_07
+  question: 2026 年 7 月有哪些新番？按我的口味做个导视分诊。
+  kind: filter
+  expect_tools: ["season_guide_brief"]
+  forbid_tools: ["web_search"]
+  expect_panels: ["season_guide_brief"]
+  note: 季番导视——应调 season_guide_brief、不应 web_search 兜底
+- id: panel_recommend
+  question: 根据我的 Bangumi 口味，推荐几部我没看过的动画。
+  kind: filter
+  expect_tools: ["recommend_subjects"]
+  expect_panels: ["recommend_subjects"]
+  note: 推荐——应调 recommend_subjects 产出推荐面板（需 token）
+- id: panel_taste_sai
+  question: 我和 Bangumi 用户 sai 的口味同步率高吗？
+  kind: two_hop
+  expect_tools: ["compare_user_taste"]
+  expect_panels: ["compare_user_taste"]
+  note: 同步率——应调 compare_user_taste 产出 affinity 面板（需 token）

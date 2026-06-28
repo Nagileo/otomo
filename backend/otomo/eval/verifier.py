@@ -34,6 +34,7 @@ class ToolStep(BaseModel):
     name: str
     args: dict = Field(default_factory=dict)
     entities: list[EntityRef] = Field(default_factory=list)
+    has_data: bool = False  # 该步 ObservationEvent 是否带结构化面板 data（Phase 1）
 
 
 class GoldenCase(BaseModel):
@@ -45,6 +46,8 @@ class GoldenCase(BaseModel):
     expect_any: list[str] = Field(default_factory=list)
     expect_absent: list[str] = Field(default_factory=list)
     expect_tools: list[str] = Field(default_factory=list)
+    forbid_tools: list[str] = Field(default_factory=list)   # 不应调用的工具（source routing 负向偏好）
+    expect_panels: list[str] = Field(default_factory=list)  # 应产出结构化面板 data 的工具（Phase 1）
     min_tools: int = 0
     note: str = ""
     # —— 图谱级真值（canonical；有则启用 set-F1 / 路径校验）——
@@ -92,6 +95,8 @@ def _legacy_checks(case: GoldenCase, answer: str, tools_called: list[str]) -> li
         checks.append(Check(label=f"不含「{s}」", passed=s.lower() not in a))
     for t in case.expect_tools:
         checks.append(Check(label=f"调用过 {t}", passed=t in called))
+    for t in case.forbid_tools:
+        checks.append(Check(label=f"未调用 {t}", passed=t not in called))
     if case.min_tools:
         checks.append(Check(label=f"至少调用 {case.min_tools} 次工具", passed=len(tools_called) >= case.min_tools))
     if not answer.strip():
@@ -209,6 +214,10 @@ async def verify(
 ) -> CaseResult:
     tools_called = [s.name for s in trace]
     checks = _legacy_checks(case, answer, tools_called)
+    if case.expect_panels:  # Phase 1：断言这些工具产出了结构化面板 data（observation.data 非空）
+        panels = {s.name for s in trace if s.has_data}
+        for t in case.expect_panels:
+            checks.append(Check(label=f"{t} 产出结构化面板", passed=t in panels))
     metrics = Metrics()
 
     if case.truth_entities and llm and client:  # 图谱级：多答真实信息不算错 → 答全真值(recall) + 不编造(零幻觉)

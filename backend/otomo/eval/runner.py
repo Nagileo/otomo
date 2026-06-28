@@ -50,6 +50,7 @@ async def run_one(runner, case: GoldenCase, llm, model: str, client: BangumiClie
         elif isinstance(ev, ObservationEvent):
             if pending and pending.name == ev.name:
                 pending.entities = ev.entities
+                pending.has_data = ev.data is not None
                 trace.append(pending)
                 pending = None
         elif isinstance(ev, FinalEvent):

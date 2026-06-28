@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ...agent.contracts import Citation, Tool, ToolResult
 from ...config import settings
+from .._cache import acached
 
 _BASE = "https://yuc.wiki/"
 _SEASON_NAME = {1: "冬", 4: "春", 7: "夏", 10: "秋"}
@@ -128,6 +129,17 @@ def _parse(html: str, limit: int) -> list[YucAnime]:
     return items
 
 
+@acached()
+async def _yuc_fetch(url: str) -> str:
+    async with httpx.AsyncClient(
+        timeout=settings.http_timeout,
+        headers={"User-Agent": settings.bangumi_user_agent},
+    ) as c:
+        r = await c.get(url)
+        r.raise_for_status()
+        return r.text
+
+
 class ListYucSeasonTool(Tool):
     name = "list_yuc_season"
     description = (
@@ -141,16 +153,11 @@ class ListYucSeasonTool(Tool):
         month = min((1, 4, 7, 10), key=lambda m: abs(m - args.month))
         url = f"{_BASE}{args.year}{month:02d}/"
         try:
-            async with httpx.AsyncClient(
-                timeout=settings.http_timeout,
-                headers={"User-Agent": settings.bangumi_user_agent},
-            ) as c:
-                r = await c.get(url)
-                r.raise_for_status()
+            html = await _yuc_fetch(url)
         except (httpx.HTTPError, httpx.TransportError) as e:
             return ToolResult(ok=False, error=f"yuc.wiki 查询失败：{type(e).__name__}")
 
-        items = _parse(r.text, args.limit)
+        items = _parse(html, args.limit)
         season = f"{args.year} 年 {month} 月（{_SEASON_NAME.get(month, '')}）番"
         return ToolResult(
             ok=True,

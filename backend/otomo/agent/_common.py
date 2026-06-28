@@ -70,7 +70,8 @@ def update_spoiler_state_from_input(state: Any | None, user_input: str) -> None:
         spoiler["progress_episode"] = policy.progress_episode
     if policy.level in {"none", "mild", "full"} and not policy.needs_followup:
         spoiler["mode"] = policy.level
-    spoiler["pending_followup"] = bool(policy.needs_followup and policy.level != "full")
+    # 用户已显式授权(mild/full，含点 followup chips 后 api 设的 mode)就不再追问，避免"讲结局"被反复判 followup
+    spoiler["pending_followup"] = bool(policy.needs_followup and spoiler.get("mode") not in {"mild", "full"})
     if policy.needs_followup and policy.followup_question:
         spoiler["followup_question"] = policy.followup_question
     else:
@@ -306,6 +307,7 @@ def _safe_recommend_payload(data: dict[str, Any]) -> dict[str, Any]:
         "mode": data.get("mode"),
         "items": items,
         "notes": _trim_strings(data.get("notes"), limit=6, text_limit=220),
+        "mapping_warnings": _trim_strings(data.get("mapping_warnings"), limit=8, text_limit=160),
     }
 
 

@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from ...agent.contracts import Citation, Tool, ToolResult
 from ...config import settings
+from .._cache import acached
 from ..comments.tool import EpisodeCommentsArgs, GetEpisodeCommentsTool
 from ..bangumi.client import SUBJECT_TYPE, BangumiClient
 from ..review.tool import AspectOpinion, AspectSummary, CommentEvidence, _build_aspect_summary, _extract_aspect_opinions
@@ -425,6 +426,7 @@ def _sentiment(text: str) -> int:
     return score
 
 
+@acached()
 async def _resolve_username_from_page(username_or_uid: str) -> str:
     if not username_or_uid.isdigit():
         return username_or_uid
@@ -483,6 +485,7 @@ def _parse_friend_list(page: str, limit: int) -> list[FriendBrief]:
     return out
 
 
+@acached()
 async def _fetch_friends(username: str, limit: int) -> tuple[list[FriendBrief], str]:
     url = f"https://bgm.tv/user/{username}/friends"
     last: Exception | None = None

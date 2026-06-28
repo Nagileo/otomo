@@ -322,6 +322,12 @@ function RecommendPanel({ data }: { data: AnyRecord }) {
           </a>
         ))}
       </div>
+      {list<string>(data.mapping_warnings).length > 0 && (
+        <div className="caveats">
+          <div className="section-title">映射告警（未安全对齐，已跳过）</div>
+          {list<string>(data.mapping_warnings).map((w, i) => <span key={i}>⚠ {w}</span>)}
+        </div>
+      )}
       {list<string>(data.notes).length > 0 && (
         <div className="caveats">{list<string>(data.notes).map((n, i) => <span key={i}>{n}</span>)}</div>
       )}

@@ -41,10 +41,12 @@ export default function Home() {
   const [busy, setBusy] = useState(false);
   const answerRef = useRef("");
   const sessionId = useRef("");  // 多轮会话 id（首次发送时生成；"新对话"会重置）
+  const lastQ = useRef("");      // 最近一次用户问题（剧透 followup chips 重发用）
 
-  async function send(override?: string) {
+  async function send(override?: string, spoilerMode?: string) {
     const q = (override ?? input).trim();
     if (!q || busy) return;
+    lastQ.current = q;
     setInput("");
     setMessages((m) => [...m, { role: "user", content: q }]);
     setTrace([]);
@@ -63,6 +65,7 @@ export default function Home() {
         body: JSON.stringify({
           message: q,
           session_id: sessionId.current,
+          ...(spoilerMode ? { spoiler_mode: spoilerMode } : {}),
         }),
       });
       if (!res.body) throw new Error("no response body");
@@ -201,6 +204,17 @@ export default function Home() {
             </div>
           )}
           <EvidencePanels evidence={evidence} />
+          {spoiler?.progress_episode != null && (
+            <div className="filter-note">🔒 已按第 {spoiler.progress_episode} 集进度过滤分集剧情内容</div>
+          )}
+          {spoiler?.pending_followup && (
+            <div className="followups">
+              <span className="followup-q">{spoiler.followup_question || "这个问题可能涉及后续剧情/结局，你希望："}</span>
+              <button className="chip" onClick={() => send(lastQ.current, "none")} disabled={busy}>🚫 无剧透</button>
+              <button className="chip" onClick={() => send(lastQ.current, "mild")} disabled={busy}>🌓 轻微剧透</button>
+              <button className="chip" onClick={() => send(lastQ.current, "full")} disabled={busy}>💥 完整剧透</button>
+            </div>
+          )}
           {followups.length > 0 && (
             <div className="followups">
               {followups.map((q, i) => (
