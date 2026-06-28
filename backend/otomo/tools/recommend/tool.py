@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ...agent.contracts import Citation, Tool, ToolResult
 from ...config import settings
+from ...memory import LongTermMemory
 from ...profile import compute_taste_profile
 from ..bangumi.client import SUBJECT_TYPE, BangumiClient
 from ..erogamescape.tool import EGSRankArgs, RankErogameScapeTool
@@ -97,6 +98,18 @@ def _safe_edition_delta(longer: str, shorter: str) -> bool:
     return bool(delta) and any(tok in delta for tok in _SAFE_EDITION_TOKENS)
 
 
+def _tag_names(x: dict) -> set[str]:
+    out: set[str] = set()
+    for t in x.get("tags") or []:
+        if isinstance(t, dict):
+            name = t.get("name")
+        else:
+            name = str(t)
+        if name:
+            out.add(str(name))
+    return out
+
+
 def _egs_mapping_confidence(egs_title: str, subject: dict) -> tuple[float, str]:
     """Return confidence for EGS title -> Bangumi subject.
 
@@ -152,6 +165,7 @@ def _blank(x: dict) -> dict:
         "cf": 0.0, "cf_from": set(),
         "external": set(), "external_evidence": [], "external_boost": 0.0,
         "external_mappings": [],
+        "tags": _tag_names(x),
     }
 
 
@@ -162,6 +176,7 @@ def _blank_id() -> dict:
         "rating": {}, "image": None, "cf": 0.0, "cf_from": set(),
         "external": set(), "external_evidence": [], "external_boost": 0.0,
         "external_mappings": [],
+        "tags": set(),
     }
 
 
@@ -236,8 +251,9 @@ class RecommendTool(Tool):
     args_model = RecommendArgs
     result_model = RecommendResult
 
-    def __init__(self, client: BangumiClient) -> None:
+    def __init__(self, client: BangumiClient, ltm: LongTermMemory | None = None) -> None:
         self.client = client
+        self.ltm = ltm
         self.reviewer = ReviewSubjectTool(client)
         self.egs_rank = RankErogameScapeTool()
 
@@ -256,6 +272,7 @@ class RecommendTool(Tool):
                     if not sid or sid in seen:
                         continue
                     c = cand.setdefault(sid, _blank(x))
+                    c["tags"].update(_tag_names(x))
                     c["matched"].add(tag)
                     c["weight"] += w
                 if len(batch) < _RECALL_PER_TAG:
@@ -273,6 +290,7 @@ class RecommendTool(Tool):
                     if wid in seen:
                         continue
                     c = cand.setdefault(wid, _blank(w))
+                    c["tags"].update(_tag_names(w))
                     c["graph"].add(f"同{p.get('relation')}·{p.get('name')}")
 
     def _cf_recall(self, cand: dict, fav_ids: list[int], seen: set[int], i2i: dict) -> None:
@@ -329,6 +347,7 @@ class RecommendTool(Tool):
                 continue
             sid = best["id"]
             c = cand.setdefault(sid, _blank(best))
+            c["tags"].update(_tag_names(best))
             rank = f"#{egs.rank_position}" if egs.rank_position else "排行候选"
             c["external"].add(
                 f"批判空间{rank} 中央值 {egs.median or '未知'} / 数据数 {egs.vote_count or 0}"
@@ -373,6 +392,7 @@ class RecommendTool(Tool):
                     img = raw.get("images") or {}
                     c["image"] = c["image"] or img.get("common") or img.get("medium") or img.get("grid")
                 c["rating"] = raw.get("rating") or c["rating"]
+                c["tags"].update(_tag_names(raw))
             except Exception:  # noqa: BLE001
                 pass
 
@@ -433,6 +453,10 @@ class RecommendTool(Tool):
         seen = {it["subject"]["id"] for it in items if it.get("subject", {}).get("id")}
         watched = [it for it in items if it.get("type") == 2]
         profile = compute_taste_profile(username, watched)
+        memory_dislikes: list[str] = []
+        if self.ltm is not None:
+            mem = self.ltm.load_user(username)
+            memory_dislikes = [it.value for it in mem.dislikes if it.value.strip()]
         all_tags = [t["tag"] for t in profile.top_tags]
         user_tags = {t["tag"]: float(t["weight"]) for t in profile.top_tags[:8]}
         maxw = max(user_tags.values()) if user_tags else 1.0
@@ -474,6 +498,27 @@ class RecommendTool(Tool):
 
         mood_set = set(mood)
 
+        def memory_avoidance_hits(c: dict) -> list[str]:
+            if not memory_dislikes:
+                return []
+            haystack = [str(x) for x in (c.get("tags") or set()) | (c.get("matched") or set())]
+            if c.get("name"):
+                haystack.append(str(c["name"]))
+            hits: list[str] = []
+            for value in memory_dislikes:
+                key = _norm_title(value)
+                if not key:
+                    continue
+                for h in haystack:
+                    hk = _norm_title(h)
+                    if hk and (key == hk or key in hk or hk in key):
+                        hits.append(value)
+                        break
+            return list(dict.fromkeys(hits))[:4]
+
+        def memory_penalty(c: dict) -> float:
+            return -2.2 if memory_avoidance_hits(c) else 0.0
+
         def explicit_tag_adjust(c: dict) -> float:
             """用户这轮显式说的口味/心境要比历史画像更硬。
 
@@ -488,7 +533,7 @@ class RecommendTool(Tool):
             cand.items(),
             key=lambda kv: -(
                 affinity(kv[1]) + graph_bonus(kv[1]) + cf_bonus(kv[1])
-                + external_bonus(kv[1]) + explicit_tag_adjust(kv[1])
+                + external_bonus(kv[1]) + explicit_tag_adjust(kv[1]) + memory_penalty(kv[1])
             ),
         )[:40]
         await self._enrich(prelim)
@@ -497,10 +542,10 @@ class RecommendTool(Tool):
             if args.niche:  # 挖冷门：协同偏热门，权重压低
                 return (0.5 * affinity(c) + 0.5 * graph_bonus(c)
                         + 0.4 * cf_bonus(c) + external_bonus(c)
-                        + explicit_tag_adjust(c) + 2.0 * _quality_niche(c["rating"]))
+                        + explicit_tag_adjust(c) + memory_penalty(c) + 2.0 * _quality_niche(c["rating"]))
             return (
                 affinity(c) + graph_bonus(c) + cf_bonus(c) + external_bonus(c)
-                + explicit_tag_adjust(c) + 1.2 * _quality_popular(c["rating"])
+                + explicit_tag_adjust(c) + memory_penalty(c) + 1.2 * _quality_popular(c["rating"])
             )
 
         def cf_reason(c: dict) -> list[str]:
@@ -534,6 +579,9 @@ class RecommendTool(Tool):
             seen_series.add(sk)
             explicit_matches = sorted(c["matched"] & mood_set)
             reasons = sorted(c["matched"]) + sorted(c["graph"]) + sorted(c.get("external", set())) + cf_reason(c) + extra
+            avoid_hits = memory_avoidance_hits(c)
+            if avoid_hits:
+                reasons.append("命中长期记忆避雷，已降权：" + "、".join(avoid_hits))
             if mood_set and not explicit_matches:
                 reasons.append("未命中本轮显式标签，作为画像邻近补充")
             out.append(RecItem(
@@ -562,6 +610,8 @@ class RecommendTool(Tool):
                 notes.append("没有找到未看且命中本轮显式标签的高置信候选；当前结果为画像邻近补充。")
             elif strict_count < len(out):
                 notes.append("部分候选未命中本轮显式标签，只能作为画像邻近补充。")
+        if memory_dislikes:
+            notes.append("已按长期记忆避雷项降权：" + "、".join(memory_dislikes[:8]))
         return ToolResult(
             ok=True,
             data=RecommendResult(

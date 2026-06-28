@@ -2,11 +2,12 @@
 from .tool import RecommendTool
 from .verify import CheckSubjectsTool
 
+from ...memory import LongTermMemory
 from ..bangumi.client import BangumiClient
 
 
-def build_recommend_tools(client: BangumiClient):
-    return [RecommendTool(client), CheckSubjectsTool(client)]
+def build_recommend_tools(client: BangumiClient, ltm: LongTermMemory | None = None):
+    return [RecommendTool(client, ltm), CheckSubjectsTool(client)]
 
 
 __all__ = ["build_recommend_tools"]

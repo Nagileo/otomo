@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from ...agent.contracts import Citation, Tool, ToolResult
 from ...memory import LongTermMemory
+from ...memory.consolidate import now_iso
 from ...profile import TasteProfile, compute_taste_profile
 from ..bangumi.client import SUBJECT_TYPE, BangumiClient
 
@@ -39,6 +40,7 @@ class TasteProfileTool(Tool):
 
     def __init__(self, client: BangumiClient, _ltm: LongTermMemory) -> None:
         self.client = client
+        self.ltm = _ltm
 
     async def run(self, args: TasteArgs) -> ToolResult[TasteProfile]:
         username = args.username
@@ -50,6 +52,16 @@ class TasteProfileTool(Tool):
             username, SUBJECT_TYPE[args.subject_type], collection_type=2, max_items=_MAX_ITEMS
         )
         profile = compute_taste_profile(username, items)
+        mem = self.ltm.load_user(username)
+        mem.profile_snapshot[args.subject_type] = {
+            "watched": profile.watched,
+            "rated": profile.rated,
+            "avg_rating": profile.avg_rating,
+            "top_tags": profile.top_tags[:12],
+            "favorites": profile.favorites[:8],
+            "updated_at": now_iso(),
+        }
+        self.ltm.save_user(mem)
         return ToolResult(
             ok=True,
             data=profile,

@@ -142,3 +142,14 @@
   expect_tools: ["compare_user_taste"]
   expect_panels: ["compare_user_taste"]
   note: 同步率——应调 compare_user_taste 产出 affinity 面板（需 token）
+
+# —— Phase 5 memory cases（断言 agent 主动调 memory 工具 + 面板产出；写入断言靠 test_memory.py 单测）——
+- id: mem_remember_dislike
+  question: 我特别讨厌党争番，以后别给我推这种。
+  expect_tools: ["remember_user_preference"]
+  note: 强避雷信号应写入长期记忆（dislike 党争）
+- id: mem_recall_panel
+  question: 看看你都记住了我哪些口味偏好和避雷点？
+  expect_tools: ["get_user_memory"]
+  expect_panels: ["get_user_memory"]
+  note: 应调 get_user_memory 并产出 memory 面板（需 token）

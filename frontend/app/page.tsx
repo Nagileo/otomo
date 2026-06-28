@@ -3,7 +3,7 @@
 import { useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { EvidencePanels, SpoilerBadge } from "./evidence-panels";
+import { EvidencePanels, MemoryBadge, SpoilerBadge } from "./evidence-panels";
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND ?? "http://localhost:8000";
 
@@ -28,6 +28,16 @@ type SpoilerState = {
   pending_followup?: boolean;
   followup_question?: string;
 };
+type MemoryState = {
+  username?: string;
+  likes?: Record<string, any>[];
+  dislikes?: Record<string, any>[];
+  spoiler_default?: string;
+  progress?: Record<string, any>;
+  recent_feedback?: Record<string, any>[];
+  profile_snapshot?: Record<string, any>;
+  updated_at?: string;
+};
 
 export default function Home() {
   const [messages, setMessages] = useState<Msg[]>([]);
@@ -36,6 +46,7 @@ export default function Home() {
   const [sources, setSources] = useState<Source[]>([]);
   const [evidence, setEvidence] = useState<EvidenceMap>({});
   const [spoiler, setSpoiler] = useState<SpoilerState | null>(null);
+  const [memory, setMemory] = useState<MemoryState | null>(null);
   const [followups, setFollowups] = useState<string[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -123,6 +134,7 @@ export default function Home() {
         break;
       case "state":
         if (ev.scope === "spoiler") setSpoiler(ev.snapshot ?? null);
+        if (ev.scope === "memory") setMemory(ev.snapshot ?? null);
         break;
       case "answer_delta":
         answerRef.current += ev.text;
@@ -151,6 +163,7 @@ export default function Home() {
     setSources([]);
     setEvidence({});
     setSpoiler(null);
+    setMemory(null);
     setFollowups([]);
     setAnswer("");
     answerRef.current = "";
@@ -163,6 +176,7 @@ export default function Home() {
           <div className="title">Otomo · 番组搭子</div>
           <div className="sub">ACGN 知识图谱 Agent — 多跳问答 / 跨媒体追溯 / 语义 RAG / 个性化推荐</div>
           <SpoilerBadge spoiler={spoiler} />
+          <MemoryBadge memory={memory} />
         </div>
         <button className="ghost" onClick={newChat} disabled={busy}>+ 新对话</button>
       </div>

@@ -17,6 +17,7 @@ from .tools.bangumi.client import BangumiClient
 from .tools.erogamescape import build_erogamescape_tools
 from .tools.moegirl import build_moegirl_tools
 from .tools.moegirl.client import MoegirlClient
+from .tools.memory import build_memory_tools
 from .tools.musicbrainz import build_musicbrainz_tools
 from .tools.profile import build_profile_tools
 from .tools.recommend import build_recommend_tools
@@ -40,6 +41,7 @@ def build_registry(
     ltm: LongTermMemory | None = None,
 ) -> ToolRegistry:
     registry = ToolRegistry()
+    shared_ltm = ltm or LongTermMemory()
     for tool in build_bangumi_tools(client):
         registry.register(tool)
     if moegirl is not None:
@@ -59,9 +61,11 @@ def build_registry(
         registry.register(tool)
     for tool in build_anilist_tools():
         registry.register(tool)
-    for tool in build_profile_tools(client, ltm or LongTermMemory()):
+    for tool in build_memory_tools(client, shared_ltm):
         registry.register(tool)
-    for tool in build_recommend_tools(client):
+    for tool in build_profile_tools(client, shared_ltm):
+        registry.register(tool)
+    for tool in build_recommend_tools(client, shared_ltm):
         registry.register(tool)
     for tool in build_review_tools(client):
         registry.register(tool)
@@ -83,9 +87,12 @@ def build_registry(
 
 
 def build_runner(
-    client: BangumiClient, moegirl: MoegirlClient | None = None, kind: RunnerKind = "adaptive"
+    client: BangumiClient,
+    moegirl: MoegirlClient | None = None,
+    kind: RunnerKind = "adaptive",
+    ltm: LongTermMemory | None = None,
 ) -> AgentRunner:
-    registry = build_registry(client, moegirl)
+    registry = build_registry(client, moegirl, ltm)
     if kind == "plan":
         return PlanExecuteRunner(registry)
     if kind == "react":

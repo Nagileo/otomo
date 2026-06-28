@@ -10,6 +10,9 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .consolidate import now_iso
+from .models import UserMemory
+
 _DEFAULT_DIR = Path(__file__).resolve().parents[3] / "cache" / "ltm"
 
 
@@ -38,3 +41,16 @@ class LongTermMemory:
         self._path(namespace, key).write_text(
             json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+
+    def load_user(self, username: str) -> UserMemory:
+        raw = self.get("user_memory", username)
+        if raw is None:
+            return UserMemory(username=username)
+        try:
+            return UserMemory.model_validate(raw)
+        except Exception:  # noqa: BLE001
+            return UserMemory(username=username)
+
+    def save_user(self, mem: UserMemory) -> None:
+        mem.updated_at = now_iso()
+        self.set("user_memory", mem.username, mem.model_dump(mode="json", exclude_none=True))

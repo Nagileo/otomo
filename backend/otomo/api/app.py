@@ -14,6 +14,8 @@ from sse_starlette.sse import EventSourceResponse
 
 from ..agent.adaptive import AdaptiveRunner
 from ..agent.contracts import AgentState
+from ..memory import LongTermMemory
+from ..memory.models import memory_summary
 from ..obs import traced_stream
 from ..factory import build_registry
 from ..agent.plan_execute import PlanExecuteRunner
@@ -26,7 +28,8 @@ from ..tools.moegirl.client import MoegirlClient
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.bangumi = BangumiClient()
     app.state.moegirl = MoegirlClient()
-    app.state.registry = build_registry(app.state.bangumi, app.state.moegirl)
+    app.state.ltm = LongTermMemory()
+    app.state.registry = build_registry(app.state.bangumi, app.state.moegirl, app.state.ltm)
     app.state.runners = {
         "react": ReActRunner(app.state.registry),
         "plan": PlanExecuteRunner(app.state.registry),
@@ -63,6 +66,22 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+async def _attach_memory_state(app: FastAPI, state: AgentState | None) -> None:
+    if state is None:
+        return
+    try:
+        me = await app.state.bangumi.get_me()
+    except Exception:  # noqa: BLE001
+        return
+    username = me.get("username") or str(me.get("id"))
+    if not username:
+        return
+    mem = app.state.ltm.load_user(username)
+    state.short_term["memory"] = memory_summary(mem).model_dump(mode="json", exclude_none=True)
+    if mem.spoiler_default and "spoiler" not in state.short_term:
+        state.short_term["spoiler"] = {"mode": mem.spoiler_default}
+
+
 @app.post("/chat")
 async def chat(req: ChatRequest):
     runner = app.state.runners[req.runner]
@@ -79,6 +98,7 @@ async def chat(req: ChatRequest):
         if req.progress_episode is not None:
             current["progress_episode"] = req.progress_episode
         state.short_term["spoiler"] = current
+    await _attach_memory_state(app, state)
 
     async def event_gen() -> AsyncIterator[dict]:
         meta = {"session_id": req.session_id or "", "runner": req.runner}

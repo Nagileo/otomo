@@ -8,6 +8,16 @@ type SpoilerState = {
   pending_followup?: boolean;
   followup_question?: string;
 };
+type MemoryState = {
+  username?: string;
+  likes?: AnyRecord[];
+  dislikes?: AnyRecord[];
+  spoiler_default?: string;
+  progress?: Record<string, AnyRecord>;
+  recent_feedback?: AnyRecord[];
+  profile_snapshot?: Record<string, AnyRecord>;
+  updated_at?: string;
+};
 
 function list<T = AnyRecord>(value: any): T[] {
   return Array.isArray(value) ? value : [];
@@ -35,6 +45,14 @@ function pct(value: any) {
   const n = Number(value);
   if (!Number.isFinite(n)) return "0.00";
   return n.toFixed(2);
+}
+
+function sourceTone(source: any) {
+  const s = String(source ?? "");
+  if (s === "explicit_user") return "good";
+  if (s === "derived_from_feedback") return "warn";
+  if (s === "bangumi_profile") return "dim";
+  return "dim";
 }
 
 function Badge({ children, tone = "dim" }: { children: ReactNode; tone?: string }) {
@@ -350,14 +368,147 @@ export function SpoilerBadge({ spoiler }: { spoiler: SpoilerState | null }) {
   );
 }
 
+export function MemoryBadge({ memory }: { memory: MemoryState | null }) {
+  if (!memory) return null;
+  const likeCount = list(memory.likes).length;
+  const dislikeCount = list(memory.dislikes).length;
+  const feedbackCount = list(memory.recent_feedback).length;
+  const likePreview = list(memory.likes).slice(0, 3).map((x) => text(x.value, "")).filter(Boolean).join(" / ");
+  const dislikePreview = list(memory.dislikes).slice(0, 3).map((x) => text(x.value, "")).filter(Boolean).join(" / ");
+  return (
+    <div className="memory-state">
+      <Badge tone="dim">记忆: {text(memory.username, "未绑定")}</Badge>
+      <Badge tone={likeCount ? "good" : "dim"}>喜欢 {likeCount}{likePreview ? ` · ${likePreview}` : ""}</Badge>
+      <Badge tone={dislikeCount ? "warn" : "dim"}>避雷 {dislikeCount}{dislikePreview ? ` · ${dislikePreview}` : ""}</Badge>
+      {feedbackCount > 0 && <Badge tone="dim">反馈 {feedbackCount}</Badge>}
+      {memory.spoiler_default && memory.spoiler_default !== "none" && (
+        <Badge tone={memory.spoiler_default === "full" ? "bad" : "warn"}>默认剧透 {memory.spoiler_default}</Badge>
+      )}
+    </div>
+  );
+}
+
+function MemoryPanel({ data }: { data: MemoryState }) {
+  const likes = list(data.likes);
+  const dislikes = list(data.dislikes);
+  const feedback = list(data.recent_feedback);
+  const progress = data.progress || {};
+  const progressEntries = Object.entries(progress).slice(0, 12);
+  const profiles = Object.entries(data.profile_snapshot || {}).slice(0, 3);
+  return (
+    <Panel
+      title={`长期记忆 · ${text(data.username, "unknown")}`}
+      subtitle={`喜欢 ${likes.length} · 避雷 ${dislikes.length} · 反馈 ${feedback.length}`}
+    >
+      <div className="evidence-row">
+        <Badge tone="dim">spoiler_default: {text(data.spoiler_default, "none")}</Badge>
+        {data.updated_at && <Badge tone="dim">updated {data.updated_at}</Badge>}
+      </div>
+
+      <div className="memory-grid">
+        <div>
+          <div className="section-title">喜欢 / 正偏好</div>
+          {likes.length ? (
+            <div className="compact-list">
+              {likes.map((item, i) => (
+                <span key={`${item.value}-${i}`}>
+                  {text(item.value)}
+                  <small> · {text(item.source, "unknown")} · {pct(item.confidence)}</small>
+                </span>
+              ))}
+            </div>
+          ) : (
+            <EmptyHint text="还没有长期喜欢项" />
+          )}
+        </div>
+        <div>
+          <div className="section-title">避雷 / 负偏好</div>
+          {dislikes.length ? (
+            <div className="compact-list">
+              {dislikes.map((item, i) => (
+                <span key={`${item.value}-${i}`}>
+                  {text(item.value)}
+                  <small> · {text(item.source, "unknown")} · {pct(item.confidence)}</small>
+                </span>
+              ))}
+            </div>
+          ) : (
+            <EmptyHint text="还没有长期避雷项" />
+          )}
+        </div>
+      </div>
+
+      {progressEntries.length > 0 && (
+        <>
+          <div className="section-title">观看进度</div>
+          <div className="evidence-row">
+            {progressEntries.map(([subject, item]) => (
+              <Badge key={subject} tone={sourceTone(item.source)}>
+                {subject}: 第 {item.episode ?? "-"} 集
+              </Badge>
+            ))}
+          </div>
+        </>
+      )}
+
+      {profiles.length > 0 && (
+        <>
+          <div className="section-title">画像摘要</div>
+          <div className="memory-grid">
+            {profiles.map(([subjectType, profile]) => (
+              <div className="rating-card" key={subjectType}>
+                <div className="rating-source">{subjectType}</div>
+                <div className="card-meta">
+                  看过 {profile.watched ?? "-"} · 均分 {profile.avg_rating ?? "暂无"}
+                </div>
+                <div className="evidence-row tight">
+                  {list(profile.top_tags).slice(0, 6).map((item) => (
+                    <Badge key={item.tag} tone="dim">{text(item.tag)}</Badge>
+                  ))}
+                </div>
+                {list<string>(profile.favorites).length > 0 && (
+                  <div className="compact-list inline">
+                    {list<string>(profile.favorites).slice(0, 3).map((name) => <span key={name}>{name}</span>)}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      {feedback.length > 0 && (
+        <>
+          <div className="section-title">近期推荐反馈</div>
+          <div className="compact-list">
+            {feedback.map((item, i) => (
+              <span key={`${item.name || item.subject_id}-${i}`}>
+                {text(item.name || item.subject_id, "候选")} · {text(item.signal)}
+                {item.note ? ` · ${item.note}` : ""}
+              </span>
+            ))}
+          </div>
+        </>
+      )}
+    </Panel>
+  );
+}
+
 export function EvidencePanels({ evidence }: { evidence: EvidenceMap }) {
   const review = list(evidence.review_subject);
   const taste = list(evidence.compare_user_taste);
   const season = list(evidence.season_guide_brief);
   const recommend = list(evidence.recommend_subjects);
-  if (!review.length && !taste.length && !season.length && !recommend.length) return null;
+  const memory = [
+    ...list(evidence.get_user_memory),
+    ...list(evidence.remember_user_preference),
+    ...list(evidence.forget_user_memory),
+    ...list(evidence.record_recommendation_feedback),
+  ];
+  if (!review.length && !taste.length && !season.length && !recommend.length && !memory.length) return null;
   return (
     <div className="evidence-stack">
+      {memory.map((data, i) => <MemoryPanel data={data} key={`memory-${i}`} />)}
       {review.map((data, i) => <ReviewEvidencePanel data={data} key={`review-${i}`} />)}
       {taste.map((data, i) => <TasteAffinityPanel data={data} key={`taste-${i}`} />)}
       {season.map((data, i) => <SeasonGuidePanel data={data} key={`season-${i}`} />)}

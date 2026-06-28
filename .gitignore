@@ -58,3 +58,6 @@ recsys-offline/data/
 Thumbs.db
 .idea/
 .vscode/
+
+# 记录
+logs/

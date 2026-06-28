@@ -30,6 +30,7 @@ CORRECT_FC = (
     "请使用函数调用（tool calls）来调用工具，不要在回复正文里输出 invoke / DSML / tool_calls 等标记。"
     "若信息已足够，请直接给出最终自然语言答案。"
 )
+_RUNTIME_STATE_MARKER = "[[OTOMO_RUNTIME_STATE]]"
 
 
 def _legacy_runtime_state_prompt(state: Any | None) -> str:
@@ -79,32 +80,91 @@ def update_spoiler_state_from_input(state: Any | None, user_input: str) -> None:
     st["spoiler"] = spoiler
 
 
+def _memory_prompt_lines(memory: dict[str, Any]) -> list[str]:
+    likes = [x.get("value") for x in (memory.get("likes") or []) if isinstance(x, dict) and x.get("value")]
+    dislikes = [x.get("value") for x in (memory.get("dislikes") or []) if isinstance(x, dict) and x.get("value")]
+    recent = []
+    for item in (memory.get("recent_feedback") or [])[:6]:
+        if not isinstance(item, dict):
+            continue
+        label = item.get("name") or item.get("subject_id") or "候选"
+        signal = item.get("signal") or "feedback"
+        note = item.get("note") or ""
+        recent.append(f"{label}:{signal}" + (f"({note})" if note else ""))
+
+    lines = [
+        f"- memory_user={memory.get('username') or 'unknown'}；spoiler_default={memory.get('spoiler_default') or 'none'}。",
+    ]
+    if likes:
+        lines.append("- 长期喜欢/正偏好：" + "、".join(str(x) for x in likes[:12]) + "。")
+    if dislikes:
+        lines.append("- 长期避雷/负偏好：" + "、".join(str(x) for x in dislikes[:12]) + "；推荐时应降权或解释避雷命中。")
+    progress = memory.get("progress") or {}
+    if isinstance(progress, dict) and progress:
+        parts = []
+        for subject, item in list(progress.items())[:8]:
+            if isinstance(item, dict) and item.get("episode") is not None:
+                parts.append(f"{subject}=第{item.get('episode')}集")
+        if parts:
+            lines.append("- 已知观看进度：" + "、".join(parts) + "；涉及这些作品时按进度防剧透。")
+    if recent:
+        lines.append("- 近期推荐反馈：" + "；".join(recent) + "。")
+    profiles = memory.get("profile_snapshot") or {}
+    if isinstance(profiles, dict) and profiles:
+        chunks = []
+        for subject_type, snap in list(profiles.items())[:3]:
+            if not isinstance(snap, dict):
+                continue
+            tags = []
+            for item in (snap.get("top_tags") or [])[:6]:
+                if isinstance(item, dict) and item.get("tag"):
+                    tags.append(str(item["tag"]))
+            favs = [str(x) for x in (snap.get("favorites") or [])[:3]]
+            parts = []
+            if tags:
+                parts.append("tags=" + "/".join(tags))
+            if favs:
+                parts.append("fav=" + "/".join(favs))
+            if parts:
+                chunks.append(f"{subject_type}(" + "；".join(parts) + ")")
+        if chunks:
+            lines.append("- 最近画像摘要：" + "、".join(chunks) + "。")
+    lines.append("- 长期记忆仅作为个性化弱证据；用户本轮明确要求优先于历史记忆。")
+    return lines
+
+
 def runtime_state_prompt(state: Any | None) -> str:
     """Serialize short-term runtime controls that should affect this turn."""
     if state is None:
         return ""
     st = getattr(state, "short_term", {}) or {}
     spoiler = st.get("spoiler") or {}
-    if not spoiler:
+    memory = st.get("memory") or {}
+    if not spoiler and not memory:
         return ""
-    mode = spoiler.get("mode") or "none"
-    progress = spoiler.get("progress_episode")
-    parts = [
-        "运行时用户偏好：",
-        f"- spoiler_mode={mode}（none=无剧透，mild=轻微剧透，full=允许完整剧透）。",
-    ]
-    if progress is not None:
-        parts.append(f"- progress_episode={progress}；分集讨论和剧情回答不得越过该集。")
-    if spoiler.get("pending_followup"):
-        parts.append("- 本轮问题可能要求后续剧情/结局，但用户未授权剧透；先追问无剧透/轻微/完整剧透，不要直接回答剧透内容。")
-    parts.append("- 调 get_episode_comments 时，如果涉及分集进度，必须传 max_episode_sort/progress 对应参数。")
+    parts = ["运行时用户偏好："]
+    if spoiler:
+        mode = spoiler.get("mode") or "none"
+        progress = spoiler.get("progress_episode")
+        parts.append(f"- spoiler_mode={mode}（none=无剧透，mild=轻微剧透，full=允许完整剧透）。")
+        if progress is not None:
+            parts.append(f"- progress_episode={progress}；分集讨论和剧情回答不得越过该集。")
+        if spoiler.get("pending_followup"):
+            parts.append("- 本轮问题可能要求后续剧情/结局，但用户未授权剧透；先追问无剧透/轻微/完整剧透，不要直接回答剧透内容。")
+        parts.append("- 调 get_episode_comments 时，如果涉及分集进度，必须传 max_episode_sort/progress 对应参数。")
+    if isinstance(memory, dict) and memory:
+        parts.extend(_memory_prompt_lines(memory))
     return "\n".join(parts)
 
 
 def inject_runtime_state(messages: list[dict], state: Any | None) -> None:
     prompt = runtime_state_prompt(state)
+    messages[:] = [
+        m for m in messages
+        if not (m.get("role") == "system" and str(m.get("content") or "").startswith(_RUNTIME_STATE_MARKER))
+    ]
     if prompt:
-        messages.append({"role": "system", "content": prompt})
+        messages.append({"role": "system", "content": f"{_RUNTIME_STATE_MARKER}\n{prompt}"})
 
 
 def runtime_state_events(state: Any | None) -> list[StateEvent]:
@@ -126,6 +186,9 @@ def runtime_state_events(state: Any | None) -> list[StateEvent]:
                 },
             )
         )
+    memory = st.get("memory") or {}
+    if memory:
+        events.append(StateEvent(scope="memory", snapshot=memory))
     return events
 
 
@@ -176,6 +239,12 @@ def summarize(result: ToolResult) -> str:
     if result.data is None:
         return "ok（无数据）"
     d = result.data.model_dump(exclude_none=True)
+    if d.get("memory"):
+        mem = d["memory"]
+        likes = len(mem.get("likes") or [])
+        dislikes = len(mem.get("dislikes") or [])
+        feedback = len(mem.get("recent_feedback") or [])
+        return f"记忆：喜欢 {likes} 项，避雷 {dislikes} 项，近期反馈 {feedback} 条"
     if d.get("guide_comment_digests"):
         digests = d["guide_comment_digests"]
         parts = []
@@ -205,7 +274,22 @@ def summarize(result: ToolResult) -> str:
     return d.get("name_cn") or d.get("name") or "ok"
 
 
-_PANEL_TOOLS = {"review_subject", "compare_user_taste", "season_guide_brief", "recommend_subjects"}
+_PANEL_TOOLS = {
+    "review_subject",
+    "compare_user_taste",
+    "season_guide_brief",
+    "recommend_subjects",
+    "get_user_memory",
+    "remember_user_preference",
+    "forget_user_memory",
+    "record_recommendation_feedback",
+}
+_MEMORY_TOOLS = {
+    "get_user_memory",
+    "remember_user_preference",
+    "forget_user_memory",
+    "record_recommendation_feedback",
+}
 
 
 def _trim_text(value: Any, limit: int = 220) -> str:
@@ -311,6 +395,23 @@ def _safe_recommend_payload(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _safe_memory_payload(data: dict[str, Any]) -> dict[str, Any]:
+    memory = data.get("memory") if isinstance(data.get("memory"), dict) else data
+    if not isinstance(memory, dict):
+        return {}
+    progress = memory.get("progress") if isinstance(memory.get("progress"), dict) else {}
+    return {
+        "username": memory.get("username"),
+        "likes": _trim_dicts(memory.get("likes"), limit=12),
+        "dislikes": _trim_dicts(memory.get("dislikes"), limit=12),
+        "spoiler_default": memory.get("spoiler_default"),
+        "progress": dict(list(progress.items())[:20]),
+        "recent_feedback": _trim_dicts(memory.get("recent_feedback"), limit=10),
+        "profile_snapshot": memory.get("profile_snapshot") if isinstance(memory.get("profile_snapshot"), dict) else {},
+        "updated_at": memory.get("updated_at"),
+    }
+
+
 def panel_data_from_payload(name: str, payload: dict[str, Any] | None) -> dict[str, Any] | None:
     """Return UI-safe structured payload for tools that have dedicated evidence panels."""
     if name not in _PANEL_TOOLS or not isinstance(payload, dict):
@@ -326,6 +427,8 @@ def panel_data_from_payload(name: str, payload: dict[str, Any] | None) -> dict[s
         return _safe_season_payload(data)
     if name == "recommend_subjects":
         return _safe_recommend_payload(data)
+    if name in _MEMORY_TOOLS:
+        return _safe_memory_payload(data)
     return None
 
 
@@ -333,6 +436,14 @@ def panel_data(name: str, result: ToolResult) -> dict[str, Any] | None:
     if name not in _PANEL_TOOLS or not result.ok or result.data is None:
         return None
     return panel_data_from_payload(name, result.data.model_dump(mode="json", exclude_none=True))
+
+
+def memory_state_from_result(name: str, result: ToolResult) -> dict[str, Any] | None:
+    if name not in _MEMORY_TOOLS or not result.ok or result.data is None:
+        return None
+    payload = result.data.model_dump(mode="json", exclude_none=True)
+    data = panel_data_from_payload(name, payload)
+    return data if data else None
 
 
 # 工具返回里承载实体的容器键 → 实体类型（items=recommend 结果，按 subject 计）
@@ -425,6 +536,8 @@ async def step_tools(
             sources=result.sources, entities=extract_entities(result),
             data=panel_data(tc.function.name, result),
         )
+        if memory_state := memory_state_from_result(tc.function.name, result):
+            yield StateEvent(scope="memory", snapshot=memory_state)
         messages.append({"role": "tool", "tool_call_id": tc.id, "content": result.to_observation()})
 
 
