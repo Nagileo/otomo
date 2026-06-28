@@ -36,6 +36,7 @@ type MemoryState = {
   progress?: Record<string, any>;
   recent_feedback?: Record<string, any>[];
   profile_snapshot?: Record<string, any>;
+  aspect_profiles?: Record<string, any>;
   updated_at?: string;
 };
 
@@ -217,7 +218,7 @@ export default function Home() {
               </div>
             </div>
           )}
-          <EvidencePanels evidence={evidence} />
+          <EvidencePanels evidence={evidence} onCritique={(q) => send(q)} />
           {spoiler?.progress_episode != null && (
             <div className="filter-note">🔒 已按第 {spoiler.progress_episode} 集进度过滤分集剧情内容</div>
           )}

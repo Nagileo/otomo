@@ -91,7 +91,7 @@ class AdaptiveRunner(AgentRunner):
                 # 简单任务：直接 ReAct，一轮执行即可
                 yield PlanEvent(summary="简单任务 → 直接执行（ReAct）")
                 async for ev in C.run_tool_round(
-                    self.llm, self.model, self.registry, state.messages, tools, self.max_iters, sources, seen_urls
+                    self.llm, self.model, self.registry, state.messages, tools, self.max_iters, sources, seen_urls, state
                 ):
                     if isinstance(ev, ToolCallEvent):
                         steps += 1
@@ -102,7 +102,7 @@ class AdaptiveRunner(AgentRunner):
                 compose_prompt = SYNTHESIS_COMPOSE
                 async for ev in C.run_tool_round(
                     self.llm, self.model, self.registry, state.messages, tools,
-                    min(self.max_iters, 3), sources, seen_urls,
+                    min(self.max_iters, 3), sources, seen_urls, state,
                 ):
                     if isinstance(ev, ToolCallEvent):
                         steps += 1
@@ -115,7 +115,7 @@ class AdaptiveRunner(AgentRunner):
                 )
                 for rnd in range(MAX_REFLECT_ROUNDS):
                     async for ev in C.run_tool_round(
-                        self.llm, self.model, self.registry, state.messages, tools, self.max_iters, sources, seen_urls
+                        self.llm, self.model, self.registry, state.messages, tools, self.max_iters, sources, seen_urls, state
                     ):
                         if isinstance(ev, ToolCallEvent):
                             steps += 1

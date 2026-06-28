@@ -153,3 +153,17 @@
   expect_tools: ["get_user_memory"]
   expect_panels: ["get_user_memory"]
   note: 应调 get_user_memory 并产出 memory 面板（需 token）
+
+# —— Phase 6 推荐 v2 cases（aspect 解释 / galgame 三源 / critiquing；写入断言靠 test_phase6 单测）——
+- id: rec_aspect_explain
+  question: 根据我的口味推荐几部动画，并说说为什么适合我。
+  expect_tools: ["recommend_subjects"]
+  expect_panels: ["recommend_subjects"]
+  note: 解释应出现 aspect 级理由（不只 tag）；可先 build_aspect_profile（需 token）
+- id: rec_galgame_three_source
+  question: 推荐几部高口碑 galgame，Bangumi、批判空间、VNDB 都参考一下。
+  expect_tools: ["recommend_subjects"]
+  note: galgame 应出现三源圈层对比（中文圈/日本 gal 圈/国际 VN 圈）
+- id: rec_critique_shorter
+  question: 这些太长了，换几部短一点的。
+  note: 应识别 critiquing → exclude_ids/niche/集数约束重推（多轮，承接上一条 rec 结果）

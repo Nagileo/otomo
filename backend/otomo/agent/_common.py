@@ -129,8 +129,51 @@ def _memory_prompt_lines(memory: dict[str, Any]) -> list[str]:
                 chunks.append(f"{subject_type}(" + "；".join(parts) + ")")
         if chunks:
             lines.append("- 最近画像摘要：" + "、".join(chunks) + "。")
+    aspect_profiles = memory.get("aspect_profiles") or {}
+    if isinstance(aspect_profiles, dict) and aspect_profiles:
+        chunks = []
+        for subject_type, profile in list(aspect_profiles.items())[:3]:
+            if not isinstance(profile, dict):
+                continue
+            likes = [
+                f"{x.get('label') or x.get('aspect')}({float(x.get('weight') or 0):.2f})"
+                for x in (profile.get("likes") or [])[:4]
+                if isinstance(x, dict)
+            ]
+            dislikes = [
+                f"{x.get('label') or x.get('aspect')}({float(x.get('weight') or 0):.2f})"
+                for x in (profile.get("dislikes") or [])[:4]
+                if isinstance(x, dict)
+            ]
+            parts = []
+            if likes:
+                parts.append("好球=" + "/".join(likes))
+            if dislikes:
+                parts.append("雷区=" + "/".join(dislikes))
+            if parts:
+                chunks.append(f"{subject_type}(" + "；".join(parts) + ")")
+        if chunks:
+            lines.append("- aspect 情感画像：" + "、".join(chunks) + "。")
     lines.append("- 长期记忆仅作为个性化弱证据；用户本轮明确要求优先于历史记忆。")
     return lines
+
+
+def _last_recommend_prompt_lines(last: dict[str, Any]) -> list[str]:
+    items = [
+        f"{x.get('id')}:{x.get('name')}"
+        for x in (last.get("items") or [])[:12]
+        if isinstance(x, dict) and x.get("id")
+    ]
+    if not items:
+        return []
+    parts = [
+        "- 上轮推荐候选：" + "、".join(items) + "。",
+        "- 如果用户说“换一批/这些不要/短一点/更冷门/别这个题材”，这是 critiquing；调用 recommend_subjects 时把上轮 id 放进 exclude_ids，并按语义设置 niche/max_episodes/prefer_tags/avoid_tags。只有明确“以后别推X/不要这种”才写长期 memory。",
+    ]
+    args = last.get("args")
+    if isinstance(args, dict):
+        parts.append(f"- 上轮推荐参数：{json.dumps(args, ensure_ascii=False)[:360]}")
+    return parts
 
 
 def runtime_state_prompt(state: Any | None) -> str:
@@ -140,7 +183,8 @@ def runtime_state_prompt(state: Any | None) -> str:
     st = getattr(state, "short_term", {}) or {}
     spoiler = st.get("spoiler") or {}
     memory = st.get("memory") or {}
-    if not spoiler and not memory:
+    last_recommend = st.get("last_recommend") or {}
+    if not spoiler and not memory and not last_recommend:
         return ""
     parts = ["运行时用户偏好："]
     if spoiler:
@@ -154,6 +198,8 @@ def runtime_state_prompt(state: Any | None) -> str:
         parts.append("- 调 get_episode_comments 时，如果涉及分集进度，必须传 max_episode_sort/progress 对应参数。")
     if isinstance(memory, dict) and memory:
         parts.extend(_memory_prompt_lines(memory))
+    if isinstance(last_recommend, dict) and last_recommend:
+        parts.extend(_last_recommend_prompt_lines(last_recommend))
     return "\n".join(parts)
 
 
@@ -239,6 +285,18 @@ def summarize(result: ToolResult) -> str:
     if result.data is None:
         return "ok（无数据）"
     d = result.data.model_dump(exclude_none=True)
+    if d.get("profile") and isinstance(d["profile"], dict) and "likes" in d["profile"]:
+        profile = d["profile"]
+        return (
+            f"aspect画像：好球 {len(profile.get('likes') or [])} 项，"
+            f"雷区 {len(profile.get('dislikes') or [])} 项，样本 {profile.get('sample_count') or d.get('samples_seen') or 0}"
+        )
+    if d.get("queue"):
+        names = [x.get("name") for x in d["queue"][:4] if isinstance(x, dict) and x.get("name")]
+        return f"追番副驾：{len(d['queue'])} 个本周候选" + (f"：{', '.join(names)}" if names else "")
+    if d.get("sections"):
+        types = [x.get("subject_type") for x in d["sections"] if isinstance(x, dict)]
+        return f"口味报告：{len(d['sections'])} 个媒介分区（{', '.join(str(x) for x in types[:5])}）"
     if d.get("memory"):
         mem = d["memory"]
         likes = len(mem.get("likes") or [])
@@ -279,6 +337,9 @@ _PANEL_TOOLS = {
     "compare_user_taste",
     "season_guide_brief",
     "recommend_subjects",
+    "build_aspect_profile",
+    "plan_watch_copilot",
+    "build_taste_report",
     "get_user_memory",
     "remember_user_preference",
     "forget_user_memory",
@@ -290,6 +351,7 @@ _MEMORY_TOOLS = {
     "forget_user_memory",
     "record_recommendation_feedback",
 }
+_MEMORY_STATE_TOOLS = _MEMORY_TOOLS | {"build_aspect_profile", "build_taste_report"}
 
 
 def _trim_text(value: Any, limit: int = 220) -> str:
@@ -324,6 +386,8 @@ def _safe_review_payload(data: dict[str, Any]) -> dict[str, Any]:
         "praise": _trim_dicts(data.get("praise"), limit=4),
         "criticism": _trim_dicts(data.get("criticism"), limit=4),
         "aspect_summary": _trim_dicts(data.get("aspect_summary"), limit=8),
+        "source_groups": _trim_dicts(data.get("source_groups"), limit=8),
+        "source_routing_notes": _trim_strings(data.get("source_routing_notes"), limit=8),
         "consensus": data.get("consensus"),
         "confidence": data.get("confidence"),
         "caveats": _trim_strings(data.get("caveats"), limit=8),
@@ -384,6 +448,11 @@ def _safe_recommend_payload(data: dict[str, Any]) -> dict[str, Any]:
         copied["evidence"] = _trim_dicts(copied.get("evidence"), limit=8)
         copied["external_mappings"] = _trim_dicts(copied.get("external_mappings"), limit=6)
         copied["quality_badges"] = _trim_strings(copied.get("quality_badges"), limit=5, text_limit=120)
+        copied["aspect_matches"] = _trim_strings(copied.get("aspect_matches"), limit=6, text_limit=120)
+        copied["aspect_warnings"] = _trim_strings(copied.get("aspect_warnings"), limit=6, text_limit=120)
+        copied["source_routes"] = _trim_strings(copied.get("source_routes"), limit=6, text_limit=160)
+        copied["media_subtype"] = copied.get("media_subtype")
+        copied["media_notes"] = _trim_strings(copied.get("media_notes"), limit=5, text_limit=120)
         items.append(copied)
     return {
         "subject_type": data.get("subject_type"),
@@ -391,7 +460,76 @@ def _safe_recommend_payload(data: dict[str, Any]) -> dict[str, Any]:
         "mode": data.get("mode"),
         "items": items,
         "notes": _trim_strings(data.get("notes"), limit=6, text_limit=220),
+        "applied_constraints": _trim_strings(data.get("applied_constraints"), limit=8, text_limit=160),
+        "aspect_profile_summary": data.get("aspect_profile_summary") if isinstance(data.get("aspect_profile_summary"), dict) else {},
+        "cold_start_questions": _trim_strings(data.get("cold_start_questions"), limit=4, text_limit=80),
+        "critique_chips": _trim_strings(data.get("critique_chips"), limit=6, text_limit=80),
         "mapping_warnings": _trim_strings(data.get("mapping_warnings"), limit=8, text_limit=160),
+        "media_strategy": data.get("media_strategy") if isinstance(data.get("media_strategy"), dict) else {},
+    }
+
+
+def _safe_aspect_profile_payload(data: dict[str, Any]) -> dict[str, Any]:
+    profile = data.get("profile") if isinstance(data.get("profile"), dict) else {}
+    return {
+        "username": data.get("username") or profile.get("username"),
+        "subject_type": data.get("subject_type") or profile.get("subject_type"),
+        "profile": {
+            "username": profile.get("username"),
+            "subject_type": profile.get("subject_type"),
+            "likes": _trim_dicts(profile.get("likes"), limit=8),
+            "dislikes": _trim_dicts(profile.get("dislikes"), limit=8),
+            "sample_count": profile.get("sample_count"),
+            "extraction_source": profile.get("extraction_source"),
+            "updated_at": profile.get("updated_at"),
+        },
+        "samples_seen": data.get("samples_seen"),
+        "extraction_source": data.get("extraction_source"),
+        "caveats": _trim_strings(data.get("caveats"), limit=8, text_limit=180),
+    }
+
+
+def _safe_watch_copilot_payload(data: dict[str, Any]) -> dict[str, Any]:
+    def items(key: str, limit: int) -> list[dict[str, Any]]:
+        out = []
+        for item in _trim_dicts(data.get(key), limit=limit):
+            copied = dict(item)
+            copied["why"] = _trim_strings(copied.get("why"), limit=5, text_limit=140)
+            copied["tags"] = _trim_strings(copied.get("tags"), limit=8, text_limit=40)
+            out.append(copied)
+        return out
+
+    return {
+        "username": data.get("username"),
+        "profile_tags": _trim_strings(data.get("profile_tags"), limit=12, text_limit=40),
+        "queue": items("queue", 12),
+        "continue_watching": items("continue_watching", 8),
+        "start_from_wishlist": items("start_from_wishlist", 8),
+        "revive_on_hold": items("revive_on_hold", 8),
+        "notes": _trim_strings(data.get("notes"), limit=8, text_limit=180),
+    }
+
+
+def _safe_taste_report_payload(data: dict[str, Any]) -> dict[str, Any]:
+    sections = []
+    for section in _trim_dicts(data.get("sections"), limit=5):
+        copied = dict(section)
+        copied["top_tags"] = _trim_dicts(copied.get("top_tags"), limit=10)
+        copied["favorites"] = _trim_strings(copied.get("favorites"), limit=6, text_limit=80)
+        copied["aspect_likes"] = _trim_dicts(copied.get("aspect_likes"), limit=6)
+        copied["aspect_dislikes"] = _trim_dicts(copied.get("aspect_dislikes"), limit=6)
+        copied["next_actions"] = _trim_strings(copied.get("next_actions"), limit=5, text_limit=140)
+        sections.append(copied)
+    return {
+        "username": data.get("username"),
+        "sections": sections,
+        "global_likes": _trim_dicts(data.get("global_likes"), limit=10),
+        "global_dislikes": _trim_dicts(data.get("global_dislikes"), limit=10),
+        "recent_feedback": _trim_dicts(data.get("recent_feedback"), limit=10),
+        "share_summary": _trim_text(data.get("share_summary"), 220),
+        "report_tags": _trim_strings(data.get("report_tags"), limit=12, text_limit=40),
+        "caveats": _trim_strings(data.get("caveats"), limit=8, text_limit=180),
+        "memory": _safe_memory_payload({"memory": data.get("memory")}) if isinstance(data.get("memory"), dict) else None,
     }
 
 
@@ -408,6 +546,7 @@ def _safe_memory_payload(data: dict[str, Any]) -> dict[str, Any]:
         "progress": dict(list(progress.items())[:20]),
         "recent_feedback": _trim_dicts(memory.get("recent_feedback"), limit=10),
         "profile_snapshot": memory.get("profile_snapshot") if isinstance(memory.get("profile_snapshot"), dict) else {},
+        "aspect_profiles": memory.get("aspect_profiles") if isinstance(memory.get("aspect_profiles"), dict) else {},
         "updated_at": memory.get("updated_at"),
     }
 
@@ -427,6 +566,12 @@ def panel_data_from_payload(name: str, payload: dict[str, Any] | None) -> dict[s
         return _safe_season_payload(data)
     if name == "recommend_subjects":
         return _safe_recommend_payload(data)
+    if name == "build_aspect_profile":
+        return _safe_aspect_profile_payload(data)
+    if name == "plan_watch_copilot":
+        return _safe_watch_copilot_payload(data)
+    if name == "build_taste_report":
+        return _safe_taste_report_payload(data)
     if name in _MEMORY_TOOLS:
         return _safe_memory_payload(data)
     return None
@@ -439,9 +584,15 @@ def panel_data(name: str, result: ToolResult) -> dict[str, Any] | None:
 
 
 def memory_state_from_result(name: str, result: ToolResult) -> dict[str, Any] | None:
-    if name not in _MEMORY_TOOLS or not result.ok or result.data is None:
+    if name not in _MEMORY_STATE_TOOLS or not result.ok or result.data is None:
         return None
     payload = result.data.model_dump(mode="json", exclude_none=True)
+    if name == "build_aspect_profile":
+        data = payload.get("memory") if isinstance(payload.get("memory"), dict) else None
+        return _safe_memory_payload(data) if data else None
+    if name == "build_taste_report":
+        data = payload.get("memory") if isinstance(payload.get("memory"), dict) else None
+        return _safe_memory_payload(data) if data else None
     data = panel_data_from_payload(name, payload)
     return data if data else None
 
@@ -514,18 +665,48 @@ def assistant_toolcalls_msg(msg: Any) -> dict:
     }
 
 
+def update_last_recommend_state(
+    state: Any | None,
+    name: str,
+    args: dict[str, Any],
+    result: ToolResult,
+) -> None:
+    if state is None or name != "recommend_subjects" or not result.ok or result.data is None:
+        return
+    st = getattr(state, "short_term", None)
+    if st is None:
+        return
+    payload = result.data.model_dump(mode="json", exclude_none=True)
+    items = [
+        {"id": it.get("id"), "name": it.get("name")}
+        for it in (payload.get("items") or [])[:20]
+        if isinstance(it, dict) and it.get("id")
+    ]
+    if not items:
+        return
+    st["last_recommend"] = {
+        "subject_type": payload.get("subject_type"),
+        "mode": payload.get("mode"),
+        "based_on_tags": payload.get("based_on_tags") or [],
+        "args": args,
+        "items": items,
+    }
+
+
 async def step_tools(
     registry: ToolRegistry,
     msg: Any,
     messages: list[dict],
     sources: list[Citation],
     seen_urls: set[str],
+    state: Any | None = None,
 ) -> AsyncIterator[Any]:
     """执行一轮（一个 assistant 回合里的全部 tool_calls），产出 ToolCall/Observation 事件。
     side effect：把 assistant 与 tool 结果消息追加进 messages、新来源并入 sources。"""
     messages.append(assistant_toolcalls_msg(msg))
     for tc in msg.tool_calls:
-        yield ToolCallEvent(name=tc.function.name, args=safe_json(tc.function.arguments))
+        call_args = safe_json(tc.function.arguments)
+        yield ToolCallEvent(name=tc.function.name, args=call_args)
         result = await registry.dispatch(tc.function.name, tc.function.arguments)
         for c in result.sources:
             if c.url not in seen_urls:
@@ -538,6 +719,7 @@ async def step_tools(
         )
         if memory_state := memory_state_from_result(tc.function.name, result):
             yield StateEvent(scope="memory", snapshot=memory_state)
+        update_last_recommend_state(state, tc.function.name, call_args, result)
         messages.append({"role": "tool", "tool_call_id": tc.id, "content": result.to_observation()})
 
 
@@ -550,6 +732,7 @@ async def run_tool_round(
     max_iters: int,
     sources: list[Citation],
     seen_urls: set[str],
+    state: Any | None = None,
 ) -> AsyncIterator[Any]:
     """一轮"执行"：反复让模型调工具直到它不再调（含 DSML 文本误写的纠正）。
     ReAct / Plan-Execute / Adaptive 三个 runner 共用。side effect 落到 messages/sources。"""
@@ -566,7 +749,7 @@ async def run_tool_round(
                 messages.append({"role": "system", "content": CORRECT_FC})
                 continue
             return
-        async for ev in step_tools(registry, msg, messages, sources, seen_urls):
+        async for ev in step_tools(registry, msg, messages, sources, seen_urls, state):
             yield ev
 
 

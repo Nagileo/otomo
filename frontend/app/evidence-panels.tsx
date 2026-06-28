@@ -16,6 +16,7 @@ type MemoryState = {
   progress?: Record<string, AnyRecord>;
   recent_feedback?: AnyRecord[];
   profile_snapshot?: Record<string, AnyRecord>;
+  aspect_profiles?: Record<string, AnyRecord>;
   updated_at?: string;
 };
 
@@ -89,6 +90,7 @@ function ReviewEvidencePanel({ data }: { data: AnyRecord }) {
   const ratings = list(data.ratings);
   const aspects = list(data.aspect_summary);
   const matrix = list(data.source_matrix);
+  const groups = list(data.source_groups);
   return (
     <Panel
       title={`评价证据 · ${text(data.title)}`}
@@ -99,6 +101,22 @@ function ReviewEvidencePanel({ data }: { data: AnyRecord }) {
         <Badge tone={data.spoiler_level === "none" ? "good" : "warn"}>spoiler: {text(data.spoiler_level, "none")}</Badge>
       </div>
       {data.consensus && <p className="evidence-copy">{data.consensus}</p>}
+
+      {groups.length > 0 && (
+        <>
+          <div className="section-title">三圈层对比</div>
+          <div className="rating-grid">
+            {groups.map((g, i) => (
+              <div className="rating-card" key={`${g.group}-${i}`}>
+                <div className="rating-source">{text(g.group)}</div>
+                <div className="card-meta">{text(g.role, "")}</div>
+                <p className="card-note">{text(g.consensus, "暂无证据")}</p>
+                <Badge tone={clsBySignal(g.confidence)}>confidence: {text(g.confidence, "low")}</Badge>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
 
       <div className="section-title">评分 / 圈层</div>
       {ratings.length ? (
@@ -162,6 +180,12 @@ function ReviewEvidencePanel({ data }: { data: AnyRecord }) {
             ))}
           </div>
         </>
+      )}
+
+      {list<string>(data.source_routing_notes).length > 0 && (
+        <div className="compact-list">
+          {list<string>(data.source_routing_notes).map((n, i) => <span key={i}>{n}</span>)}
+        </div>
       )}
 
       {list<string>(data.caveats).length > 0 && (
@@ -299,8 +323,54 @@ function SeasonGuidePanel({ data }: { data: AnyRecord }) {
   );
 }
 
-function RecommendPanel({ data }: { data: AnyRecord }) {
+function AspectProfilePanel({ data }: { data: AnyRecord }) {
+  const profile = data.profile || {};
+  const likes = list(profile.likes);
+  const dislikes = list(profile.dislikes);
+  return (
+    <Panel
+      title={`Aspect 情感画像 · ${text(data.subject_type || profile.subject_type)}`}
+      subtitle={`${text(data.extraction_source || profile.extraction_source, "none")} · ${data.samples_seen ?? profile.sample_count ?? 0} 条私评样本`}
+    >
+      <div className="memory-grid">
+        <div>
+          <div className="section-title">好球区</div>
+          {likes.length ? (
+            <div className="compact-list">
+              {likes.map((item, i) => (
+                <span key={`${item.aspect}-${i}`}>
+                  {text(item.label || item.aspect)} · weight {pct(item.weight)} · {item.evidence_count ?? 0} 证据
+                  {item.sample ? <small> · {item.sample}</small> : null}
+                </span>
+              ))}
+            </div>
+          ) : <EmptyHint text="暂无好球区" />}
+        </div>
+        <div>
+          <div className="section-title">雷区</div>
+          {dislikes.length ? (
+            <div className="compact-list">
+              {dislikes.map((item, i) => (
+                <span key={`${item.aspect}-${i}`}>
+                  {text(item.label || item.aspect)} · weight {pct(item.weight)} · {item.evidence_count ?? 0} 证据
+                  {item.sample ? <small> · {item.sample}</small> : null}
+                </span>
+              ))}
+            </div>
+          ) : <EmptyHint text="暂无雷区" />}
+        </div>
+      </div>
+      {list<string>(data.caveats).length > 0 && (
+        <div className="caveats">{list<string>(data.caveats).map((c, i) => <span key={i}>{c}</span>)}</div>
+      )}
+    </Panel>
+  );
+}
+
+function RecommendPanel({ data, onCritique }: { data: AnyRecord; onCritique?: (q: string) => void }) {
   const items = list(data.items);
+  const aspectProfile = data.aspect_profile_summary || {};
+  const mediaStrategy = data.media_strategy || {};
   return (
     <Panel
       title={`推荐证据 · ${text(data.subject_type)}`}
@@ -308,7 +378,21 @@ function RecommendPanel({ data }: { data: AnyRecord }) {
     >
       <div className="evidence-row">
         {list<string>(data.based_on_tags).slice(0, 10).map((tag) => <Badge key={tag} tone="dim">{tag}</Badge>)}
+        {list<string>(data.applied_constraints).map((x) => <Badge key={x} tone="warn">{x}</Badge>)}
+        {mediaStrategy.book_subtype && mediaStrategy.book_subtype !== "auto" && (
+          <Badge tone="good">book: {text(mediaStrategy.book_subtype)}</Badge>
+        )}
+        {mediaStrategy.music_subtype && mediaStrategy.music_subtype !== "auto" && (
+          <Badge tone="good">music: {text(mediaStrategy.music_subtype)}</Badge>
+        )}
       </div>
+      {mediaStrategy.policy && <p className="evidence-copy">{text(mediaStrategy.policy)}</p>}
+      {(list(aspectProfile.likes).length > 0 || list(aspectProfile.dislikes).length > 0) && (
+        <div className="evidence-row">
+          {list(aspectProfile.likes).slice(0, 4).map((x) => <Badge key={`like-${x.aspect}`} tone="good">好球 {text(x.label || x.aspect)}</Badge>)}
+          {list(aspectProfile.dislikes).slice(0, 4).map((x) => <Badge key={`dislike-${x.aspect}`} tone="warn">雷区 {text(x.label || x.aspect)}</Badge>)}
+        </div>
+      )}
       <div className="rec-grid">
         {items.map((item, i) => (
           <a className="rec-card" href={`https://bgm.tv/subject/${item.id}`} target="_blank" rel="noreferrer" key={`${item.id}-${i}`}>
@@ -321,9 +405,17 @@ function RecommendPanel({ data }: { data: AnyRecord }) {
               </div>
               {item.review_consensus && <p className="card-note">{item.review_consensus}</p>}
               <div className="evidence-row tight">
+                {item.media_subtype && <Badge tone="dim">{text(item.media_subtype)}</Badge>}
                 {list<string>(item.explicit_tag_matches).map((tag) => <Badge key={tag} tone="good">{tag}</Badge>)}
                 {list<string>(item.quality_badges).map((tag) => <Badge key={tag} tone="warn">{tag}</Badge>)}
+                {list<string>(item.aspect_matches).map((tag) => <Badge key={tag} tone="good">{tag}</Badge>)}
+                {list<string>(item.aspect_warnings).map((tag) => <Badge key={tag} tone="warn">{tag}</Badge>)}
               </div>
+              {list<string>(item.media_notes).length > 0 && (
+                <div className="compact-list inline">
+                  {list<string>(item.media_notes).slice(0, 3).map((r, idx) => <span key={idx}>{r}</span>)}
+                </div>
+              )}
               <div className="compact-list inline">
                 {list<string>(item.reasons).slice(0, 4).map((r, idx) => <span key={idx}>{r}</span>)}
               </div>
@@ -336,10 +428,33 @@ function RecommendPanel({ data }: { data: AnyRecord }) {
                   ))}
                 </div>
               )}
+              {list<string>(item.source_routes).length > 0 && (
+                <div className="compact-list">
+                  {list<string>(item.source_routes).slice(0, 3).map((r, idx) => <span key={idx}>{r}</span>)}
+                </div>
+              )}
             </div>
           </a>
         ))}
       </div>
+      {onCritique && list<string>(data.critique_chips).length > 0 && (
+        <div className="followups">
+          {list<string>(data.critique_chips).map((q, i) => (
+            <button className="chip" key={i} onClick={() => onCritique(q)}>
+              {q}
+            </button>
+          ))}
+        </div>
+      )}
+      {onCritique && list<string>(data.cold_start_questions).length > 0 && (
+        <div className="followups">
+          {list<string>(data.cold_start_questions).map((q, i) => (
+            <button className="chip" key={i} onClick={() => onCritique(q)}>
+              {q}
+            </button>
+          ))}
+        </div>
+      )}
       {list<string>(data.mapping_warnings).length > 0 && (
         <div className="caveats">
           <div className="section-title">映射告警（未安全对齐，已跳过）</div>
@@ -348,6 +463,106 @@ function RecommendPanel({ data }: { data: AnyRecord }) {
       )}
       {list<string>(data.notes).length > 0 && (
         <div className="caveats">{list<string>(data.notes).map((n, i) => <span key={i}>{n}</span>)}</div>
+      )}
+    </Panel>
+  );
+}
+
+function WatchCopilotPanel({ data }: { data: AnyRecord }) {
+  const queue = list(data.queue);
+  const groups = [
+    ["继续追", "continue_watching"],
+    ["想看开坑", "start_from_wishlist"],
+    ["搁置盘活", "revive_on_hold"],
+  ];
+  return (
+    <Panel title={`追番副驾 · ${text(data.username)}`} subtitle={`${queue.length} 个本周候选`}>
+      <div className="evidence-row">
+        {list<string>(data.profile_tags).slice(0, 10).map((tag) => <Badge key={tag} tone="dim">{tag}</Badge>)}
+      </div>
+      <div className="rec-grid">
+        {queue.map((item, i) => (
+          <a className="rec-card" href={`https://bgm.tv/subject/${item.id}`} target="_blank" rel="noreferrer" key={`${item.id}-${i}`}>
+            {item.image ? <img src={item.image} alt="" /> : <div className="rec-noimg" />}
+            <div className="rec-body">
+              <div className="card-title">{text(item.name)}</div>
+              <div className="card-meta">
+                {text(item.status)} · Otomo {item.score ?? "-"} · BGM {item.bangumi_score ?? "暂无"}
+                {item.eps ? ` · ${item.ep_status ?? 0}/${item.eps}` : ""}
+              </div>
+              <Badge tone={item.status === "在看" ? "good" : item.status === "搁置" ? "warn" : "dim"}>{text(item.action)}</Badge>
+              <div className="compact-list inline">
+                {list<string>(item.why).slice(0, 4).map((r, idx) => <span key={idx}>{r}</span>)}
+              </div>
+            </div>
+          </a>
+        ))}
+      </div>
+      <div className="taste-groups">
+        {groups.map(([label, key]) => (
+          <div className="taste-group" key={key}>
+            <div className="section-title">{label}</div>
+            {list(data[key]).length ? (
+              <div className="compact-list">
+                {list(data[key]).slice(0, 5).map((item, i) => (
+                  <span key={`${item.id}-${i}`}>{text(item.name)} · {text(item.action)}</span>
+                ))}
+              </div>
+            ) : <EmptyHint text="暂无候选" />}
+          </div>
+        ))}
+      </div>
+      {list<string>(data.notes).length > 0 && (
+        <div className="caveats">{list<string>(data.notes).map((n, i) => <span key={i}>{n}</span>)}</div>
+      )}
+    </Panel>
+  );
+}
+
+function TasteReportPanel({ data }: { data: AnyRecord }) {
+  const sections = list(data.sections);
+  return (
+    <Panel title={`口味报告 · ${text(data.username)}`} subtitle={text(data.share_summary, "")}>
+      <div className="evidence-row">
+        {list<string>(data.report_tags).map((tag) => <Badge key={tag} tone="good">{tag}</Badge>)}
+      </div>
+      <div className="rating-grid">
+        {sections.map((section, i) => (
+          <div className="rating-card" key={`${section.subject_type}-${i}`}>
+            <div className="rating-source">{text(section.subject_type)}</div>
+            <div className="card-meta">
+              看过 {section.watched ?? 0} · 评分 {section.rated ?? 0} · 均分 {section.avg_rating ?? "暂无"}
+            </div>
+            <p className="card-note">{text(section.persona, "")}</p>
+            <div className="evidence-row tight">
+              {list(section.top_tags).slice(0, 5).map((tag) => <Badge key={tag.tag} tone="dim">{text(tag.tag)}</Badge>)}
+            </div>
+            <div className="evidence-row tight">
+              {list(section.aspect_likes).slice(0, 3).map((item) => <Badge key={`l-${item.aspect}`} tone="good">好球 {text(item.label || item.aspect)}</Badge>)}
+              {list(section.aspect_dislikes).slice(0, 3).map((item) => <Badge key={`d-${item.aspect}`} tone="warn">雷区 {text(item.label || item.aspect)}</Badge>)}
+            </div>
+            {list<string>(section.next_actions).length > 0 && (
+              <div className="compact-list">
+                {list<string>(section.next_actions).map((x, idx) => <span key={idx}>{x}</span>)}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+      {(list(data.global_likes).length > 0 || list(data.global_dislikes).length > 0) && (
+        <div className="memory-grid">
+          <div>
+            <div className="section-title">长期喜欢</div>
+            <div className="compact-list">{list(data.global_likes).slice(0, 8).map((x, i) => <span key={i}>{text(x.value)}</span>)}</div>
+          </div>
+          <div>
+            <div className="section-title">长期避雷</div>
+            <div className="compact-list">{list(data.global_dislikes).slice(0, 8).map((x, i) => <span key={i}>{text(x.value)}</span>)}</div>
+          </div>
+        </div>
+      )}
+      {list<string>(data.caveats).length > 0 && (
+        <div className="caveats">{list<string>(data.caveats).map((n, i) => <span key={i}>{n}</span>)}</div>
       )}
     </Panel>
   );
@@ -395,6 +610,7 @@ function MemoryPanel({ data }: { data: MemoryState }) {
   const progress = data.progress || {};
   const progressEntries = Object.entries(progress).slice(0, 12);
   const profiles = Object.entries(data.profile_snapshot || {}).slice(0, 3);
+  const aspectProfiles = Object.entries(data.aspect_profiles || {}).slice(0, 4);
   return (
     <Panel
       title={`长期记忆 · ${text(data.username, "unknown")}`}
@@ -477,6 +693,30 @@ function MemoryPanel({ data }: { data: MemoryState }) {
         </>
       )}
 
+      {aspectProfiles.length > 0 && (
+        <>
+          <div className="section-title">Aspect 好球区 / 雷区</div>
+          <div className="memory-grid">
+            {aspectProfiles.map(([subjectType, profile]) => (
+              <div className="rating-card" key={subjectType}>
+                <div className="rating-source">{subjectType}</div>
+                <div className="card-meta">
+                  {text(profile.extraction_source, "none")} · {profile.sample_count ?? 0} 样本
+                </div>
+                <div className="evidence-row tight">
+                  {list(profile.likes).slice(0, 4).map((item) => (
+                    <Badge key={`like-${item.aspect}`} tone="good">好球 {text(item.label || item.aspect)}</Badge>
+                  ))}
+                  {list(profile.dislikes).slice(0, 4).map((item) => (
+                    <Badge key={`dislike-${item.aspect}`} tone="warn">雷区 {text(item.label || item.aspect)}</Badge>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
       {feedback.length > 0 && (
         <>
           <div className="section-title">近期推荐反馈</div>
@@ -494,25 +734,34 @@ function MemoryPanel({ data }: { data: MemoryState }) {
   );
 }
 
-export function EvidencePanels({ evidence }: { evidence: EvidenceMap }) {
+export function EvidencePanels({ evidence, onCritique }: { evidence: EvidenceMap; onCritique?: (q: string) => void }) {
   const review = list(evidence.review_subject);
   const taste = list(evidence.compare_user_taste);
   const season = list(evidence.season_guide_brief);
   const recommend = list(evidence.recommend_subjects);
+  const aspect = list(evidence.build_aspect_profile);
+  const watchCopilot = list(evidence.plan_watch_copilot);
+  const tasteReport = list(evidence.build_taste_report);
   const memory = [
     ...list(evidence.get_user_memory),
     ...list(evidence.remember_user_preference),
     ...list(evidence.forget_user_memory),
     ...list(evidence.record_recommendation_feedback),
   ];
-  if (!review.length && !taste.length && !season.length && !recommend.length && !memory.length) return null;
+  if (
+    !review.length && !taste.length && !season.length && !recommend.length && !memory.length
+    && !aspect.length && !watchCopilot.length && !tasteReport.length
+  ) return null;
   return (
     <div className="evidence-stack">
       {memory.map((data, i) => <MemoryPanel data={data} key={`memory-${i}`} />)}
+      {aspect.map((data, i) => <AspectProfilePanel data={data} key={`aspect-${i}`} />)}
+      {tasteReport.map((data, i) => <TasteReportPanel data={data} key={`taste-report-${i}`} />)}
       {review.map((data, i) => <ReviewEvidencePanel data={data} key={`review-${i}`} />)}
       {taste.map((data, i) => <TasteAffinityPanel data={data} key={`taste-${i}`} />)}
       {season.map((data, i) => <SeasonGuidePanel data={data} key={`season-${i}`} />)}
-      {recommend.map((data, i) => <RecommendPanel data={data} key={`recommend-${i}`} />)}
+      {watchCopilot.map((data, i) => <WatchCopilotPanel data={data} key={`watch-copilot-${i}`} />)}
+      {recommend.map((data, i) => <RecommendPanel data={data} onCritique={onCritique} key={`recommend-${i}`} />)}
     </div>
   );
 }

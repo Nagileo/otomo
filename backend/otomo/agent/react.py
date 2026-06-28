@@ -78,7 +78,7 @@ class ReActRunner(AgentRunner):
                         state.messages.append({"role": "system", "content": C.CORRECT_FC})
                         continue
                     break
-                async for ev in C.step_tools(self.registry, msg, state.messages, sources, seen_urls):
+                async for ev in C.step_tools(self.registry, msg, state.messages, sources, seen_urls, state):
                     if isinstance(ev, ToolCallEvent):
                         steps += 1
                     yield ev

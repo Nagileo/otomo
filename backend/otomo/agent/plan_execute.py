@@ -50,7 +50,7 @@ class PlanExecuteRunner(AgentRunner):
     def _tool_round(self, state, tools, sources, seen_urls) -> AsyncIterator[AgentEvent]:
         """一轮执行：复用共享的 run_tool_round（含 DSML 纠正）。"""
         return C.run_tool_round(
-            self.llm, self.model, self.registry, state.messages, tools, self.max_iters, sources, seen_urls
+            self.llm, self.model, self.registry, state.messages, tools, self.max_iters, sources, seen_urls, state
         )
 
     async def stream(

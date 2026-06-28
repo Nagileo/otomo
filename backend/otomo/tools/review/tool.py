@@ -84,6 +84,14 @@ class SourceAvailability(BaseModel):
     note: str = ""
 
 
+class SourceGroup(BaseModel):
+    group: str
+    role: str
+    sources: list[str] = Field(default_factory=list)
+    consensus: str = ""
+    confidence: Literal["low", "medium", "high"] = "low"
+
+
 class ReviewFusionResult(BaseModel):
     model_config = ConfigDict(extra="ignore")
     subject_id: int
@@ -100,6 +108,8 @@ class ReviewFusionResult(BaseModel):
     confidence: Literal["low", "medium", "high"] = "low"
     caveats: list[str] = Field(default_factory=list)
     source_matrix: list[SourceAvailability] = Field(default_factory=list)
+    source_groups: list[SourceGroup] = Field(default_factory=list)
+    source_routing_notes: list[str] = Field(default_factory=list)
     suggested_summary_points: list[str] = Field(default_factory=list)
 
 
@@ -153,6 +163,64 @@ def _consensus(ratings: list[RatingEvidence]) -> str:
     if weak and not positives:
         return "现有口碑偏谨慎，建议降低推荐强度或等待更多反馈。"
     return "口碑信号中性，需要结合用户偏好判断。"
+
+
+def _rating_by_source(ratings: list[RatingEvidence], source: str) -> RatingEvidence | None:
+    return next((r for r in ratings if r.source == source), None)
+
+
+def _rating_phrase(r: RatingEvidence | None) -> str:
+    if r is None:
+        return "未命中"
+    score = f"{r.score:g}/{r.scale}" if r.score is not None and r.scale else "暂无分"
+    count = f"，{r.count} 样本" if r.count else ""
+    return f"{score}{count}，{r.signal}"
+
+
+def _galgame_source_groups(ratings: list[RatingEvidence]) -> tuple[list[SourceGroup], list[str], str]:
+    bgm = _rating_by_source(ratings, "Bangumi")
+    egs = _rating_by_source(ratings, "ErogameScape/批判空间")
+    vndb = _rating_by_source(ratings, "VNDB")
+    groups = [
+        SourceGroup(
+            group="中文圈 / Bangumi",
+            role="中文用户收藏、评分与条目锚点",
+            sources=["Bangumi"] if bgm else [],
+            consensus=_rating_phrase(bgm),
+            confidence="high" if bgm and (bgm.count or 0) >= 100 else ("medium" if bgm else "low"),
+        ),
+        SourceGroup(
+            group="日本 gal 圈 / 批判空间",
+            role="中央値、平均值、Data 数与 gal 圈口碑",
+            sources=["ErogameScape/批判空间"] if egs else [],
+            consensus=_rating_phrase(egs),
+            confidence="high" if egs and (egs.count or 0) >= 80 else ("medium" if egs else "low"),
+        ),
+        SourceGroup(
+            group="国际 VN 圈 / VNDB",
+            role="国际视觉小说评分、别名与发售信息",
+            sources=["VNDB"] if vndb else [],
+            consensus=_rating_phrase(vndb),
+            confidence="high" if vndb and (vndb.count or 0) >= 200 else ("medium" if vndb else "low"),
+        ),
+    ]
+    notes = [
+        "galgame 评价优先区分三个圈层：Bangumi=中文圈，批判空间=日本 gal 圈，VNDB=国际 VN 圈。",
+        "事实锚点仍以 Bangumi subject 为准；外部源只作为口碑/别名/发售补充。",
+    ]
+    available = [x for x in (bgm, egs, vndb) if x is not None and x.signal not in {"unknown", "low_data"}]
+    if len(available) >= 2:
+        positives = [x for x in available if x.signal in {"strong", "positive"}]
+        weak = [x for x in available if x.signal in {"mixed", "weak"}]
+        if positives and not weak:
+            consensus = "galgame 三源可用且整体偏正向；推荐时可作为强口碑证据。"
+        elif positives and weak:
+            consensus = "galgame 三圈层存在分歧；需要分开说明中文圈、日本 gal 圈与国际 VN 圈的差异。"
+        else:
+            consensus = "galgame 外部圈层口碑偏谨慎；推荐强度应降低。"
+    else:
+        consensus = "galgame 三源证据不足；以 Bangumi game 条目为主，外部源仅作弱补充。"
+    return groups, notes, consensus
 
 
 _PRAISE_HINTS = (
@@ -527,6 +595,11 @@ class ReviewSubjectTool(Tool):
                 caveats.append("galgame/视觉小说评价需区分中文 Bangumi、日本批判空间、国际 VNDB 三个圈层。")
             else:
                 caveats.append("本作未在批判空间/VNDB 命中，可能不是 galgame/视觉小说；gal 圈外部评分不适用，以 Bangumi game 数据为准。")
+        source_groups: list[SourceGroup] = []
+        source_routing_notes: list[str] = []
+        consensus = _consensus(ratings)
+        if detail.type == 4:
+            source_groups, source_routing_notes, consensus = _galgame_source_groups(ratings)
         praise, criticism = _pick_aspects(comments)
         aspect_opinions = _extract_aspect_opinions(comments)
         aspect_summary = _build_aspect_summary(aspect_opinions)
@@ -542,10 +615,12 @@ class ReviewSubjectTool(Tool):
             criticism=criticism,
             aspect_opinions=aspect_opinions,
             aspect_summary=aspect_summary,
-            consensus=_consensus(ratings),
+            consensus=consensus,
             confidence=_confidence(ratings, comments),
             caveats=caveats,
             source_matrix=source_matrix,
+            source_groups=source_groups,
+            source_routing_notes=source_routing_notes,
             suggested_summary_points=_summary_points(ratings, comments),
         )
         sources = [Citation(title=f"Bangumi — {title}", url=f"https://bgm.tv/subject/{detail.id}", source="bangumi", image=detail.image)]
