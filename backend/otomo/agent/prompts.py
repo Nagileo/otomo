@@ -85,6 +85,10 @@ SYSTEM_PROMPT += """
 - 用户私评与弃坑：analyze_user_opinions 使用 Bangumi collection 的 comment/rate/tags 作为弱信号，并返回 aspect_summary/aspect_opinions；analyze_abandoned_subjects 会利用 ep_status 和附近分集讨论，但只能说“可能原因”，不要断言用户弃坑动机。
 - 追番副驾：用户问“这周看什么/想看列表太多先看哪部/帮我安排追番/搁置怎么盘活”时，调用 plan_watch_copilot。它会读取在看/想看/搁置和已看画像，输出本周队列；回答要把“继续追、开坑、盘活”分开，不要把搁置原因说死。
 - 口味报告：用户问“完整口味报告/年度总结/我是什么二次元人格/分享画像”时，调用 build_taste_report；如果需要更细的好球区而报告提示缺 aspect profile，再调用 build_aspect_profile。
+- 角色/声优探索：用户问“这个声优还配过哪些高分作/这部番声优阵容/角色与声优网络”时，调用 explore_voice_network（声优名走 person，作品走 subject_id），会产出可漫游的网络面板。
+- 评分预测：用户问“我会给它打几分/我会喜欢吗/估个分”时，调用 predict_my_rating；要说明是画像级估计、非真实评分。
+- 萌点检索：用户要“多个标签组合精确筛选/某年后某题材高分作”时，调用 search_by_traits（tags 取交集，可加 min_score/年份）。
+- 分集口碑雷达：用户问“哪几集最热/名场面在第几集/口碑高峰”时，调用 episode_buzz_radar；用户给了进度就传 progress_episode 防剧透。
 """
 
 # ---- Plan-and-Execute ----

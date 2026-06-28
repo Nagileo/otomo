@@ -78,6 +78,8 @@ class PeerAffinity(BaseModel):
     peer_space_similarity: float
     extreme_similarity: float = 0.0
     union_similarity: float
+    rating_mse: float | None = None       # 共同评分原始分差均方（严格度差异，越小越像）
+    severity_alignment: float = 0.0       # 打分严格度一致性（1=宽松/严苛程度几乎相同）
     common_rated: int
     own_rated: int
     peer_rated: int
@@ -337,6 +339,17 @@ def _build_affinity(peer_username: str, own_items: list[dict], peer_items: list[
     common = own_keys & peer_keys
     union = own_keys | peer_keys
     base = _cosine(own_vec, peer_vec, common)
+    # MSE 严格度：余弦看口味方向，MSE 看打分严格度（社区"同步率的徒劳"洞察）。用原始 1-10 分。
+    if common:
+        mse = sum(
+            (int(own_rated_items[sid].get("rate") or 0) - int(peer_rated_items[sid].get("rate") or 0)) ** 2
+            for sid in common
+        ) / len(common)
+        rating_mse = round(mse, 3)
+        severity_alignment = round(max(0.0, 1.0 - mse / 16.0), 4)  # 均方≥16(≈4 分差)→0；0 分差→1
+    else:
+        rating_mse = None
+        severity_alignment = 0.0
     own_space = base * math.sqrt(len(common) / len(own_keys)) if own_keys and common else 0.0
     peer_space = base * math.sqrt(len(common) / len(peer_keys)) if peer_keys and common else 0.0
     union_space = base * (len(common) / len(union)) if union else 0.0
@@ -400,6 +413,8 @@ def _build_affinity(peer_username: str, own_items: list[dict], peer_items: list[
         peer_space_similarity=round(peer_collection_space or peer_space, 4),
         extreme_similarity=round(extreme_similarity, 4),
         union_similarity=round(union_space, 4),
+        rating_mse=rating_mse,
+        severity_alignment=severity_alignment,
         common_rated=len(common),
         own_rated=len(own_keys),
         peer_rated=len(peer_keys),

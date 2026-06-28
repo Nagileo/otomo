@@ -15,6 +15,8 @@ from .tools.comments import build_comment_tools
 from .tools.community import build_community_tools
 from .tools.bangumi import build_bangumi_tools
 from .tools.bangumi.client import BangumiClient
+from .tools.explorer import build_explorer_tools
+from .tools.discovery import build_discovery_tools
 from .tools.erogamescape import build_erogamescape_tools
 from .tools.moegirl import build_moegirl_tools
 from .tools.moegirl.client import MoegirlClient
@@ -44,6 +46,10 @@ def build_registry(
     registry = ToolRegistry()
     shared_ltm = ltm or LongTermMemory()
     for tool in build_bangumi_tools(client):
+        registry.register(tool)
+    for tool in build_explorer_tools(client):
+        registry.register(tool)
+    for tool in build_discovery_tools(client):
         registry.register(tool)
     if moegirl is not None:
         for tool in build_moegirl_tools(moegirl):

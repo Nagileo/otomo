@@ -167,3 +167,23 @@
 - id: rec_critique_shorter
   question: 这些太长了，换几部短一点的。
   note: 应识别 critiquing → exclude_ids/niche/集数约束重推（多轮，承接上一条 rec 结果）
+
+# —— 收口 cases（探索网络 / 评分预测 / 萌点检索 / 分集雷达）——
+- id: explore_cv_network
+  question: 声优 花守ゆみり 还配过哪些高分动画？
+  expect_tools: ["explore_voice_network"]
+  expect_panels: ["explore_voice_network"]
+  note: 声优出演网络，应产出探索面板
+- id: predict_my_rating
+  question: 你估我会给《孤独摇滚！》打几分？
+  expect_tools: ["predict_my_rating"]
+  note: 画像级评分预测（需 token）；要说明是估计非真实
+- id: trait_search
+  question: 找几部 百合 + 日常 的高分番。
+  expect_tools: ["search_by_traits"]
+  note: 多标签交集筛选
+- id: episode_radar
+  question: 《孤独摇滚！》哪几集讨论最热闹？
+  expect_tools: ["episode_buzz_radar"]
+  expect_panels: ["episode_buzz_radar"]
+  note: 分集讨论数雷达，应产出曲线面板

@@ -203,6 +203,7 @@ function TasteAffinityPanel({ data }: { data: AnyRecord }) {
     ["你的空间", affinity.user_space_similarity],
     ["对方空间", affinity.peer_space_similarity],
     ["极限空间", affinity.extreme_similarity],
+    ["严格度对齐", affinity.severity_alignment],
   ];
   const groups = [
     ["共同高分", "liked_together"],
@@ -519,12 +520,57 @@ function WatchCopilotPanel({ data }: { data: AnyRecord }) {
   );
 }
 
+function _wrapText(ctx: CanvasRenderingContext2D, content: string, x: number, y: number, maxW: number, lh: number): number {
+  let line = "";
+  for (const ch of String(content)) {
+    if (ctx.measureText(line + ch).width > maxW && line) {
+      ctx.fillText(line, x, y); line = ch; y += lh;
+    } else line += ch;
+  }
+  if (line) { ctx.fillText(line, x, y); y += lh; }
+  return y;
+}
+
+function exportTasteCard(data: AnyRecord): void {
+  const canvas = document.createElement("canvas");
+  canvas.width = 600; canvas.height = 760;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.fillStyle = "#0f1117"; ctx.fillRect(0, 0, 600, 760);
+  ctx.fillStyle = "#c9a3ff"; ctx.font = "bold 30px sans-serif";
+  ctx.fillText("Otomo · 二次元人格卡", 40, 64);
+  ctx.fillStyle = "#ffffff"; ctx.font = "bold 24px sans-serif";
+  ctx.fillText(`@${text(data.username, "用户")}`, 40, 108);
+  ctx.fillStyle = "#9aa4b2"; ctx.font = "16px sans-serif";
+  let y = _wrapText(ctx, text(data.share_summary, ""), 40, 146, 520, 24) + 16;
+  ctx.fillStyle = "#86efac"; ctx.font = "16px sans-serif";
+  y = _wrapText(ctx, "标签：" + (list<string>(data.report_tags).join(" · ") || "—"), 40, y, 520, 24) + 20;
+  const sec = list(data.sections)[0] as AnyRecord | undefined;
+  if (sec) {
+    ctx.fillStyle = "#ffffff"; ctx.font = "bold 19px sans-serif";
+    ctx.fillText(`${text(sec.subject_type)} · 看过 ${sec.watched ?? 0} · 均分 ${sec.avg_rating ?? "-"}`, 40, y); y += 32;
+    ctx.fillStyle = "#9aa4b2"; ctx.font = "15px sans-serif";
+    y = _wrapText(ctx, text(sec.persona, ""), 40, y, 520, 22) + 14;
+    const likes = list(sec.aspect_likes).map((x: AnyRecord) => text(x.label || x.aspect)).slice(0, 3);
+    const dislikes = list(sec.aspect_dislikes).map((x: AnyRecord) => text(x.label || x.aspect)).slice(0, 3);
+    ctx.fillStyle = "#86efac"; ctx.fillText("好球区：" + (likes.join("、") || "—"), 40, y); y += 28;
+    ctx.fillStyle = "#fca5a5"; ctx.fillText("雷区：" + (dislikes.join("、") || "—"), 40, y); y += 36;
+  }
+  ctx.fillStyle = "#6b7280"; ctx.font = "13px sans-serif";
+  ctx.fillText("由 Otomo · 番组搭子 生成", 40, 730);
+  const a = document.createElement("a");
+  a.href = canvas.toDataURL("image/png");
+  a.download = `otomo-taste-${text(data.username, "card")}.png`;
+  a.click();
+}
+
 function TasteReportPanel({ data }: { data: AnyRecord }) {
   const sections = list(data.sections);
   return (
     <Panel title={`口味报告 · ${text(data.username)}`} subtitle={text(data.share_summary, "")}>
       <div className="evidence-row">
         {list<string>(data.report_tags).map((tag) => <Badge key={tag} tone="good">{tag}</Badge>)}
+        <button className="chip" onClick={() => exportTasteCard(data)}>📷 导出人格卡</button>
       </div>
       <div className="rating-grid">
         {sections.map((section, i) => (
@@ -734,6 +780,63 @@ function MemoryPanel({ data }: { data: MemoryState }) {
   );
 }
 
+function EpisodeRadarPanel({ data }: { data: AnyRecord }) {
+  const curve = list(data.curve);
+  const peaks = list(data.peaks);
+  const maxC = Math.max(...curve.map((p: AnyRecord) => Number(p.comments) || 0), 1);
+  return (
+    <Panel title={`分集口碑雷达 · subject ${text(data.subject_id)}`} subtitle={`共 ${data.total ?? curve.length} 集 · 讨论热度曲线`}>
+      <div style={{ display: "flex", alignItems: "flex-end", gap: 2, height: 92, marginBottom: 10, overflowX: "auto" }}>
+        {curve.map((p: AnyRecord, i: number) => (
+          <div key={i} title={`第 ${p.sort} 集 ${text(p.name)} · ${p.comments} 讨论`}
+               style={{ flex: "1 0 6px", display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
+            <span style={{ width: "100%", minHeight: 2, borderRadius: 2,
+                           height: `${Math.round((Number(p.comments) || 0) / maxC * 80)}px`,
+                           background: "var(--accent, #c9a3ff)" }} />
+            <small style={{ fontSize: 9, color: "var(--dim, #888)" }}>{p.sort}</small>
+          </div>
+        ))}
+      </div>
+      <div className="section-title">高能集（讨论最热）</div>
+      <div className="compact-list">
+        {peaks.map((p: AnyRecord, i: number) => (
+          <span key={i}>第 {p.sort} 集 · {text(p.name, "")} · {p.comments} 讨论</span>
+        ))}
+      </div>
+      {list<string>(data.notes).length > 0 && (
+        <div className="caveats">{list<string>(data.notes).map((n, i) => <span key={i}>{n}</span>)}</div>
+      )}
+    </Panel>
+  );
+}
+
+function ExplorerPanel({ data }: { data: AnyRecord }) {
+  const nodes = list(data.nodes);
+  return (
+    <Panel
+      title={`角色/声优网络 · ${text(data.anchor)}`}
+      subtitle={data.anchor_kind === "person" ? "声优出演网络（按评分）" : "作品角色声优阵容"}
+    >
+      <div className="rec-grid">
+        {nodes.map((n, i) => (
+          <a className="rec-card" href={n.url || "#"} target="_blank" rel="noreferrer" key={`${n.id}-${i}`}>
+            {n.image ? <img src={n.image} alt="" /> : <div className="rec-noimg" />}
+            <div className="rec-body">
+              <div className="card-title">{text(n.name)}</div>
+              <div className="card-meta">
+                {n.detail ? text(n.detail) : ""}{n.score ? ` · ${n.score}` : ""}
+              </div>
+            </div>
+          </a>
+        ))}
+      </div>
+      {list<string>(data.notes).length > 0 && (
+        <div className="caveats">{list<string>(data.notes).map((nt, i) => <span key={i}>{nt}</span>)}</div>
+      )}
+    </Panel>
+  );
+}
+
 export function EvidencePanels({ evidence, onCritique }: { evidence: EvidenceMap; onCritique?: (q: string) => void }) {
   const review = list(evidence.review_subject);
   const taste = list(evidence.compare_user_taste);
@@ -742,6 +845,8 @@ export function EvidencePanels({ evidence, onCritique }: { evidence: EvidenceMap
   const aspect = list(evidence.build_aspect_profile);
   const watchCopilot = list(evidence.plan_watch_copilot);
   const tasteReport = list(evidence.build_taste_report);
+  const explorer = list(evidence.explore_voice_network);
+  const episodeRadar = list(evidence.episode_buzz_radar);
   const memory = [
     ...list(evidence.get_user_memory),
     ...list(evidence.remember_user_preference),
@@ -750,7 +855,8 @@ export function EvidencePanels({ evidence, onCritique }: { evidence: EvidenceMap
   ];
   if (
     !review.length && !taste.length && !season.length && !recommend.length && !memory.length
-    && !aspect.length && !watchCopilot.length && !tasteReport.length
+    && !aspect.length && !watchCopilot.length && !tasteReport.length && !explorer.length
+    && !episodeRadar.length
   ) return null;
   return (
     <div className="evidence-stack">
@@ -760,6 +866,8 @@ export function EvidencePanels({ evidence, onCritique }: { evidence: EvidenceMap
       {review.map((data, i) => <ReviewEvidencePanel data={data} key={`review-${i}`} />)}
       {taste.map((data, i) => <TasteAffinityPanel data={data} key={`taste-${i}`} />)}
       {season.map((data, i) => <SeasonGuidePanel data={data} key={`season-${i}`} />)}
+      {explorer.map((data, i) => <ExplorerPanel data={data} key={`explorer-${i}`} />)}
+      {episodeRadar.map((data, i) => <EpisodeRadarPanel data={data} key={`ep-radar-${i}`} />)}
       {watchCopilot.map((data, i) => <WatchCopilotPanel data={data} key={`watch-copilot-${i}`} />)}
       {recommend.map((data, i) => <RecommendPanel data={data} onCritique={onCritique} key={`recommend-${i}`} />)}
     </div>

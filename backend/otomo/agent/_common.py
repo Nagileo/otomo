@@ -337,6 +337,8 @@ _PANEL_TOOLS = {
     "compare_user_taste",
     "season_guide_brief",
     "recommend_subjects",
+    "explore_voice_network",
+    "episode_buzz_radar",
     "build_aspect_profile",
     "plan_watch_copilot",
     "build_taste_report",
@@ -551,6 +553,25 @@ def _safe_memory_payload(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _safe_explorer_payload(data: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "anchor": data.get("anchor"),
+        "anchor_kind": data.get("anchor_kind"),
+        "nodes": _trim_dicts(data.get("nodes"), limit=20),
+        "notes": _trim_strings(data.get("notes"), limit=4, text_limit=160),
+    }
+
+
+def _safe_episode_radar_payload(data: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "subject_id": data.get("subject_id"),
+        "total": data.get("total"),
+        "curve": _trim_dicts(data.get("curve"), limit=60),
+        "peaks": _trim_dicts(data.get("peaks"), limit=10),
+        "notes": _trim_strings(data.get("notes"), limit=4, text_limit=160),
+    }
+
+
 def panel_data_from_payload(name: str, payload: dict[str, Any] | None) -> dict[str, Any] | None:
     """Return UI-safe structured payload for tools that have dedicated evidence panels."""
     if name not in _PANEL_TOOLS or not isinstance(payload, dict):
@@ -572,6 +593,10 @@ def panel_data_from_payload(name: str, payload: dict[str, Any] | None) -> dict[s
         return _safe_watch_copilot_payload(data)
     if name == "build_taste_report":
         return _safe_taste_report_payload(data)
+    if name == "explore_voice_network":
+        return _safe_explorer_payload(data)
+    if name == "episode_buzz_radar":
+        return _safe_episode_radar_payload(data)
     if name in _MEMORY_TOOLS:
         return _safe_memory_payload(data)
     return None
