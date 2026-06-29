@@ -344,6 +344,13 @@ def summarize(result: ToolResult) -> str:
     if d.get("candidates") and d.get("raw_vlm_answer") is not None:
         names = [x.get("bangumi_name") or x.get("title") for x in d.get("candidates", [])[:4] if isinstance(x, dict)]
         return f"截图识别候选 {len(d.get('candidates') or [])} 个" + (f"：{', '.join(str(x) for x in names if x)}" if names else "")
+    if d.get("access_level") and any(k in d for k in ("subtitle_summary", "danmaku_summary", "comment_summary", "metadata_summary")):
+        pieces = []
+        for key in ("subtitle_summary", "danmaku_summary", "comment_summary", "metadata_summary"):
+            vals = d.get(key) or []
+            if vals:
+                pieces.append(str(vals[0])[:80])
+        return f"B站视频内容层级={d.get('access_level')}；" + " / ".join(pieces[:2])
     if d.get("opinion_summary"):
         joined = "；".join(str(x) for x in d["opinion_summary"][:3])
         return f"{d.get('count', 0)} 条；{joined}"

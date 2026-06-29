@@ -5,7 +5,7 @@ from datetime import datetime
 
 from otomo.auth import AuthStore
 from otomo.memory import LongTermMemory
-from otomo.tools.videos.tool import BiliSubtitleSegment, _rough_subtitle_summary
+from otomo.tools.videos.tool import BiliSubtitleSegment, _parse_danmaku, _rough_subtitle_summary
 from otomo.tools.watchorder.tool import (
     ConfigureWeeklyDigestArgs,
     ConfigureWeeklyDigestTool,
@@ -53,6 +53,13 @@ def test_rough_subtitle_summary_samples_timeline():
     summary = _rough_subtitle_summary(segments)
     assert len(summary) == 3
     assert "片段0" in summary[0]
+
+
+def test_parse_bili_danmaku_xml():
+    items = _parse_danmaku('<i><d p="1.2,1,25,16777215,0,0,0,0">好耶</d><d p="3.0">期待</d></i>')
+    assert len(items) == 2
+    assert items[0].time == 1.2
+    assert items[1].text == "期待"
 
 
 class FakeBangumiClient:
