@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     vlm_base_url: str = ""
     vlm_api_key: str = ""
     vlm_model: str = ""
+    vlm_provider: str = ""       # 可填 aliyun-bailian / siliconflow / gemini 等，仅用于 trace/配置说明
+    vlm_ocr_hint: str = ""       # 给 Qwen-VL/OCR 类模型的额外提示，不配置则用默认截图识别提示
 
     # ---- Web search（全网兜底，provider 可换；不填 key 则 web_search 工具优雅报"未配置"）----
     # 分级：默认用 provider(免费优先 tavily)；高质量需求升级到 quality_provider(serper便宜/bocha中文最佳)。
@@ -70,6 +72,7 @@ class Settings(BaseSettings):
     agent_max_iters: int = 8
     http_timeout: float = 30.0
     cache_ttl: float = 300.0  # Bangumi 响应内存缓存秒数（A5 换 Redis）
+    upload_max_image_bytes: int = 6 * 1024 * 1024
 
 
 settings = Settings()

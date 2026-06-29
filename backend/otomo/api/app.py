@@ -8,8 +8,9 @@ from contextlib import asynccontextmanager
 import json
 from typing import Any, AsyncIterator, Literal
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
@@ -19,6 +20,7 @@ from ..memory import LongTermMemory
 from ..memory.models import memory_summary
 from ..obs import traced_stream
 from ..factory import build_registry
+from ..uploads import upload_store
 from ..agent.plan_execute import PlanExecuteRunner
 from ..agent.react import ReActRunner
 from ..tools.bangumi.client import BangumiClient
@@ -60,6 +62,12 @@ class ChatRequest(BaseModel):
     session_id: str | None = None  # 传则跨请求复用会话（短期记忆）
     spoiler_mode: Literal["none", "mild", "full"] | None = None
     progress_episode: int | None = None
+    attachments: list[dict[str, Any]] = []
+
+
+class UploadImageRequest(BaseModel):
+    data_url: str
+    filename: str = ""
 
 
 class ActionRequest(BaseModel):
@@ -76,6 +84,27 @@ class UndoActionRequest(BaseModel):
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.post("/uploads/image")
+async def upload_image(req: UploadImageRequest) -> dict[str, Any]:
+    try:
+        image = upload_store.save_data_url(req.data_url, req.filename)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    payload = image.model_dump(mode="json", exclude_none=True)
+    # 前端预览只需要 preview_url，data_url 不回传，避免接口响应和浏览器状态过大。
+    payload.pop("data_url", None)
+    return payload
+
+
+@app.get("/uploads/{image_id}/preview")
+async def preview_image(image_id: str) -> Response:
+    try:
+        payload, mime_type = upload_store.read_bytes(image_id)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail="upload not found") from e
+    return Response(content=payload, media_type=mime_type)
 
 
 async def _dispatch_action(app: FastAPI, tool_name: str, payload: dict[str, Any], *, allow_write: bool) -> dict[str, Any]:
@@ -147,11 +176,34 @@ async def chat(req: ChatRequest):
         if req.progress_episode is not None:
             current["progress_episode"] = req.progress_episode
         state.short_term["spoiler"] = current
+    turn_has_attachments = state is not None and bool(req.attachments)
+    if turn_has_attachments:
+        cleaned: list[dict[str, Any]] = []
+        for item in req.attachments[:4]:
+            if not isinstance(item, dict):
+                continue
+            uri = str(item.get("uri") or item.get("image_url") or "").strip()
+            if not uri.startswith("upload://"):
+                continue
+            cleaned.append(
+                {
+                    "uri": uri,
+                    "filename": str(item.get("filename") or "")[:160],
+                    "mime_type": str(item.get("mime_type") or "image"),
+                    "size": int(item.get("size") or 0),
+                }
+            )
+        if cleaned:
+            state.short_term["attachments"] = cleaned
     await _attach_memory_state(app, state)
 
     async def event_gen() -> AsyncIterator[dict]:
         meta = {"session_id": req.session_id or "", "runner": req.runner}
-        async for ev in traced_stream(runner, req.message, state, meta):
-            yield {"event": ev.type, "data": ev.model_dump_json()}
+        try:
+            async for ev in traced_stream(runner, req.message, state, meta):
+                yield {"event": ev.type, "data": ev.model_dump_json()}
+        finally:
+            if turn_has_attachments and state is not None:
+                state.short_term.pop("attachments", None)
 
     return EventSourceResponse(event_gen())

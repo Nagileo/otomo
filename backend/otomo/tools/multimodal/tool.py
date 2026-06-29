@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 
 from ...agent.contracts import Citation, Tool, ToolResult
 from ...config import settings
+from ...uploads import upload_store
 from ..bangumi.client import SUBJECT_TYPE, BangumiClient
 
 
@@ -78,6 +79,10 @@ def _extract_titles(text: str) -> list[str]:
 async def _call_vlm(image_url: str, question: str) -> str:
     if not settings.vlm_model:
         raise RuntimeError("未配置 VLM_MODEL；截图识别需要现成 VLM API")
+    resolved_url = upload_store.resolve_image_url(image_url)
+    text_prompt = question
+    if settings.vlm_ocr_hint:
+        text_prompt = f"{question}\n\nOCR/视觉提示：{settings.vlm_ocr_hint}"
     client = AsyncOpenAI(
         base_url=settings.vlm_base_url or settings.llm_base_url,
         api_key=settings.vlm_api_key or settings.llm_api_key or "EMPTY",
@@ -89,8 +94,8 @@ async def _call_vlm(image_url: str, question: str) -> str:
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": question},
-                    {"type": "image_url", "image_url": {"url": image_url}},
+                    {"type": "text", "text": text_prompt},
+                    {"type": "image_url", "image_url": {"url": resolved_url}},
                 ],
             },
         ],

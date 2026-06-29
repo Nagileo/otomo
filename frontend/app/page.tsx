@@ -20,7 +20,15 @@ type TraceItem =
   | { kind: "call"; name: string; args: Record<string, unknown> }
   | { kind: "obs"; name: string; ok: boolean; summary: string }
   | { kind: "note"; text: string };
-type Msg = { role: "user" | "assistant"; content: string };
+type ImageAttachment = {
+  uri: string;
+  filename?: string;
+  mime_type?: string;
+  size?: number;
+  preview_url?: string;
+};
+type PendingImage = { file: File; preview: string };
+type Msg = { role: "user" | "assistant"; content: string; attachments?: ImageAttachment[] };
 type EvidenceMap = Record<string, Record<string, any>[]>;
 type SpoilerState = {
   mode?: string;
@@ -54,17 +62,48 @@ export default function Home() {
   const [memory, setMemory] = useState<MemoryState | null>(null);
   const [followups, setFollowups] = useState<string[]>([]);
   const [input, setInput] = useState("");
+  const [pendingImage, setPendingImage] = useState<PendingImage | null>(null);
   const [busy, setBusy] = useState(false);
   const answerRef = useRef("");
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const sessionId = useRef("");  // 多轮会话 id（首次发送时生成；"新对话"会重置）
   const lastQ = useRef("");      // 最近一次用户问题（剧透 followup chips 重发用）
 
+  function readAsDataUrl(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ""));
+      reader.onerror = () => reject(reader.error || new Error("read image failed"));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function uploadPendingImage(): Promise<ImageAttachment[]> {
+    if (!pendingImage) return [];
+    const dataUrl = await readAsDataUrl(pendingImage.file);
+    const res = await fetch(`${BACKEND}/uploads/image`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ data_url: dataUrl, filename: pendingImage.file.name }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const payload = await res.json();
+    return [{
+      uri: payload.uri,
+      filename: payload.filename,
+      mime_type: payload.mime_type,
+      size: payload.size,
+      preview_url: payload.preview_url ? `${BACKEND}${payload.preview_url}` : undefined,
+    }];
+  }
+
   async function send(override?: string, spoilerMode?: string) {
-    const q = (override ?? input).trim();
+    let q = (override ?? input).trim();
+    const shouldUseImage = Boolean(pendingImage) && !override;
+    if (!q && shouldUseImage) q = "请识别这张截图，并回锚 Bangumi 候选。";
     if (!q || busy) return;
     lastQ.current = q;
     setInput("");
-    setMessages((m) => [...m, { role: "user", content: q }]);
     setTrace([]);
     setSources([]);
     setEvidence({});
@@ -75,12 +114,16 @@ export default function Home() {
     if (!sessionId.current) sessionId.current = crypto.randomUUID();  // 客户端 lazy 生成，避免 SSR mismatch
 
     try {
+      const attachments = shouldUseImage ? await uploadPendingImage() : [];
+      if (shouldUseImage) setPendingImage(null);
+      setMessages((m) => [...m, { role: "user", content: q, attachments }]);
       const res = await fetch(`${BACKEND}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           message: q,
           session_id: sessionId.current,
+          attachments,
           ...(spoilerMode ? { spoiler_mode: spoilerMode } : {}),
         }),
       });
@@ -209,6 +252,7 @@ export default function Home() {
     setSpoiler(null);
     setMemory(null);
     setFollowups([]);
+    setPendingImage(null);
     setAnswer("");
     answerRef.current = "";
   }
@@ -232,7 +276,16 @@ export default function Home() {
             <div key={i} className={`msg ${m.role}`}>
               <div className="role">{m.role === "user" ? "你" : "Otomo"}</div>
               {m.role === "user" ? (
-                <div className="bubble">{m.content}</div>
+                <div className="bubble">
+                  {m.attachments?.length ? (
+                    <div className="msg-images">
+                      {m.attachments.map((img, j) => (
+                        <img key={`${img.uri}-${j}`} src={img.preview_url} alt={img.filename || "uploaded image"} />
+                      ))}
+                    </div>
+                  ) : null}
+                  {m.content}
+                </div>
               ) : (
                 <div className="bubble">
                   <Markdown text={m.content} />
@@ -290,6 +343,27 @@ export default function Home() {
           )}
           <div className="row">
             <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/png,image/jpeg,image/webp"
+              className="file-input"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (!file) return;
+                setPendingImage({ file, preview: URL.createObjectURL(file) });
+                e.currentTarget.value = "";
+              }}
+              disabled={busy}
+            />
+            <button
+              className="icon-button"
+              title="上传截图"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={busy}
+            >
+              图
+            </button>
+            <input
               type="text"
               value={input}
               placeholder="例：白色相簿2 里 冬马和纱 的声优还配过哪些番？"
@@ -301,6 +375,16 @@ export default function Home() {
               {busy ? "…" : "发送"}
             </button>
           </div>
+          {pendingImage && (
+            <div className="pending-image">
+              <img src={pendingImage.preview} alt="待上传截图" />
+              <div>
+                <div className="card-title">{pendingImage.file.name}</div>
+                <div className="card-meta">{Math.round(pendingImage.file.size / 1024)} KB · 发送时上传</div>
+              </div>
+              <button className="ghost" onClick={() => setPendingImage(null)} disabled={busy}>移除</button>
+            </div>
+          )}
         </div>
 
         <div className="panel">

@@ -40,6 +40,7 @@ body {
 .msg.user .bubble { color: var(--accent); }
 
 .row { display: flex; gap: 8px; margin-top: 12px; }
+.file-input { display: none; }
 input[type="text"] {
   flex: 1; background: #0c0e13; border: 1px solid var(--border); color: var(--text);
   border-radius: 8px; padding: 10px 12px; font-size: 14px;
@@ -49,6 +50,19 @@ button {
   padding: 0 16px; font-weight: 600; cursor: pointer;
 }
 button:disabled { opacity: .5; cursor: default; }
+.icon-button {
+  width: 42px; min-width: 42px; padding: 0; background: #0c0e13; color: var(--accent);
+  border: 1px solid rgba(122, 162, 247, .35);
+}
+.pending-image {
+  display: grid; grid-template-columns: 54px 1fr auto; gap: 8px; align-items: center;
+  margin-top: 8px; padding: 8px; background: #0c0e13; border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.pending-image img, .msg-images img {
+  width: 54px; height: 54px; object-fit: cover; border-radius: 7px; background: #20242e;
+}
+.msg-images { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
 
 .trace-item { font-size: 12px; border-left: 2px solid var(--border); padding: 4px 0 4px 10px; margin: 6px 0; }
 .trace-item .name { color: var(--accent); }

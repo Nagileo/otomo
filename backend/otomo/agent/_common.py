@@ -198,7 +198,8 @@ def runtime_state_prompt(state: Any | None) -> str:
     spoiler = st.get("spoiler") or {}
     memory = st.get("memory") or {}
     last_recommend = st.get("last_recommend") or {}
-    if not spoiler and not memory and not last_recommend:
+    attachments = st.get("attachments") or []
+    if not spoiler and not memory and not last_recommend and not attachments:
         return ""
     parts = ["运行时用户偏好："]
     if spoiler:
@@ -214,6 +215,19 @@ def runtime_state_prompt(state: Any | None) -> str:
         parts.extend(_memory_prompt_lines(memory))
     if isinstance(last_recommend, dict) and last_recommend:
         parts.extend(_last_recommend_prompt_lines(last_recommend))
+    if isinstance(attachments, list) and attachments:
+        image_bits = []
+        for item in attachments[:4]:
+            if not isinstance(item, dict):
+                continue
+            uri = item.get("uri") or item.get("image_url")
+            filename = item.get("filename") or "image"
+            mime_type = item.get("mime_type") or "image"
+            if uri:
+                image_bits.append(f"{filename}({mime_type})={uri}")
+        if image_bits:
+            parts.append("- 本轮用户上传图片：" + "；".join(image_bits) + "。")
+            parts.append("- 若用户要求识别截图/角色/作品/画面线索，调用 identify_acgn_screenshot，并把 image_url 设为对应 upload://...；不要把 upload:// 当普通网页链接。")
     return "\n".join(parts)
 
 
