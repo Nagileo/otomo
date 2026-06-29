@@ -82,15 +82,16 @@ class AuthStore:
 
     def consume_oauth_state(self, state_value: str) -> OAuthState:
         raw = self._read("oauth_state", state_value)
+        # 一次性：无论有效或过期都立即删除，避免过期 state 文件在磁盘堆积
+        try:
+            self._path("oauth_state", state_value).unlink(missing_ok=True)
+        except OSError:
+            pass
         if raw is None:
             raise ValueError("OAuth state 不存在或已过期")
         state = OAuthState.model_validate(raw)
         if time.time() - state.created_at > _STATE_TTL_SECONDS:
             raise ValueError("OAuth state 已过期")
-        try:
-            self._path("oauth_state", state_value).unlink(missing_ok=True)
-        except OSError:
-            pass
         return state
 
     def save_token(self, token: BangumiToken) -> None:

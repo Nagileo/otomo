@@ -173,6 +173,21 @@ def _runner_from_registry(kind: str, registry):
     return AdaptiveRunner(registry)
 
 
+_MAX_SESSIONS = 500
+
+
+def _session_state(app: FastAPI, session_id: str) -> AgentState:
+    """复用会话状态；进程内会话数有上限，超出按 FIFO 丢弃最旧会话（近似 LRU），避免长跑内存无界增长。"""
+    sessions: dict[str, AgentState] = app.state.sessions
+    state = sessions.get(session_id)
+    if state is None:
+        state = AgentState()
+        sessions[session_id] = state
+        while len(sessions) > _MAX_SESSIONS:
+            sessions.pop(next(iter(sessions)))
+    return state
+
+
 async def _request_client(app: FastAPI, auth_session_id: str | None) -> BangumiClient:
     token = await token_for_session(app.state.auth, auth_session_id)
     if token:
@@ -256,8 +271,8 @@ async def chat(req: ChatRequest):
     # 短期记忆：有 session_id 就复用既有状态，否则新建
     state = None
     if req.session_id:
-        state = app.state.sessions.setdefault(req.session_id, AgentState())
-    elif req.spoiler_mode or req.progress_episode is not None:
+        state = _session_state(app, req.session_id)
+    elif req.spoiler_mode or req.progress_episode is not None or req.attachments:
         state = AgentState()
     if state is not None and (req.spoiler_mode or req.progress_episode is not None):
         current = dict(state.short_term.get("spoiler") or {})

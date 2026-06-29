@@ -73,7 +73,7 @@ class Tool(abc.ABC):
     description: str
     args_model: type[BaseModel]
     result_model: type[BaseModel]
-    is_write: bool = False  # 写操作需人工确认（A1 暂只读）
+    is_write: bool = False  # 写操作：排除出模型可见 schema，仅经前端确认后由后端 dispatch(allow_write=True) 执行
 
     @abc.abstractmethod
     async def run(self, args: BaseModel) -> ToolResult:

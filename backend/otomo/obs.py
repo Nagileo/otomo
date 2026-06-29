@@ -82,13 +82,14 @@ def _redact(value: Any, *, depth: int = 0) -> Any:
 
 
 def _obs_for_verifier(ev: Any) -> dict[str, Any]:
+    # claim 校验始终需要 observation data（在内存中用）；是否落盘由 trajectory_store_observations 决定（见 traced_stream）
     return {
         "name": ev.name,
         "ok": ev.ok,
         "summary": ev.summary,
         "sources": [s.model_dump(mode="json", exclude_none=True) for s in ev.sources],
         "entities": [e.model_dump(mode="json", exclude_none=True) for e in ev.entities],
-        "data": _redact(ev.data) if settings.trajectory_store_observations else None,
+        "data": _redact(ev.data),
     }
 
 
@@ -148,4 +149,9 @@ async def traced_stream(runner, message: str, state, meta: dict) -> AsyncIterato
         rl_rec["duration_ms"] = rec["duration_ms"]
         rl_rec["status"] = status
         if settings.trajectory_capture_enabled:
-            _append_named("rl_runs.jsonl", _redact(rl_rec))
+            out = dict(rl_rec)
+            if not settings.trajectory_store_observations:  # 落盘时才按开关裁剪 data，不影响内存里的 claim 校验
+                out["observations"] = [
+                    {k: v for k, v in o.items() if k != "data"} for o in rl_rec["observations"]
+                ]
+            _append_named("rl_runs.jsonl", _redact(out))

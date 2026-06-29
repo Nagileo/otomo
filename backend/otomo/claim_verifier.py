@@ -129,7 +129,9 @@ def observation_documents(observations: list[dict[str, Any]]) -> list[EvidenceDo
 def split_claims(answer: str, limit: int = 18) -> list[str]:
     lines = []
     for raw in re.split(r"[\n。！？!?；;]+", answer):
-        text = raw.strip(" \t\r-*•0123456789.、：:")
+        # 去句首列表序号（1. / 2) / - / •），但保留句尾数字——评分/排名/年份是最该校验的事实
+        cleaned = re.sub(r"^\s*(?:[-*•·]+|\d{1,2}[.、)）])\s+", "", raw)
+        text = cleaned.strip(" \t\r-*•、：:.")
         if len(text) < 8:
             continue
         if text.startswith(("来源", "以上", "总结一句", "一句话")) and len(text) < 28:
@@ -199,14 +201,17 @@ def _snippet(text: str, anchors: list[str], limit: int = 180) -> str:
 
 
 def _staff_target(text: str) -> str:
+    # 同时覆盖 ASCII 公司名（A-1 Pictures / 8-bit）与中文公司名（京都动画 / 扳机社）
     patterns = [
-        r"(?:由|是|为)?\s*([A-Za-z0-9][A-Za-z0-9 ._-]{1,40})\s*(?:制作|动画制作|出品)",
-        r"(?:制作公司|动画制作)\s*(?:是|为|=|：|:)?\s*([A-Za-z0-9][A-Za-z0-9 ._-]{1,40})",
+        # 「(由/是/为) <公司> 制作/出品」——公司在“制作”前，非贪婪定界
+        r"(?:由|是|为)\s*((?:《[^》]{2,30}》)|[一-鿿A-Za-z0-9][一-鿿A-Za-z0-9 ._·-]{1,40}?)\s*(?:制作|出品|负责动画|负责制作)",
+        # 「制作公司/动画制作 (是/为/由) <公司>」——公司在末尾，贪婪到标点
+        r"(?:制作公司|动画制作|制作方|制作)\s*(?:是|为|=|：|:|由)\s*((?:《[^》]{2,30}》)|[一-鿿A-Za-z0-9][一-鿿A-Za-z0-9 ._·-]{1,40})",
     ]
     for pat in patterns:
         m = re.search(pat, text)
-        if m:
-            return m.group(1).strip(" ，。；;:：")
+        if m and m.group(1):
+            return m.group(1).strip(" ，。；;:：《》")
     return ""
 
 
