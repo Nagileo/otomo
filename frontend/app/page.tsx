@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { EvidencePanels, MemoryBadge, SpoilerBadge } from "./evidence-panels";
@@ -51,6 +51,12 @@ type MemoryState = {
   recommendation_lists?: Record<string, any>[];
   updated_at?: string;
 };
+type AuthState = {
+  auth_session_id?: string;
+  authenticated?: boolean;
+  username?: string;
+  user_id?: number;
+};
 
 export default function Home() {
   const [messages, setMessages] = useState<Msg[]>([]);
@@ -60,14 +66,36 @@ export default function Home() {
   const [evidence, setEvidence] = useState<EvidenceMap>({});
   const [spoiler, setSpoiler] = useState<SpoilerState | null>(null);
   const [memory, setMemory] = useState<MemoryState | null>(null);
+  const [auth, setAuth] = useState<AuthState | null>(null);
   const [followups, setFollowups] = useState<string[]>([]);
   const [input, setInput] = useState("");
   const [pendingImage, setPendingImage] = useState<PendingImage | null>(null);
   const [busy, setBusy] = useState(false);
   const answerRef = useRef("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const authSessionId = useRef("");
   const sessionId = useRef("");  // 多轮会话 id（首次发送时生成；"新对话"会重置）
   const lastQ = useRef("");      // 最近一次用户问题（剧透 followup chips 重发用）
+
+  useEffect(() => {
+    let sid = localStorage.getItem("otomo_auth_session_id") || "";
+    if (!sid) {
+      sid = crypto.randomUUID();
+      localStorage.setItem("otomo_auth_session_id", sid);
+    }
+    authSessionId.current = sid;
+    void refreshAuthSession(sid);
+  }, []);
+
+  async function refreshAuthSession(sid = authSessionId.current) {
+    if (!sid) return;
+    try {
+      const res = await fetch(`${BACKEND}/auth/session?auth_session_id=${encodeURIComponent(sid)}`);
+      if (res.ok) setAuth(await res.json());
+    } catch {
+      setAuth({ auth_session_id: sid, authenticated: false });
+    }
+  }
 
   function readAsDataUrl(file: File): Promise<string> {
     return new Promise((resolve, reject) => {
@@ -123,6 +151,7 @@ export default function Home() {
         body: JSON.stringify({
           message: q,
           session_id: sessionId.current,
+          auth_session_id: authSessionId.current,
           attachments,
           ...(spoilerMode ? { spoiler_mode: spoilerMode } : {}),
         }),
@@ -165,7 +194,7 @@ export default function Home() {
       const res = await fetch(`${BACKEND}/actions/${kind}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action_id: actionId }),
+        body: JSON.stringify({ action_id: actionId, auth_session_id: authSessionId.current }),
       });
       const payload = await res.json();
       if (!payload.ok) {
@@ -257,6 +286,27 @@ export default function Home() {
     answerRef.current = "";
   }
 
+  async function startBangumiLogin() {
+    if (!authSessionId.current) {
+      authSessionId.current = crypto.randomUUID();
+      localStorage.setItem("otomo_auth_session_id", authSessionId.current);
+    }
+    const res = await fetch(`${BACKEND}/auth/bangumi/login?auth_session_id=${encodeURIComponent(authSessionId.current)}`);
+    const payload = await res.json();
+    if (payload.authorization_url) window.location.href = payload.authorization_url;
+    else setTrace((t) => [...t, { kind: "obs", name: "bangumi_login", ok: false, summary: payload.detail || "OAuth 未配置" }]);
+  }
+
+  async function logoutBangumi() {
+    await fetch(`${BACKEND}/auth/logout`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ auth_session_id: authSessionId.current }),
+    });
+    setAuth({ auth_session_id: authSessionId.current, authenticated: false });
+    setMemory(null);
+  }
+
   return (
     <div className="wrap">
       <div className="topbar">
@@ -265,6 +315,19 @@ export default function Home() {
           <div className="sub">ACGN 知识图谱 Agent — 多跳问答 / 跨媒体追溯 / 语义 RAG / 个性化推荐</div>
           <SpoilerBadge spoiler={spoiler} />
           <MemoryBadge memory={memory} />
+          <div className="auth-state">
+            {auth?.authenticated ? (
+              <>
+                <span className="badge good">Bangumi @{auth.username}</span>
+                <button className="inline-action" onClick={logoutBangumi} disabled={busy}>退出</button>
+              </>
+            ) : (
+              <>
+                <span className="badge dim">Bangumi 未绑定</span>
+                <button className="inline-action" onClick={startBangumiLogin} disabled={busy}>绑定</button>
+              </>
+            )}
+          </div>
         </div>
         <button className="ghost" onClick={newChat} disabled={busy}>+ 新对话</button>
       </div>

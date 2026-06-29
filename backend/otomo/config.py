@@ -14,6 +14,10 @@ class Settings(BaseSettings):
     # 强制 User-Agent，通用 UA 会被 Bangumi 拒绝
     bangumi_user_agent: str = "Nagileo/otomo (+https://github.com/Nagileo/otomo)"
     bangumi_token: str | None = None
+    bangumi_oauth_client_id: str = ""
+    bangumi_oauth_client_secret: str = ""
+    bangumi_oauth_redirect_uri: str = "http://localhost:8000/auth/bangumi/callback"
+    frontend_base_url: str = "http://localhost:3000"
 
     # ---- 萌娘百科 RAG（按需取+缓存，绝不入库；见 docs/02）----
     moegirl_api_base: str = "https://zh.moegirl.org.cn/api.php"

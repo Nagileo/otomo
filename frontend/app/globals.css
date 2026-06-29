@@ -110,7 +110,7 @@ button:disabled { opacity: .5; cursor: default; }
 }
 .chip:hover { border-color: var(--accent); color: var(--accent); }
 
-.spoiler-state, .memory-state { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.spoiler-state, .memory-state, .auth-state { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; align-items: center; }
 
 .evidence-stack { display: grid; gap: 10px; margin-top: 14px; }
 .evidence-panel {

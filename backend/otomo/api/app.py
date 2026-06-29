@@ -7,15 +7,18 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 import json
 from typing import Any, AsyncIterator, Literal
+from urllib.parse import urlencode
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
-from pydantic import BaseModel
+from fastapi.responses import RedirectResponse, Response
+from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from ..agent.adaptive import AdaptiveRunner
 from ..agent.contracts import AgentState
+from ..auth import AuthStore, build_authorization_url, exchange_oauth_code, token_for_session
+from ..config import settings
 from ..memory import LongTermMemory
 from ..memory.models import memory_summary
 from ..obs import traced_stream
@@ -32,12 +35,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.bangumi = BangumiClient()
     app.state.moegirl = MoegirlClient()
     app.state.ltm = LongTermMemory()
-    app.state.registry = build_registry(app.state.bangumi, app.state.moegirl, app.state.ltm)
-    app.state.runners = {
-        "react": ReActRunner(app.state.registry),
-        "plan": PlanExecuteRunner(app.state.registry),
-        "adaptive": AdaptiveRunner(app.state.registry),
-    }
+    app.state.auth = AuthStore()
     app.state.sessions: dict[str, AgentState] = {}  # 短期记忆：session_id -> 会话状态
     try:
         yield
@@ -62,7 +60,8 @@ class ChatRequest(BaseModel):
     session_id: str | None = None  # 传则跨请求复用会话（短期记忆）
     spoiler_mode: Literal["none", "mild", "full"] | None = None
     progress_episode: int | None = None
-    attachments: list[dict[str, Any]] = []
+    attachments: list[dict[str, Any]] = Field(default_factory=list)
+    auth_session_id: str | None = None
 
 
 class UploadImageRequest(BaseModel):
@@ -74,16 +73,55 @@ class ActionRequest(BaseModel):
     action_id: str
     username: str | None = None
     reason: str = ""
+    auth_session_id: str | None = None
 
 
 class UndoActionRequest(BaseModel):
     action_id: str | None = None
     username: str | None = None
+    auth_session_id: str | None = None
 
 
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/auth/session")
+async def auth_session(auth_session_id: str) -> dict[str, Any]:
+    return app.state.auth.identity(auth_session_id).model_dump(mode="json")
+
+
+@app.get("/auth/bangumi/login")
+async def bangumi_login(auth_session_id: str) -> dict[str, Any]:
+    try:
+        url = build_authorization_url(app.state.auth, auth_session_id)
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"authorization_url": url}
+
+
+@app.get("/auth/bangumi/callback")
+async def bangumi_callback(code: str = "", state: str = "") -> RedirectResponse:
+    status = "ok"
+    params: dict[str, str] = {}
+    try:
+        token = await exchange_oauth_code(app.state.auth, code, state)
+        params["user"] = token.username
+    except Exception as e:  # noqa: BLE001
+        status = "error"
+        params["error"] = f"{type(e).__name__}: {str(e)[:180]}"
+    params["bangumi_auth"] = status
+    redirect_to = f"{settings.frontend_base_url.rstrip('/')}?{urlencode(params)}"
+    return RedirectResponse(redirect_to)
+
+
+@app.post("/auth/logout")
+async def bangumi_logout(req: dict[str, str]) -> dict[str, Any]:
+    auth_session_id = req.get("auth_session_id") or ""
+    if auth_session_id:
+        app.state.auth.delete_token(auth_session_id)
+    return {"ok": True, "auth_session_id": auth_session_id}
 
 
 @app.post("/uploads/image")
@@ -107,11 +145,38 @@ async def preview_image(image_id: str) -> Response:
     return Response(content=payload, media_type=mime_type)
 
 
-async def _dispatch_action(app: FastAPI, tool_name: str, payload: dict[str, Any], *, allow_write: bool) -> dict[str, Any]:
-    result = await app.state.registry.dispatch(
-        tool_name, json.dumps(payload, ensure_ascii=False), allow_write=allow_write
-    )
-    return result.model_dump(mode="json", exclude_none=True)
+def _runner_from_registry(kind: str, registry):
+    if kind == "plan":
+        return PlanExecuteRunner(registry)
+    if kind == "react":
+        return ReActRunner(registry)
+    return AdaptiveRunner(registry)
+
+
+async def _request_client(app: FastAPI, auth_session_id: str | None) -> BangumiClient:
+    token = await token_for_session(app.state.auth, auth_session_id)
+    if token:
+        return BangumiClient(token=token.access_token)
+    return BangumiClient()
+
+
+async def _dispatch_action(
+    app: FastAPI,
+    tool_name: str,
+    payload: dict[str, Any],
+    *,
+    allow_write: bool,
+    auth_session_id: str | None = None,
+) -> dict[str, Any]:
+    client = await _request_client(app, auth_session_id)
+    try:
+        registry = build_registry(client, app.state.moegirl, app.state.ltm)
+        result = await registry.dispatch(
+            tool_name, json.dumps(payload, ensure_ascii=False), allow_write=allow_write
+        )
+        return result.model_dump(mode="json", exclude_none=True)
+    finally:
+        await client.aclose()
 
 
 @app.post("/actions/confirm")
@@ -121,6 +186,7 @@ async def confirm_action(req: ActionRequest) -> dict[str, Any]:
         "execute_bangumi_write_action",
         {"username": req.username, "action_id": req.action_id, "confirmed": True},
         allow_write=True,
+        auth_session_id=req.auth_session_id,
     )
 
 
@@ -131,6 +197,7 @@ async def cancel_action(req: ActionRequest) -> dict[str, Any]:
         "cancel_bangumi_write_action",
         {"username": req.username, "action_id": req.action_id, "reason": req.reason},
         allow_write=False,
+        auth_session_id=req.auth_session_id,
     )
 
 
@@ -141,14 +208,15 @@ async def undo_action(req: UndoActionRequest) -> dict[str, Any]:
         "undo_bangumi_write_action",
         {"username": req.username, "action_id": req.action_id, "confirmed": True},
         allow_write=True,
+        auth_session_id=req.auth_session_id,
     )
 
 
-async def _attach_memory_state(app: FastAPI, state: AgentState | None) -> None:
+async def _attach_memory_state(app: FastAPI, state: AgentState | None, client: BangumiClient) -> None:
     if state is None:
         return
     try:
-        me = await app.state.bangumi.get_me()
+        me = await client.get_me()
     except Exception:  # noqa: BLE001
         return
     username = me.get("username") or str(me.get("id"))
@@ -162,7 +230,9 @@ async def _attach_memory_state(app: FastAPI, state: AgentState | None) -> None:
 
 @app.post("/chat")
 async def chat(req: ChatRequest):
-    runner = app.state.runners[req.runner]
+    client = await _request_client(app, req.auth_session_id)
+    registry = build_registry(client, app.state.moegirl, app.state.ltm)
+    runner = _runner_from_registry(req.runner, registry)
     # 短期记忆：有 session_id 就复用既有状态，否则新建
     state = None
     if req.session_id:
@@ -195,15 +265,20 @@ async def chat(req: ChatRequest):
             )
         if cleaned:
             state.short_term["attachments"] = cleaned
-    await _attach_memory_state(app, state)
+    await _attach_memory_state(app, state, client)
 
     async def event_gen() -> AsyncIterator[dict]:
-        meta = {"session_id": req.session_id or "", "runner": req.runner}
+        meta = {
+            "session_id": req.session_id or "",
+            "auth_session_id": req.auth_session_id or "",
+            "runner": req.runner,
+        }
         try:
             async for ev in traced_stream(runner, req.message, state, meta):
                 yield {"event": ev.type, "data": ev.model_dump_json()}
         finally:
             if turn_has_attachments and state is not None:
                 state.short_term.pop("attachments", None)
+            await client.aclose()
 
     return EventSourceResponse(event_gen())
