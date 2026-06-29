@@ -54,6 +54,15 @@ function pct(value: any) {
   return n.toFixed(2);
 }
 
+function confidenceLabel(value: any) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "unknown";
+  if (n >= 0.85) return "high";
+  if (n >= 0.6) return "medium";
+  if (n > 0) return "low";
+  return "unknown";
+}
+
 function sourceTone(source: any) {
   const s = String(source ?? "");
   if (s === "explicit_user") return "good";
@@ -430,7 +439,7 @@ function RecommendPanel({ data, onCritique }: { data: AnyRecord; onCritique?: (q
                 <div className="mapping-list">
                   {list(item.external_mappings).map((m, idx) => (
                     <span key={idx}>
-                      {text(m.source)}《{text(m.external_title)}》→ BGM {m.bangumi_id} · {pct(m.mapping_confidence)}
+                      {text(m.source)} 对齐《{text(m.external_title)}》 · 置信度 {confidenceLabel(m.mapping_confidence)}
                     </span>
                   ))}
                 </div>
@@ -596,10 +605,10 @@ function ScreenshotIdentifyPanel({ data }: { data: AnyRecord }) {
         ))}
       </div>
       {data.raw_vlm_answer && (
-        <>
-          <div className="section-title">VLM 原始摘要</div>
+        <details className="quiet-detail">
+          <summary>查看视觉模型摘要</summary>
           <p className="evidence-copy">{text(data.raw_vlm_answer)}</p>
-        </>
+        </details>
       )}
       {list<string>(data.caveats).length > 0 && (
         <div className="caveats">{list<string>(data.caveats).map((n, i) => <span key={i}>{n}</span>)}</div>
@@ -794,10 +803,7 @@ function MemoryPanel({
                   <div className="card-meta">
                     {text(action.operation)} · {text(action.subject_name || action.subject_id, "未知条目")}
                   </div>
-                  <div className="compact-list inline">
-                    <span>action_id: {text(action.id)}</span>
-                    <span>status: {text(action.status)}</span>
-                  </div>
+                  <div className="card-meta">等待你确认后才会写回 Bangumi</div>
                 </div>
                 <div className="action-buttons">
                   {onConfirmAction && <button className="chip action-confirm" onClick={() => onConfirmAction(text(action.id, ""))}>确认写回</button>}
@@ -1163,6 +1169,17 @@ export function EvidencePanels({
   ) return null;
   return (
     <div className="evidence-stack">
+      {screenshot.map((data, i) => <ScreenshotIdentifyPanel data={data} key={`screenshot-${i}`} />)}
+      {recommend.map((data, i) => <RecommendPanel data={data} onCritique={onCritique} key={`recommend-${i}`} />)}
+      {season.map((data, i) => <SeasonGuidePanel data={data} key={`season-${i}`} />)}
+      {review.map((data, i) => <ReviewEvidencePanel data={data} key={`review-${i}`} />)}
+      {taste.map((data, i) => <TasteAffinityPanel data={data} key={`taste-${i}`} />)}
+      {explorer.map((data, i) => <ExplorerPanel data={data} key={`explorer-${i}`} />)}
+      {episodeRadar.map((data, i) => <EpisodeRadarPanel data={data} key={`ep-radar-${i}`} />)}
+      {watchCopilot.map((data, i) => <WatchCopilotPanel data={data} key={`watch-copilot-${i}`} />)}
+      {weeklyDigest.map((data, i) => <WeeklyDigestPanel data={data} key={`weekly-${i}`} />)}
+      {tasteReport.map((data, i) => <TasteReportPanel data={data} key={`taste-report-${i}`} />)}
+      {aspect.map((data, i) => <AspectProfilePanel data={data} key={`aspect-${i}`} />)}
       {claimChecks.map((data, i) => <ClaimCheckPanel data={data} key={`claim-${i}`} />)}
       {memory.map((data, i) => (
         <MemoryPanel
@@ -1173,17 +1190,6 @@ export function EvidencePanels({
           onUndoAction={onUndoAction}
         />
       ))}
-      {aspect.map((data, i) => <AspectProfilePanel data={data} key={`aspect-${i}`} />)}
-      {tasteReport.map((data, i) => <TasteReportPanel data={data} key={`taste-report-${i}`} />)}
-      {review.map((data, i) => <ReviewEvidencePanel data={data} key={`review-${i}`} />)}
-      {taste.map((data, i) => <TasteAffinityPanel data={data} key={`taste-${i}`} />)}
-      {season.map((data, i) => <SeasonGuidePanel data={data} key={`season-${i}`} />)}
-      {explorer.map((data, i) => <ExplorerPanel data={data} key={`explorer-${i}`} />)}
-      {episodeRadar.map((data, i) => <EpisodeRadarPanel data={data} key={`ep-radar-${i}`} />)}
-      {screenshot.map((data, i) => <ScreenshotIdentifyPanel data={data} key={`screenshot-${i}`} />)}
-      {watchCopilot.map((data, i) => <WatchCopilotPanel data={data} key={`watch-copilot-${i}`} />)}
-      {weeklyDigest.map((data, i) => <WeeklyDigestPanel data={data} key={`weekly-${i}`} />)}
-      {recommend.map((data, i) => <RecommendPanel data={data} onCritique={onCritique} key={`recommend-${i}`} />)}
     </div>
   );
 }

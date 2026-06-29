@@ -27,7 +27,7 @@ type ImageAttachment = {
   size?: number;
   preview_url?: string;
 };
-type PendingImage = { file: File; preview: string };
+type PendingImage = { id: string; file: File; preview: string };
 type Msg = { role: "user" | "assistant"; content: string; attachments?: ImageAttachment[] };
 type EvidenceMap = Record<string, Record<string, any>[]>;
 type SpoilerState = {
@@ -60,6 +60,164 @@ type AuthState = {
   user_id?: number;
 };
 
+const MAX_IMAGES = 4;
+
+function list(value: any): any[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function sourceHost(url: string) {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
+
+function evidenceSummary(evidence: EvidenceMap) {
+  const rows = [
+    ["recommend_subjects", "推荐候选"],
+    ["season_guide_brief", "季番导视"],
+    ["review_subject", "评价矩阵"],
+    ["identify_acgn_screenshot", "截图识别"],
+    ["compare_user_taste", "同步率"],
+    ["build_aspect_profile", "Aspect 画像"],
+    ["episode_buzz_radar", "分集口碑"],
+    ["explore_voice_network", "角色/声优网络"],
+    ["claim_check", "事实校验"],
+  ];
+  return rows
+    .map(([key, label]) => ({ key, label, count: list(evidence[key]).length }))
+    .filter((item) => item.count > 0);
+}
+
+function AnswerSupport({ sources, evidence }: { sources: Source[]; evidence: EvidenceMap }) {
+  const summary = evidenceSummary(evidence);
+  if (!sources.length && !summary.length) return null;
+  const compactSources = sources.slice(0, 6);
+  const visualSources = sources.filter((s) => s.image);
+  return (
+    <section className="answer-support">
+      <div className="support-head">
+        <div>
+          <div className="support-title">回答支撑</div>
+          <div className="support-sub">证据优先展示在下方卡片；外链仅作追溯入口</div>
+        </div>
+      </div>
+      {summary.length > 0 && (
+        <div className="support-pills">
+          {summary.map((item) => (
+            <span className="support-pill" key={item.key}>{item.label} {item.count}</span>
+          ))}
+        </div>
+      )}
+      {compactSources.length > 0 && (
+        <div className="source-links">
+          {compactSources.map((s, i) => (
+            <a key={`${s.url}-${i}`} href={s.url} target="_blank" rel="noreferrer" title={s.title}>
+              <span>{s.source || sourceHost(s.url) || "source"}</span>
+              {s.title}
+            </a>
+          ))}
+        </div>
+      )}
+      {visualSources.length > 0 && (
+        <details className="source-detail">
+          <summary>查看相关图片卡片（{visualSources.length}）</summary>
+          <div className="src-cards compact">
+            {visualSources.map((s, i) => (
+              <a key={`${s.url}-${i}`} className="src-card" href={s.url} target="_blank" rel="noreferrer" title={s.title}>
+                <img src={s.image} alt="" loading="lazy" />
+                <span className="src-title">{s.title}</span>
+              </a>
+            ))}
+          </div>
+        </details>
+      )}
+    </section>
+  );
+}
+
+function friendlyToolName(name: string) {
+  const map: Record<string, string> = {
+    recommend_subjects: "生成推荐候选",
+    season_guide_brief: "整理季番导视",
+    review_subject: "融合评价证据",
+    identify_acgn_screenshot: "识别截图",
+    compare_user_taste: "计算同步率",
+    build_aspect_profile: "更新口味画像",
+    claim_check: "核对事实声明",
+    get_user_memory: "读取记忆",
+    remember_user_preference: "写入偏好记忆",
+  };
+  return map[name] || name.replaceAll("_", " ");
+}
+
+function TracePanel({
+  trace,
+  busy,
+  mode,
+  onModeChange,
+}: {
+  trace: TraceItem[];
+  busy: boolean;
+  mode: "summary" | "dev";
+  onModeChange: (mode: "summary" | "dev") => void;
+}) {
+  const calls = trace.filter((t) => t.kind === "call");
+  const observations = trace.filter((t) => t.kind === "obs");
+  const failures = observations.filter((t) => t.kind === "obs" && !t.ok);
+  const visibleTrace = mode === "summary" ? trace.filter((t) => t.kind !== "call").slice(-10) : trace;
+  return (
+    <div className="panel trace-panel">
+      <div className="panel-title-row">
+        <h3>执行过程</h3>
+        <div className="segmented">
+          <button className={mode === "summary" ? "active" : ""} onClick={() => onModeChange("summary")}>简洁</button>
+          <button className={mode === "dev" ? "active" : ""} onClick={() => onModeChange("dev")}>开发</button>
+        </div>
+      </div>
+      {trace.length === 0 && !busy && (
+        <div className="trace-empty">工具调用与证据状态会实时出现在这里</div>
+      )}
+      {trace.length > 0 && (
+        <div className="trace-metrics">
+          <span>工具 {calls.length}</span>
+          <span>观察 {observations.length}</span>
+          <span className={failures.length ? "bad" : "good"}>异常 {failures.length}</span>
+        </div>
+      )}
+      {mode === "summary" && calls.length > 0 && (
+        <details className="trace-detail folded">
+          <summary>本轮调用了 {calls.length} 个工具</summary>
+          <div className="tool-list">
+            {calls.map((t, i) => <span key={`${t.name}-${i}`}>{friendlyToolName(t.name)}</span>)}
+          </div>
+        </details>
+      )}
+      {visibleTrace.map((t, i) =>
+        t.kind === "call" ? (
+          <div key={i} className="trace-item">
+            <details className="trace-detail">
+              <summary className="name">→ {friendlyToolName(t.name)}</summary>
+              <span className="args">{JSON.stringify(t.args)}</span>
+            </details>
+          </div>
+        ) : t.kind === "note" ? (
+          <div key={i} className="trace-item muted">
+            {t.text}
+          </div>
+        ) : (
+          <div key={i} className="trace-item">
+            <span className={t.ok ? "ok" : "fail"}>{t.ok ? "✓" : "✗"}</span> {t.summary}
+          </div>
+        )
+      )}
+      {busy && <div className="trace-item processing">● 处理中…（推荐类查询可能要十几秒）</div>}
+    </div>
+  );
+}
+
 export default function Home() {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [trace, setTrace] = useState<TraceItem[]>([]);
@@ -71,7 +229,8 @@ export default function Home() {
   const [auth, setAuth] = useState<AuthState | null>(null);
   const [followups, setFollowups] = useState<string[]>([]);
   const [input, setInput] = useState("");
-  const [pendingImage, setPendingImage] = useState<PendingImage | null>(null);
+  const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
+  const [traceMode, setTraceMode] = useState<"summary" | "dev">("summary");
   const [busy, setBusy] = useState(false);
   const answerRef = useRef("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -108,29 +267,63 @@ export default function Home() {
     });
   }
 
-  async function uploadPendingImage(): Promise<ImageAttachment[]> {
-    if (!pendingImage) return [];
-    const dataUrl = await readAsDataUrl(pendingImage.file);
-    const res = await fetch(`${BACKEND}/uploads/image`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ data_url: dataUrl, filename: pendingImage.file.name }),
+  function addPendingImages(files: FileList | null) {
+    if (!files?.length) return;
+    setPendingImages((prev) => {
+      const room = Math.max(MAX_IMAGES - prev.length, 0);
+      const next = Array.from(files).slice(0, room).map((file) => ({
+        id: crypto.randomUUID(),
+        file,
+        preview: URL.createObjectURL(file),
+      }));
+      return [...prev, ...next];
     });
-    if (!res.ok) throw new Error(await res.text());
-    const payload = await res.json();
-    return [{
-      uri: payload.uri,
-      filename: payload.filename,
-      mime_type: payload.mime_type,
-      size: payload.size,
-      preview_url: payload.preview_url ? `${BACKEND}${payload.preview_url}` : undefined,
-    }];
+  }
+
+  function removePendingImage(id: string) {
+    setPendingImages((prev) => {
+      const target = prev.find((img) => img.id === id);
+      if (target) URL.revokeObjectURL(target.preview);
+      return prev.filter((img) => img.id !== id);
+    });
+  }
+
+  function clearPendingImages() {
+    setPendingImages((prev) => {
+      prev.forEach((img) => URL.revokeObjectURL(img.preview));
+      return [];
+    });
+  }
+
+  async function uploadPendingImages(): Promise<ImageAttachment[]> {
+    if (!pendingImages.length) return [];
+    const uploaded: ImageAttachment[] = [];
+    for (const image of pendingImages) {
+      const dataUrl = await readAsDataUrl(image.file);
+      const res = await fetch(`${BACKEND}/uploads/image`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ data_url: dataUrl, filename: image.file.name }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const payload = await res.json();
+      uploaded.push({
+        uri: payload.uri,
+        filename: payload.filename,
+        mime_type: payload.mime_type,
+        size: payload.size,
+        preview_url: payload.preview_url ? `${BACKEND}${payload.preview_url}` : undefined,
+      });
+    }
+    return uploaded;
   }
 
   async function send(override?: string, spoilerMode?: string) {
     let q = (override ?? input).trim();
-    const shouldUseImage = Boolean(pendingImage) && !override;
-    if (!q && shouldUseImage) q = "请识别这张截图，并回锚 Bangumi 候选。";
+    const shouldUseImage = pendingImages.length > 0 && !override;
+    if (!q && shouldUseImage) {
+      q = pendingImages.length > 1 ? "请综合识别这些截图，并回锚 Bangumi 候选。" : "请识别这张截图，并回锚 Bangumi 候选。";
+    }
     if (!q || busy) return;
     lastQ.current = q;
     setInput("");
@@ -144,8 +337,8 @@ export default function Home() {
     if (!sessionId.current) sessionId.current = crypto.randomUUID();  // 客户端 lazy 生成，避免 SSR mismatch
 
     try {
-      const attachments = shouldUseImage ? await uploadPendingImage() : [];
-      if (shouldUseImage) setPendingImage(null);
+      const attachments = shouldUseImage ? await uploadPendingImages() : [];
+      if (shouldUseImage) clearPendingImages();
       setMessages((m) => [...m, { role: "user", content: q, attachments }]);
       const res = await fetch(`${BACKEND}/chat`, {
         method: "POST",
@@ -283,7 +476,7 @@ export default function Home() {
     setSpoiler(null);
     setMemory(null);
     setFollowups([]);
-    setPendingImage(null);
+    clearPendingImages();
     setAnswer("");
     answerRef.current = "";
   }
@@ -366,19 +559,7 @@ export default function Home() {
               </div>
             </div>
           )}
-          {sources.length > 0 && (
-            <div className="sources">
-              <div className="src-label">来源 / 相关</div>
-              <div className="src-cards">
-                {sources.map((s, i) => (
-                  <a key={i} className="src-card" href={s.url} target="_blank" rel="noreferrer" title={s.title}>
-                    {s.image ? <img src={s.image} alt="" loading="lazy" /> : <div className="noimg" />}
-                    <span className="src-title">{s.title}</span>
-                  </a>
-                ))}
-              </div>
-            </div>
-          )}
+          <AnswerSupport sources={sources} evidence={evidence} />
           <EvidencePanels
             evidence={evidence}
             onCritique={(q) => send(q)}
@@ -410,21 +591,20 @@ export default function Home() {
             <input
               ref={fileInputRef}
               type="file"
+              multiple
               accept="image/png,image/jpeg,image/webp"
               className="file-input"
               onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (!file) return;
-                setPendingImage({ file, preview: URL.createObjectURL(file) });
+                addPendingImages(e.target.files);
                 e.currentTarget.value = "";
               }}
               disabled={busy}
             />
             <button
               className="icon-button"
-              title="上传截图"
+              title={`上传截图（最多 ${MAX_IMAGES} 张）`}
               onClick={() => fileInputRef.current?.click()}
-              disabled={busy}
+              disabled={busy || pendingImages.length >= MAX_IMAGES}
             >
               图
             </button>
@@ -440,43 +620,29 @@ export default function Home() {
               {busy ? "…" : "发送"}
             </button>
           </div>
-          {pendingImage && (
-            <div className="pending-image">
-              <img src={pendingImage.preview} alt="待上传截图" />
-              <div>
-                <div className="card-title">{pendingImage.file.name}</div>
-                <div className="card-meta">{Math.round(pendingImage.file.size / 1024)} KB · 发送时上传</div>
+          {pendingImages.length > 0 && (
+            <div className="pending-images">
+              <div className="pending-head">
+                <span>待上传截图 {pendingImages.length}/{MAX_IMAGES}</span>
+                <button className="inline-action" onClick={clearPendingImages} disabled={busy}>清空</button>
               </div>
-              <button className="ghost" onClick={() => setPendingImage(null)} disabled={busy}>移除</button>
+              <div className="pending-grid">
+                {pendingImages.map((img) => (
+                  <div className="pending-card" key={img.id}>
+                    <img src={img.preview} alt={img.file.name || "待上传截图"} />
+                    <div className="pending-meta">
+                      <div className="card-title">{img.file.name}</div>
+                      <div className="card-meta">{Math.round(img.file.size / 1024)} KB</div>
+                    </div>
+                    <button className="remove-image" onClick={() => removePendingImage(img.id)} disabled={busy} aria-label="移除截图">×</button>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
         </div>
 
-        <div className="panel">
-          <h3>执行轨迹 (trace)</h3>
-          {trace.length === 0 && !busy && (
-            <div style={{ color: "var(--dim)", fontSize: 12 }}>工具调用与观察会实时出现在这里</div>
-          )}
-          {trace.map((t, i) =>
-            t.kind === "call" ? (
-              <div key={i} className="trace-item">
-                <details className="trace-detail">
-                  <summary className="name">→ {t.name}</summary>
-                  <span className="args">{JSON.stringify(t.args)}</span>
-                </details>
-              </div>
-            ) : t.kind === "note" ? (
-              <div key={i} className="trace-item" style={{ color: "var(--dim)" }}>
-                {t.text}
-              </div>
-            ) : (
-              <div key={i} className="trace-item">
-                <span className={t.ok ? "ok" : "fail"}>{t.ok ? "✓" : "✗"}</span> {t.summary}
-              </div>
-            )
-          )}
-          {busy && <div className="trace-item" style={{ color: "var(--accent)" }}>● 处理中…（推荐类查询可能要十几秒）</div>}
-        </div>
+        <TracePanel trace={trace} busy={busy} mode={traceMode} onModeChange={setTraceMode} />
       </div>
     </div>
   );
