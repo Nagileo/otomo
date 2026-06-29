@@ -1,10 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 
+from otomo.auth import AuthStore
+from otomo.memory import LongTermMemory
 from otomo.tools.videos.tool import BiliSubtitleSegment, _rough_subtitle_summary
-from otomo.tools.watchorder.tool import WeeklyDigestArgs, WeeklyDigestTool
+from otomo.tools.watchorder.tool import (
+    ConfigureWeeklyDigestArgs,
+    ConfigureWeeklyDigestTool,
+    GenerateWeeklyDigestNowArgs,
+    GenerateWeeklyDigestNowTool,
+    WeeklyDigestArgs,
+    WeeklyDigestTool,
+)
 from otomo.tools.websearch.tool import _TextExtractor, _highlights
+from otomo.weekly import WeeklyDigestService
 
 
 def test_url_text_extractor_and_highlights():
@@ -54,3 +65,34 @@ def test_weekly_digest_builds_sections():
     titles = {s.title for s in res.data.sections}
     assert {"继续追", "想看开坑"} <= titles
     assert res.data.next_actions
+
+
+def test_weekly_digest_subscription_and_inbox(tmp_path):
+    client = FakeBangumiClient()
+    ltm = LongTermMemory(tmp_path)
+    cfg = ConfigureWeeklyDigestTool(client, ltm)
+    res = asyncio.run(cfg.run(ConfigureWeeklyDigestArgs(enabled=True, weekday=1, hour=20)))
+    assert res.ok and res.data is not None
+    assert res.data.subscription.enabled
+    assert res.data.memory.weekly_digest_subscription.hour == 20
+
+    gen = GenerateWeeklyDigestNowTool(client, ltm)
+    inbox = asyncio.run(gen.run(GenerateWeeklyDigestNowArgs(limit=6)))
+    assert inbox.ok and inbox.data is not None
+    assert inbox.data.items
+    assert inbox.data.memory.inbox[-1].kind == "weekly_digest"
+
+
+def test_weekly_digest_scheduler_runs_due_once(tmp_path):
+    client = FakeBangumiClient()
+    ltm = LongTermMemory(tmp_path)
+    cfg = ConfigureWeeklyDigestTool(client, ltm)
+    asyncio.run(cfg.run(ConfigureWeeklyDigestArgs(enabled=True, weekday=0, hour=9)))
+
+    service = WeeklyDigestService(ltm, AuthStore(tmp_path / "auth"), client_factory=lambda _u, _t: FakeBangumiClient())
+    now = datetime(2026, 6, 29, 9, 5)  # Monday
+    first = asyncio.run(service.run_due_once(now))
+    second = asyncio.run(service.run_due_once(now))
+    assert first == 1
+    assert second == 0
+    assert ltm.load_user("Nagileo").inbox

@@ -112,6 +112,21 @@ class AuthStore:
         except OSError:
             pass
 
+    def list_tokens(self) -> list[BangumiToken]:
+        tokens: list[BangumiToken] = []
+        for path in self.base.glob("bangumi_token__*.json"):
+            try:
+                tokens.append(BangumiToken.model_validate(json.loads(path.read_text(encoding="utf-8"))))
+            except Exception:  # noqa: BLE001
+                continue
+        return tokens
+
+    def token_for_username(self, username: str) -> BangumiToken | None:
+        for token in self.list_tokens():
+            if token.username == username:
+                return token
+        return None
+
     def identity(self, auth_session_id: str) -> AuthIdentity:
         token = self.load_token(auth_session_id)
         if not token:
@@ -207,4 +222,3 @@ async def token_for_session(auth_store: AuthStore, auth_session_id: str | None) 
         except Exception:  # noqa: BLE001
             return token
     return token
-

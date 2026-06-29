@@ -71,6 +71,8 @@ class Settings(BaseSettings):
     langfuse_host: str = "https://cloud.langfuse.com"
     trajectory_capture_enabled: bool = True
     trajectory_store_observations: bool = True
+    weekly_scheduler_enabled: bool = True
+    weekly_scheduler_interval_seconds: int = 900
 
     # ---- Agent / HTTP ----
     agent_max_iters: int = 8

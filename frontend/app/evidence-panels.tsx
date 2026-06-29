@@ -21,6 +21,8 @@ type MemoryState = {
   recent_decisions?: AnyRecord[];
   watch_plan?: AnyRecord[];
   recommendation_lists?: AnyRecord[];
+  weekly_digest_subscription?: AnyRecord;
+  inbox?: AnyRecord[];
   updated_at?: string;
 };
 
@@ -722,6 +724,8 @@ export function MemoryBadge({ memory }: { memory: MemoryState | null }) {
   const feedbackCount = list(memory.recent_feedback).length;
   const pendingCount = list(memory.pending_write_actions).length;
   const planCount = list(memory.watch_plan).length;
+  const inboxCount = list(memory.inbox).filter((x) => x.unread).length;
+  const weeklyEnabled = Boolean(memory.weekly_digest_subscription?.enabled);
   const likePreview = list(memory.likes).slice(0, 3).map((x) => text(x.value, "")).filter(Boolean).join(" / ");
   const dislikePreview = list(memory.dislikes).slice(0, 3).map((x) => text(x.value, "")).filter(Boolean).join(" / ");
   return (
@@ -732,6 +736,8 @@ export function MemoryBadge({ memory }: { memory: MemoryState | null }) {
       {feedbackCount > 0 && <Badge tone="dim">反馈 {feedbackCount}</Badge>}
       {pendingCount > 0 && <Badge tone="warn">待确认 {pendingCount}</Badge>}
       {planCount > 0 && <Badge tone="good">计划 {planCount}</Badge>}
+      {weeklyEnabled && <Badge tone="good">周报已订阅</Badge>}
+      {inboxCount > 0 && <Badge tone="warn">未读周报 {inboxCount}</Badge>}
       {memory.spoiler_default && memory.spoiler_default !== "none" && (
         <Badge tone={memory.spoiler_default === "full" ? "bad" : "warn"}>默认剧透 {memory.spoiler_default}</Badge>
       )}
@@ -757,6 +763,8 @@ function MemoryPanel({
   const decisions = list(data.recent_decisions);
   const watchPlan = list(data.watch_plan);
   const recLists = list(data.recommendation_lists);
+  const inbox = list(data.inbox);
+  const weeklySub = data.weekly_digest_subscription || {};
   const progress = data.progress || {};
   const progressEntries = Object.entries(progress).slice(0, 12);
   const profiles = Object.entries(data.profile_snapshot || {}).slice(0, 3);
@@ -771,6 +779,8 @@ function MemoryPanel({
         {data.updated_at && <Badge tone="dim">updated {data.updated_at}</Badge>}
         {pendingActions.length > 0 && <Badge tone="warn">待确认写回 {pendingActions.length}</Badge>}
         {watchPlan.length > 0 && <Badge tone="good">计划板 {watchPlan.length}</Badge>}
+        {weeklySub.enabled && <Badge tone="good">周报 {weeklySub.weekday ?? "-"} / {weeklySub.hour ?? "-"} 点</Badge>}
+        {inbox.filter((x) => x.unread).length > 0 && <Badge tone="warn">未读 inbox {inbox.filter((x) => x.unread).length}</Badge>}
       </div>
 
       {pendingActions.length > 0 && (
@@ -923,6 +933,35 @@ function MemoryPanel({
                 </div>
               </div>
             ))}
+          </div>
+        </>
+      )}
+
+      {(weeklySub.enabled || inbox.length > 0) && (
+        <>
+          <div className="section-title">周报订阅 / Inbox</div>
+          <div className="rating-grid">
+            <div className="rating-card">
+              <div className="rating-source">订阅状态</div>
+              <div className="card-title">{weeklySub.enabled ? "已开启" : "未开启"}</div>
+              <p className="card-note">
+                weekday {weeklySub.weekday ?? "-"} · hour {weeklySub.hour ?? "-"} · {text(weeklySub.timezone, "Asia/Shanghai")}
+              </p>
+              {weeklySub.last_run_key && <Badge tone="dim">last {weeklySub.last_run_key}</Badge>}
+            </div>
+            {inbox.slice().reverse().slice(0, 5).map((item, i) => {
+              const payload = item.payload || {};
+              return (
+                <div className="rating-card" key={`${item.id}-${i}`}>
+                  <div className="rating-source">{item.unread ? "未读" : "已读"} · {text(item.created_at, "")}</div>
+                  <div className="card-title">{text(item.title)}</div>
+                  <p className="card-note">
+                    {text(payload.week, "")}
+                    {list(payload.sections).length ? ` · ${list(payload.sections).map((s) => text(s.title)).join(" / ")}` : ""}
+                  </p>
+                </div>
+              );
+            })}
           </div>
         </>
       )}

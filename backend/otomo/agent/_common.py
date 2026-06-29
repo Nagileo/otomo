@@ -377,6 +377,9 @@ _PANEL_TOOLS = {
     "plan_watch_copilot",
     "build_taste_report",
     "build_weekly_digest",
+    "configure_weekly_digest",
+    "generate_weekly_digest_now",
+    "list_weekly_digest_inbox",
     "get_user_memory",
     "remember_user_preference",
     "forget_user_memory",
@@ -399,6 +402,9 @@ _MEMORY_TOOLS = {
     "list_watch_plan",
     "record_decision_log",
     "save_recommendation_list",
+    "configure_weekly_digest",
+    "generate_weekly_digest_now",
+    "list_weekly_digest_inbox",
 }
 _MEMORY_STATE_TOOLS = _MEMORY_TOOLS | {"build_aspect_profile", "build_taste_report"}
 
@@ -623,7 +629,26 @@ def _safe_memory_payload(data: dict[str, Any]) -> dict[str, Any]:
         "recent_decisions": _trim_dicts(memory.get("recent_decisions"), limit=10),
         "watch_plan": _trim_dicts(memory.get("watch_plan"), limit=20),
         "recommendation_lists": _trim_dicts(memory.get("recommendation_lists"), limit=6),
+        "weekly_digest_subscription": memory.get("weekly_digest_subscription")
+        if isinstance(memory.get("weekly_digest_subscription"), dict) else {},
+        "inbox": _trim_dicts(memory.get("inbox"), limit=8),
         "updated_at": memory.get("updated_at"),
+    }
+
+
+def _safe_weekly_inbox_payload(data: dict[str, Any]) -> dict[str, Any]:
+    items = []
+    for item in _trim_dicts(data.get("items"), limit=8):
+        copied = dict(item)
+        payload = copied.get("payload") if isinstance(copied.get("payload"), dict) else {}
+        copied["payload"] = _safe_weekly_digest_payload(payload) if payload else {}
+        items.append(copied)
+    return {
+        "username": data.get("username"),
+        "items": items,
+        "subscription": data.get("subscription") if isinstance(data.get("subscription"), dict) else None,
+        "message": data.get("message"),
+        "memory": _safe_memory_payload({"memory": data.get("memory")}) if isinstance(data.get("memory"), dict) else None,
     }
 
 
@@ -682,6 +707,8 @@ def panel_data_from_payload(name: str, payload: dict[str, Any] | None) -> dict[s
         return _safe_watch_copilot_payload(data)
     if name == "build_weekly_digest":
         return _safe_weekly_digest_payload(data)
+    if name in {"configure_weekly_digest", "generate_weekly_digest_now", "list_weekly_digest_inbox"}:
+        return _safe_weekly_inbox_payload(data)
     if name == "build_taste_report":
         return _safe_taste_report_payload(data)
     if name == "explore_voice_network":

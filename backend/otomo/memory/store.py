@@ -54,3 +54,12 @@ class LongTermMemory:
     def save_user(self, mem: UserMemory) -> None:
         mem.updated_at = now_iso()
         self.set("user_memory", mem.username, mem.model_dump(mode="json", exclude_none=True))
+
+    def list_users(self) -> list[str]:
+        prefix = "user_memory__"
+        users: list[str] = []
+        for path in self.base.glob(f"{prefix}*.json"):
+            name = path.stem.removeprefix(prefix)
+            if name:
+                users.append(name)
+        return sorted(set(users))

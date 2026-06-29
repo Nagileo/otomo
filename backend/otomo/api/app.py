@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 import json
 from typing import Any, AsyncIterator, Literal
@@ -24,6 +25,7 @@ from ..memory.models import memory_summary
 from ..obs import traced_stream
 from ..factory import build_registry
 from ..uploads import upload_store
+from ..weekly import WeeklyDigestService
 from ..agent.plan_execute import PlanExecuteRunner
 from ..agent.react import ReActRunner
 from ..tools.bangumi.client import BangumiClient
@@ -36,10 +38,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.moegirl = MoegirlClient()
     app.state.ltm = LongTermMemory()
     app.state.auth = AuthStore()
+    app.state.weekly_service = WeeklyDigestService(app.state.ltm, app.state.auth)
+    app.state.weekly_task = (
+        asyncio.create_task(app.state.weekly_service.run_forever())
+        if settings.weekly_scheduler_enabled else None
+    )
     app.state.sessions: dict[str, AgentState] = {}  # 短期记忆：session_id -> 会话状态
     try:
         yield
     finally:
+        if app.state.weekly_task is not None:
+            await app.state.weekly_service.stop()
+            app.state.weekly_task.cancel()
+            try:
+                await app.state.weekly_task
+            except asyncio.CancelledError:
+                pass
         await app.state.bangumi.aclose()
         await app.state.moegirl.aclose()
 
@@ -90,6 +104,12 @@ async def health() -> dict[str, str]:
 @app.get("/auth/session")
 async def auth_session(auth_session_id: str) -> dict[str, Any]:
     return app.state.auth.identity(auth_session_id).model_dump(mode="json")
+
+
+@app.post("/weekly/run-due")
+async def weekly_run_due() -> dict[str, Any]:
+    count = await app.state.weekly_service.run_due_once()
+    return {"ok": True, "generated": count}
 
 
 @app.get("/auth/bangumi/login")

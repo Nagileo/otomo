@@ -92,7 +92,7 @@ def build_registry(
         registry.register(tool)
     for tool in build_yuc_tools():
         registry.register(tool)
-    for tool in build_watchorder_tools(client):
+    for tool in build_watchorder_tools(client, shared_ltm):
         registry.register(tool)
     for tool in build_websearch_tools():
         registry.register(tool)

@@ -12,6 +12,7 @@ WriteActionStatus = Literal["pending", "executed", "cancelled", "failed", "undon
 WriteOperation = Literal["set_collection", "set_episode_collection"]
 DecisionKind = Literal["accept", "reject", "defer", "write", "undo", "plan", "note"]
 PlanStatus = Literal["wishlist", "watching", "backlog", "on_hold", "revive", "completed", "rejected"]
+InboxKind = Literal["weekly_digest", "system"]
 AspectKey = Literal[
     "story", "character", "pacing", "visual", "music",
     "direction", "text", "system", "voice", "general",
@@ -101,6 +102,26 @@ class RecommendationListItem(BaseModel):
     updated_at: str = ""
 
 
+class WeeklyDigestSubscription(BaseModel):
+    enabled: bool = False
+    weekday: int = Field(0, ge=0, le=6, description="0=Monday")
+    hour: int = Field(9, ge=0, le=23)
+    timezone: str = "Asia/Shanghai"
+    limit: int = Field(8, ge=3, le=20)
+    include_on_hold: bool = True
+    last_run_key: str = ""
+    updated_at: str = ""
+
+
+class InboxItem(BaseModel):
+    id: str
+    kind: InboxKind = "weekly_digest"
+    title: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+    unread: bool = True
+    created_at: str = ""
+
+
 class AspectPreference(BaseModel):
     aspect: AspectKey
     label: str
@@ -136,6 +157,8 @@ class UserMemory(BaseModel):
     decision_log: list[DecisionLogItem] = Field(default_factory=list)
     watch_plan: list[WatchPlanItem] = Field(default_factory=list)
     recommendation_lists: list[RecommendationListItem] = Field(default_factory=list)
+    weekly_digest_subscription: WeeklyDigestSubscription = Field(default_factory=WeeklyDigestSubscription)
+    inbox: list[InboxItem] = Field(default_factory=list)
     updated_at: str = ""
 
 
@@ -152,6 +175,8 @@ class MemorySummary(BaseModel):
     recent_decisions: list[DecisionLogItem] = Field(default_factory=list)
     watch_plan: list[WatchPlanItem] = Field(default_factory=list)
     recommendation_lists: list[RecommendationListItem] = Field(default_factory=list)
+    weekly_digest_subscription: WeeklyDigestSubscription = Field(default_factory=WeeklyDigestSubscription)
+    inbox: list[InboxItem] = Field(default_factory=list)
     updated_at: str = ""
 
 
@@ -171,5 +196,7 @@ def memory_summary(mem: UserMemory, feedback_limit: int = 8) -> MemorySummary:
         recent_decisions=mem.decision_log[-10:],
         watch_plan=mem.watch_plan[-20:],
         recommendation_lists=mem.recommendation_lists[-6:],
+        weekly_digest_subscription=mem.weekly_digest_subscription,
+        inbox=mem.inbox[-8:],
         updated_at=mem.updated_at,
     )

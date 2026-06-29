@@ -49,6 +49,8 @@ type MemoryState = {
   recent_decisions?: Record<string, any>[];
   watch_plan?: Record<string, any>[];
   recommendation_lists?: Record<string, any>[];
+  weekly_digest_subscription?: Record<string, any>;
+  inbox?: Record<string, any>[];
   updated_at?: string;
 };
 type AuthState = {
