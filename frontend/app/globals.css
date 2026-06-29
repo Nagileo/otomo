@@ -55,6 +55,11 @@ button:disabled { opacity: .5; cursor: default; }
 .trace-item .ok { color: var(--green); }
 .trace-item .fail { color: var(--red); }
 .trace-item .args { color: var(--dim); }
+.trace-detail summary { cursor: pointer; list-style: none; }
+.trace-detail summary::-webkit-details-marker { display: none; }
+.trace-detail .args {
+  display: block; margin-top: 4px; overflow-wrap: anywhere; line-height: 1.4;
+}
 .sources { font-size: 12px; color: var(--dim); margin-top: 12px; }
 .src-label { margin-bottom: 6px; }
 .src-cards { display: flex; flex-wrap: wrap; gap: 8px; }
@@ -148,6 +153,19 @@ button:disabled { opacity: .5; cursor: default; }
 .aspect-bars .neg { background: var(--red); }
 
 .source-matrix, .compact-list, .caveats, .mapping-list { display: grid; gap: 6px; }
+.action-list, .claim-list { display: grid; gap: 8px; }
+.action-card, .claim-card {
+  display: grid; gap: 8px; background: #0c0e13; border: 1px solid var(--border);
+  border-radius: 8px; padding: 9px; min-width: 0;
+}
+.action-card { grid-template-columns: 1fr auto; align-items: start; }
+.action-buttons { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.action-confirm { color: #0c0e13; background: var(--green); border-color: transparent; }
+.inline-action {
+  margin-left: 8px; padding: 2px 8px; border-radius: 999px; font-size: 11px;
+  background: transparent; color: var(--accent); border: 1px solid rgba(122, 162, 247, .35);
+}
+.claim-top { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
 .matrix-item {
   display: grid; grid-template-columns: auto 1fr; gap: 6px 8px; align-items: center;
   font-size: 12px; color: #cbd0dc; border-left: 2px solid var(--border); padding-left: 8px;
@@ -188,4 +206,6 @@ button:disabled { opacity: .5; cursor: default; }
   .season-card, .rec-card { grid-template-columns: 52px 1fr; }
   .season-card img, .season-noimg, .rec-card img, .rec-noimg { width: 52px; height: 72px; }
   .rating-grid, .metric-grid, .taste-groups { grid-template-columns: 1fr; }
+  .action-card { grid-template-columns: 1fr; }
+  .action-buttons { justify-content: flex-start; }
 }

@@ -37,6 +37,10 @@ type MemoryState = {
   recent_feedback?: Record<string, any>[];
   profile_snapshot?: Record<string, any>;
   aspect_profiles?: Record<string, any>;
+  pending_write_actions?: Record<string, any>[];
+  recent_decisions?: Record<string, any>[];
+  watch_plan?: Record<string, any>[];
+  recommendation_lists?: Record<string, any>[];
   updated_at?: string;
 };
 
@@ -113,6 +117,32 @@ export default function Home() {
     }
   }
 
+  async function postAction(kind: "confirm" | "cancel" | "undo", actionId: string) {
+    try {
+      const res = await fetch(`${BACKEND}/actions/${kind}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action_id: actionId }),
+      });
+      const payload = await res.json();
+      if (!payload.ok) {
+        setTrace((t) => [...t, { kind: "obs", name: `action_${kind}`, ok: false, summary: payload.error || "action failed" }]);
+        return;
+      }
+      const mem = payload.data?.memory;
+      if (mem) {
+        setMemory(mem);
+        setEvidence((prev) => ({ ...prev, get_user_memory: [mem] }));
+      }
+      setTrace((t) => [
+        ...t,
+        { kind: "obs", name: `action_${kind}`, ok: true, summary: payload.data?.message || "ok" },
+      ]);
+    } catch (e) {
+      setTrace((t) => [...t, { kind: "obs", name: `action_${kind}`, ok: false, summary: String(e) }]);
+    }
+  }
+
   function handleEvent(ev: any) {
     switch (ev.type) {
       case "plan":
@@ -132,6 +162,19 @@ export default function Home() {
             [ev.name]: [...(prev[ev.name] ?? []), ev.data],
           }));
         }
+        break;
+      case "claim_check":
+        setTrace((t) => [
+          ...t,
+          {
+            kind: "note",
+            text: `证据校验：support ${(Number(ev.support_rate || 0) * 100).toFixed(0)}% · unsupported ${ev.unsupported_count ?? 0}`,
+          },
+        ]);
+        setEvidence((prev) => ({
+          ...prev,
+          claim_check: [...(prev.claim_check ?? []), ev],
+        }));
         break;
       case "state":
         if (ev.scope === "spoiler") setSpoiler(ev.snapshot ?? null);
@@ -218,7 +261,13 @@ export default function Home() {
               </div>
             </div>
           )}
-          <EvidencePanels evidence={evidence} onCritique={(q) => send(q)} />
+          <EvidencePanels
+            evidence={evidence}
+            onCritique={(q) => send(q)}
+            onConfirmAction={(id) => postAction("confirm", id)}
+            onCancelAction={(id) => postAction("cancel", id)}
+            onUndoAction={(id) => postAction("undo", id)}
+          />
           {spoiler?.progress_episode != null && (
             <div className="filter-note">🔒 已按第 {spoiler.progress_episode} 集进度过滤分集剧情内容</div>
           )}
@@ -262,8 +311,10 @@ export default function Home() {
           {trace.map((t, i) =>
             t.kind === "call" ? (
               <div key={i} className="trace-item">
-                <span className="name">→ {t.name}</span>{" "}
-                <span className="args">{JSON.stringify(t.args)}</span>
+                <details className="trace-detail">
+                  <summary className="name">→ {t.name}</summary>
+                  <span className="args">{JSON.stringify(t.args)}</span>
+                </details>
               </div>
             ) : t.kind === "note" ? (
               <div key={i} className="trace-item" style={{ color: "var(--dim)" }}>

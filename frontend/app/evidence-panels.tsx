@@ -17,6 +17,10 @@ type MemoryState = {
   recent_feedback?: AnyRecord[];
   profile_snapshot?: Record<string, AnyRecord>;
   aspect_profiles?: Record<string, AnyRecord>;
+  pending_write_actions?: AnyRecord[];
+  recent_decisions?: AnyRecord[];
+  watch_plan?: AnyRecord[];
+  recommendation_lists?: AnyRecord[];
   updated_at?: string;
 };
 
@@ -634,6 +638,8 @@ export function MemoryBadge({ memory }: { memory: MemoryState | null }) {
   const likeCount = list(memory.likes).length;
   const dislikeCount = list(memory.dislikes).length;
   const feedbackCount = list(memory.recent_feedback).length;
+  const pendingCount = list(memory.pending_write_actions).length;
+  const planCount = list(memory.watch_plan).length;
   const likePreview = list(memory.likes).slice(0, 3).map((x) => text(x.value, "")).filter(Boolean).join(" / ");
   const dislikePreview = list(memory.dislikes).slice(0, 3).map((x) => text(x.value, "")).filter(Boolean).join(" / ");
   return (
@@ -642,6 +648,8 @@ export function MemoryBadge({ memory }: { memory: MemoryState | null }) {
       <Badge tone={likeCount ? "good" : "dim"}>喜欢 {likeCount}{likePreview ? ` · ${likePreview}` : ""}</Badge>
       <Badge tone={dislikeCount ? "warn" : "dim"}>避雷 {dislikeCount}{dislikePreview ? ` · ${dislikePreview}` : ""}</Badge>
       {feedbackCount > 0 && <Badge tone="dim">反馈 {feedbackCount}</Badge>}
+      {pendingCount > 0 && <Badge tone="warn">待确认 {pendingCount}</Badge>}
+      {planCount > 0 && <Badge tone="good">计划 {planCount}</Badge>}
       {memory.spoiler_default && memory.spoiler_default !== "none" && (
         <Badge tone={memory.spoiler_default === "full" ? "bad" : "warn"}>默认剧透 {memory.spoiler_default}</Badge>
       )}
@@ -649,10 +657,24 @@ export function MemoryBadge({ memory }: { memory: MemoryState | null }) {
   );
 }
 
-function MemoryPanel({ data }: { data: MemoryState }) {
+function MemoryPanel({
+  data,
+  onConfirmAction,
+  onCancelAction,
+  onUndoAction,
+}: {
+  data: MemoryState;
+  onConfirmAction?: (id: string) => void;
+  onCancelAction?: (id: string) => void;
+  onUndoAction?: (id: string) => void;
+}) {
   const likes = list(data.likes);
   const dislikes = list(data.dislikes);
   const feedback = list(data.recent_feedback);
+  const pendingActions = list(data.pending_write_actions);
+  const decisions = list(data.recent_decisions);
+  const watchPlan = list(data.watch_plan);
+  const recLists = list(data.recommendation_lists);
   const progress = data.progress || {};
   const progressEntries = Object.entries(progress).slice(0, 12);
   const profiles = Object.entries(data.profile_snapshot || {}).slice(0, 3);
@@ -665,7 +687,35 @@ function MemoryPanel({ data }: { data: MemoryState }) {
       <div className="evidence-row">
         <Badge tone="dim">spoiler_default: {text(data.spoiler_default, "none")}</Badge>
         {data.updated_at && <Badge tone="dim">updated {data.updated_at}</Badge>}
+        {pendingActions.length > 0 && <Badge tone="warn">待确认写回 {pendingActions.length}</Badge>}
+        {watchPlan.length > 0 && <Badge tone="good">计划板 {watchPlan.length}</Badge>}
       </div>
+
+      {pendingActions.length > 0 && (
+        <>
+          <div className="section-title">待确认 Bangumi 写回</div>
+          <div className="action-list">
+            {pendingActions.map((action, i) => (
+              <div className="action-card" key={`${action.id}-${i}`}>
+                <div>
+                  <div className="card-title">{text(action.summary)}</div>
+                  <div className="card-meta">
+                    {text(action.operation)} · {text(action.subject_name || action.subject_id, "未知条目")}
+                  </div>
+                  <div className="compact-list inline">
+                    <span>action_id: {text(action.id)}</span>
+                    <span>status: {text(action.status)}</span>
+                  </div>
+                </div>
+                <div className="action-buttons">
+                  {onConfirmAction && <button className="chip action-confirm" onClick={() => onConfirmAction(text(action.id, ""))}>确认写回</button>}
+                  {onCancelAction && <button className="chip" onClick={() => onCancelAction(text(action.id, ""))}>取消</button>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
 
       <div className="memory-grid">
         <div>
@@ -776,6 +826,54 @@ function MemoryPanel({ data }: { data: MemoryState }) {
           </div>
         </>
       )}
+
+      {watchPlan.length > 0 && (
+        <>
+          <div className="section-title">计划板</div>
+          <div className="rating-grid">
+            {watchPlan.slice(0, 8).map((item, i) => (
+              <div className="rating-card" key={`${item.subject_id}-${i}`}>
+                <div className="rating-source">{text(item.status)} · priority {item.priority ?? "-"}</div>
+                <div className="card-title">{text(item.name || item.subject_id)}</div>
+                <p className="card-note">{text(item.reason, "")}</p>
+                <div className="evidence-row tight">
+                  {list<string>(item.tags).slice(0, 5).map((tag) => <Badge key={tag} tone="dim">{tag}</Badge>)}
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      {decisions.length > 0 && (
+        <>
+          <div className="section-title">近期决策</div>
+          <div className="compact-list">
+            {decisions.slice().reverse().slice(0, 8).map((item, i) => (
+              <span key={`${item.id}-${i}`}>
+                {text(item.kind)} · {text(item.subject_name || item.subject_id, "条目")} · {text(item.reason, "")}
+                {item.kind === "write" && onUndoAction && item.action_id ? (
+                  <button className="inline-action" onClick={() => onUndoAction(text(item.action_id, ""))}>撤销</button>
+                ) : null}
+              </span>
+            ))}
+          </div>
+        </>
+      )}
+
+      {recLists.length > 0 && (
+        <>
+          <div className="section-title">保存的推荐列表</div>
+          <div className="compact-list">
+            {recLists.slice().reverse().slice(0, 4).map((item, i) => (
+              <span key={`${item.id}-${i}`}>
+                {text(item.title)} · {text(item.subject_type)} · {list(item.items).length} 项
+                {item.reason ? ` · ${item.reason}` : ""}
+              </span>
+            ))}
+          </div>
+        </>
+      )}
     </Panel>
   );
 }
@@ -844,7 +942,75 @@ function ExplorerPanel({ data }: { data: AnyRecord }) {
   );
 }
 
-export function EvidencePanels({ evidence, onCritique }: { evidence: EvidenceMap; onCritique?: (q: string) => void }) {
+function ClaimCheckPanel({ data }: { data: AnyRecord }) {
+  const claims = list(data.claims);
+  return (
+    <Panel
+      title="逐条事实校验"
+      subtitle={`support ${(Number(data.support_rate || 0) * 100).toFixed(0)}% · supported ${data.supported_count ?? 0} · unsupported ${data.unsupported_count ?? 0}`}
+    >
+      <div className="metric-grid">
+        <div className="metric-card">
+          <div className="metric-label">支持率</div>
+          <div className="metric-value">{(Number(data.support_rate || 0) * 100).toFixed(0)}%</div>
+        </div>
+        <div className="metric-card">
+          <div className="metric-label">未支持</div>
+          <div className="metric-value">{data.unsupported_count ?? 0}</div>
+        </div>
+        <div className="metric-card">
+          <div className="metric-label">不可验证</div>
+          <div className="metric-value">{data.unverifiable_count ?? 0}</div>
+        </div>
+      </div>
+      {claims.length ? (
+        <div className="claim-list">
+          {claims.slice(0, 12).map((claim, i) => {
+            const tone = claim.supported ? "good" : claim.kind === "unknown" ? "dim" : "bad";
+            return (
+              <div className="claim-card" key={`${claim.text}-${i}`}>
+                <div className="claim-top">
+                  <Badge tone={tone}>{claim.supported ? "supported" : "unsupported"}</Badge>
+                  <Badge tone="dim">{text(claim.kind)}</Badge>
+                  <Badge tone="dim">conf {pct(claim.confidence)}</Badge>
+                </div>
+                <p className="card-note">{text(claim.text)}</p>
+                {list(claim.evidence).length > 0 ? (
+                  <div className="compact-list inline">
+                    {list(claim.evidence).slice(0, 3).map((ev, idx) => (
+                      <span key={idx}>{text(ev.source)} · {text(ev.text, "")}</span>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="card-meta">{text(claim.note, "没有命中本轮证据")}</div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <EmptyHint text="最终答案没有切出可校验 claim" />
+      )}
+      {list<string>(data.caveats).length > 0 && (
+        <div className="caveats">{list<string>(data.caveats).map((c, i) => <span key={i}>{c}</span>)}</div>
+      )}
+    </Panel>
+  );
+}
+
+export function EvidencePanels({
+  evidence,
+  onCritique,
+  onConfirmAction,
+  onCancelAction,
+  onUndoAction,
+}: {
+  evidence: EvidenceMap;
+  onCritique?: (q: string) => void;
+  onConfirmAction?: (id: string) => void;
+  onCancelAction?: (id: string) => void;
+  onUndoAction?: (id: string) => void;
+}) {
   const review = list(evidence.review_subject);
   const taste = list(evidence.compare_user_taste);
   const season = list(evidence.season_guide_brief);
@@ -854,20 +1020,36 @@ export function EvidencePanels({ evidence, onCritique }: { evidence: EvidenceMap
   const tasteReport = list(evidence.build_taste_report);
   const explorer = list(evidence.explore_voice_network);
   const episodeRadar = list(evidence.episode_buzz_radar);
+  const claimChecks = list(evidence.claim_check);
   const memory = [
     ...list(evidence.get_user_memory),
     ...list(evidence.remember_user_preference),
     ...list(evidence.forget_user_memory),
     ...list(evidence.record_recommendation_feedback),
+    ...list(evidence.prepare_bangumi_write_action),
+    ...list(evidence.cancel_bangumi_write_action),
+    ...list(evidence.upsert_watch_plan_item),
+    ...list(evidence.list_watch_plan),
+    ...list(evidence.record_decision_log),
+    ...list(evidence.save_recommendation_list),
   ];
   if (
     !review.length && !taste.length && !season.length && !recommend.length && !memory.length
     && !aspect.length && !watchCopilot.length && !tasteReport.length && !explorer.length
-    && !episodeRadar.length
+    && !episodeRadar.length && !claimChecks.length
   ) return null;
   return (
     <div className="evidence-stack">
-      {memory.map((data, i) => <MemoryPanel data={data} key={`memory-${i}`} />)}
+      {claimChecks.map((data, i) => <ClaimCheckPanel data={data} key={`claim-${i}`} />)}
+      {memory.map((data, i) => (
+        <MemoryPanel
+          data={data}
+          key={`memory-${i}`}
+          onConfirmAction={onConfirmAction}
+          onCancelAction={onCancelAction}
+          onUndoAction={onUndoAction}
+        />
+      ))}
       {aspect.map((data, i) => <AspectProfilePanel data={data} key={`aspect-${i}`} />)}
       {tasteReport.map((data, i) => <TasteReportPanel data={data} key={`taste-report-${i}`} />)}
       {review.map((data, i) => <ReviewEvidencePanel data={data} key={`review-${i}`} />)}
