@@ -156,6 +156,16 @@ class FinalEvent(BaseModel):
     steps: int = 0
 
 
+class ClaimCheckEvent(BaseModel):
+    type: Literal["claim_check"] = "claim_check"
+    support_rate: float = 0.0
+    supported_count: int = 0
+    unsupported_count: int = 0
+    unverifiable_count: int = 0
+    claims: list[dict[str, Any]] = Field(default_factory=list)
+    caveats: list[str] = Field(default_factory=list)
+
+
 class FollowupEvent(BaseModel):
     type: Literal["followup"] = "followup"
     questions: list[str] = Field(default_factory=list)
@@ -174,6 +184,7 @@ AgentEvent = (
     | ReflectEvent
     | AnswerDeltaEvent
     | FinalEvent
+    | ClaimCheckEvent
     | FollowupEvent
     | ErrorEvent
 )

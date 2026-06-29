@@ -8,11 +8,17 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any, AsyncIterator
 
+from .agent.contracts import ClaimCheckEvent
+from .claim_verifier import verify_answer_claims
+from .config import settings
+
 _TRACE_DIR = Path(__file__).resolve().parents[1] / "trajectories"  # backend/trajectories（gitignored）
+_SENSITIVE_KEY = re.compile(r"(token|authorization|api[_-]?key|password|secret|cookie)", re.I)
 
 
 def _summarize_event(ev: Any) -> dict:
@@ -23,6 +29,9 @@ def _summarize_event(ev: Any) -> dict:
         d["name"], d["args"] = ev.name, ev.args
     elif t == "observation":
         d["name"], d["ok"], d["entities"] = ev.name, ev.ok, len(ev.entities)
+    elif t == "claim_check":
+        d["support_rate"] = ev.support_rate
+        d["unsupported_count"] = ev.unsupported_count
     elif t == "plan":
         d["summary"] = ev.summary
     elif t == "reflect":
@@ -45,6 +54,44 @@ def _append(rec: dict) -> None:
         pass
 
 
+def _append_named(filename: str, rec: dict) -> None:
+    try:
+        _TRACE_DIR.mkdir(parents=True, exist_ok=True)
+        with open(_TRACE_DIR / filename, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _redact(value: Any, *, depth: int = 0) -> Any:
+    if depth > 5:
+        return "<truncated>"
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            key = str(k)
+            out[key] = "<redacted>" if _SENSITIVE_KEY.search(key) else _redact(v, depth=depth + 1)
+        return out
+    if isinstance(value, list):
+        return [_redact(x, depth=depth + 1) for x in value[:80]]
+    if isinstance(value, str):
+        if _SENSITIVE_KEY.search(value[:80]):
+            return "<redacted>"
+        return value[:2000]
+    return value
+
+
+def _obs_for_verifier(ev: Any) -> dict[str, Any]:
+    return {
+        "name": ev.name,
+        "ok": ev.ok,
+        "summary": ev.summary,
+        "sources": [s.model_dump(mode="json", exclude_none=True) for s in ev.sources],
+        "entities": [e.model_dump(mode="json", exclude_none=True) for e in ev.entities],
+        "data": _redact(ev.data) if settings.trajectory_store_observations else None,
+    }
+
+
 async def traced_stream(runner, message: str, state, meta: dict) -> AsyncIterator:
     """包裹 runner.stream：原样透传事件，run 结束把结构化 trace 落 JSONL。
 
@@ -55,6 +102,18 @@ async def traced_stream(runner, message: str, state, meta: dict) -> AsyncIterato
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
         **meta, "message": message, "events": [], "tools": [],
     }
+    rl_rec: dict[str, Any] = {
+        "schema": "otomo.rl_trajectory.v1",
+        "ts": rec["ts"],
+        **meta,
+        "query": message,
+        "tool_calls": [],
+        "observations": [],
+        "answer": "",
+        "claim_check": None,
+        "duration_ms": 0,
+        "status": "ok",
+    }
     t0 = time.monotonic()
     final_answer = ""
     status = "ok"
@@ -64,14 +123,29 @@ async def traced_stream(runner, message: str, state, meta: dict) -> AsyncIterato
                 rec["events"].append(_summarize_event(ev))
             if ev.type == "tool_call":
                 rec["tools"].append(ev.name)
+                rl_rec["tool_calls"].append({"name": ev.name, "args": _redact(ev.args)})
+            elif ev.type == "observation":
+                rl_rec["observations"].append(_obs_for_verifier(ev))
             elif ev.type == "final":
                 final_answer = ev.answer
+                rl_rec["answer"] = final_answer
             elif ev.type == "error":
                 status = "error"
+                rl_rec["status"] = "error"
             yield ev
+            if ev.type == "final":
+                claim_check = verify_answer_claims(final_answer, rl_rec["observations"])
+                rl_rec["claim_check"] = claim_check.model_dump(mode="json", exclude_none=True)
+                claim_event = ClaimCheckEvent(**rl_rec["claim_check"])
+                rec["events"].append(_summarize_event(claim_event))
+                yield claim_event
     finally:
         rec["duration_ms"] = round((time.monotonic() - t0) * 1000)
         rec["n_tools"] = len(rec["tools"])
         rec["answer"] = final_answer[:200]
         rec["status"] = status
         _append(rec)
+        rl_rec["duration_ms"] = rec["duration_ms"]
+        rl_rec["status"] = status
+        if settings.trajectory_capture_enabled:
+            _append_named("rl_runs.jsonl", _redact(rl_rec))
