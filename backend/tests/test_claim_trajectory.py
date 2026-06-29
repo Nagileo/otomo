@@ -38,6 +38,24 @@ def test_claim_verifier_supports_facts_from_observations():
     assert result.supported_count >= 1
 
 
+def test_claim_verifier_rejects_conflicting_staff_claim():
+    result = verify_answer_claims(
+        "《银之匙》是 8-bit 制作。",
+        [
+            {
+                "name": "get_subject_persons",
+                "summary": "A-1 Pictures relation=动画制作",
+                "sources": [],
+                "entities": [],
+                "data": {"title": "银之匙", "staff": [{"relation": "动画制作", "name": "A-1 Pictures"}]},
+            },
+        ],
+    )
+    assert result.claims
+    assert any(c.kind == "canonical_fact" and not c.supported for c in result.claims)
+    assert result.unsupported_count >= 1
+
+
 class DummyRunner:
     async def stream(self, user_input: str, state: AgentState | None = None):
         yield ToolCallEvent(name="get_subject", args={"subject_id": 1})
