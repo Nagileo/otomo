@@ -37,6 +37,10 @@ langgraph = [
     "langgraph>=0.2",
     "langchain-openai>=0.2",
 ]
+browser = [
+    # 动态网页摘要：pip install -e ".[browser]" && playwright install chromium
+    "playwright>=1.45",
+]
 
 [project.scripts]
 otomo = "otomo.cli:main"

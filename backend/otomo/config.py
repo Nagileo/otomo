@@ -79,6 +79,8 @@ class Settings(BaseSettings):
     http_timeout: float = 30.0
     cache_ttl: float = 300.0  # Bangumi 响应内存缓存秒数（A5 换 Redis）
     upload_max_image_bytes: int = 6 * 1024 * 1024
+    browser_fetch_timeout_ms: int = 15000
+    browser_fetch_max_scrolls: int = 3
 
 
 settings = Settings()

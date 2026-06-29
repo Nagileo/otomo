@@ -15,6 +15,7 @@ from otomo.tools.watchorder.tool import (
     WeeklyDigestTool,
 )
 from otomo.tools.websearch.tool import _TextExtractor, _highlights
+from otomo.tools.websearch.tool import BrowserFetchArgs, BrowserFetchSummaryTool, _validate_public_url
 from otomo.weekly import WeeklyDigestService
 
 
@@ -28,6 +29,23 @@ def test_url_text_extractor_and_highlights():
     assert "bad" not in parser.text
     hits = _highlights(parser.text, "摇曳露营", limit=2)
     assert hits and "摇曳露营" in hits[0]
+
+
+def test_browser_fetch_rejects_local_urls():
+    for url in ["http://localhost:3000", "http://127.0.0.1/a", "http://192.168.1.2/a"]:
+        try:
+            _validate_public_url(url)
+        except ValueError as e:
+            assert "不允许" in str(e)
+        else:
+            raise AssertionError(f"expected reject: {url}")
+
+
+def test_browser_fetch_missing_playwright_is_clear():
+    tool = BrowserFetchSummaryTool()
+    res = asyncio.run(tool.run(BrowserFetchArgs(url="https://example.com", render="always")))
+    if not res.ok:
+        assert "Playwright" in (res.error or "") or "浏览器摘要失败" in (res.error or "")
 
 
 def test_rough_subtitle_summary_samples_timeline():

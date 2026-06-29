@@ -6,9 +6,11 @@ provider 可换（Tavily/Exa/Serper），无 key 时优雅报"未配置"。结�
 """
 from __future__ import annotations
 
+import ipaddress
 import re
 from html.parser import HTMLParser
-from typing import Any
+from typing import Any, Literal
+from urllib.parse import urlparse
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
@@ -53,6 +55,26 @@ class UrlSummaryResult(BaseModel):
     source_role: str = "discourse"
     text: str = ""
     highlights: list[str] = Field(default_factory=list)
+    caveats: list[str] = Field(default_factory=list)
+
+
+class BrowserFetchArgs(BaseModel):
+    url: str = Field(..., description="要读取的公开网页 URL")
+    query: str | None = Field(None, description="可选关注点/关键词")
+    max_chars: int = Field(2400, ge=500, le=8000)
+    render: Literal["auto", "always", "never"] = Field("auto", description="auto=静态不足再浏览器渲染")
+    scrolls: int = Field(2, ge=0, le=6, description="浏览器模式下有限滚动次数")
+
+
+class BrowserFetchResult(BaseModel):
+    url: str
+    title: str = ""
+    render_mode: Literal["static", "browser", "static_fallback"] = "static"
+    source_role: str = "discourse"
+    text: str = ""
+    highlights: list[str] = Field(default_factory=list)
+    links: list[WebHit] = Field(default_factory=list)
+    status_code: int | None = None
     caveats: list[str] = Field(default_factory=list)
 
 
@@ -110,6 +132,107 @@ def _highlights(text: str, query: str | None, limit: int = 6) -> list[str]:
         terms = [t for t in re.split(r"\s+", query) if t]
         sentences.sort(key=lambda s: 0 if any(t in s for t in terms) else 1)
     return [s[:220] for s in sentences[:limit]]
+
+
+def _validate_public_url(url: str) -> str:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("只支持 http/https URL")
+    host = (parsed.hostname or "").lower()
+    if not host:
+        raise ValueError("URL 缺少 host")
+    if host in {"localhost", "localhost.localdomain"} or host.endswith(".local"):
+        raise ValueError("不允许读取 localhost/local 地址")
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return url
+    if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+        raise ValueError("不允许读取内网/保留 IP 地址")
+    return url
+
+
+async def _fetch_static_url(url: str, query: str | None, max_chars: int) -> tuple[UrlSummaryResult, int | None]:
+    _validate_public_url(url)
+    async with httpx.AsyncClient(
+        timeout=settings.http_timeout,
+        follow_redirects=True,
+        headers={"User-Agent": settings.bangumi_user_agent},
+    ) as c:
+        r = await c.get(url)
+        r.raise_for_status()
+        content_type = r.headers.get("content-type", "")
+        if "text/html" not in content_type and "text/plain" not in content_type:
+            raise ValueError(f"暂不摘要该 content-type：{content_type}")
+        raw = r.text
+    parser = _TextExtractor()
+    parser.feed(raw)
+    clean = parser.text[:max_chars]
+    title = parser.title or str(r.url)
+    return (
+        UrlSummaryResult(
+            url=str(r.url),
+            title=title[:120],
+            text=clean,
+            highlights=_highlights(clean, query),
+            caveats=[
+                "按需 URL 摘要是网页话语源，不是 canonical 事实源。",
+                "只读取单页公开内容，不做站点级爬取；登录墙/反爬/动态渲染页面可能缺失正文。",
+            ],
+        ),
+        r.status_code,
+    )
+
+
+async def _browser_fetch(url: str, query: str | None, max_chars: int, scrolls: int) -> BrowserFetchResult:
+    _validate_public_url(url)
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError as e:
+        raise RuntimeError("未安装 Playwright：pip install -e .[browser] && playwright install chromium") from e
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page(
+            viewport={"width": 1280, "height": 900},
+            user_agent=settings.bangumi_user_agent,
+        )
+        try:
+            resp = await page.goto(url, wait_until="domcontentloaded", timeout=settings.browser_fetch_timeout_ms)
+            await page.wait_for_timeout(800)
+            for _ in range(min(scrolls, settings.browser_fetch_max_scrolls)):
+                await page.mouse.wheel(0, 1400)
+                await page.wait_for_timeout(500)
+            title = (await page.title())[:120]
+            text = await page.locator("body").inner_text(timeout=settings.browser_fetch_timeout_ms)
+            links_raw = await page.eval_on_selector_all(
+                "a[href]",
+                """els => els.slice(0, 40).map(a => ({
+                    title: (a.innerText || a.getAttribute('aria-label') || '').trim(),
+                    url: a.href,
+                    snippet: ''
+                }))""",
+            )
+            clean = re.sub(r"\s+", " ", text).strip()[:max_chars]
+            links = [
+                WebHit(title=(x.get("title") or x.get("url") or "")[:80], url=x.get("url") or "", snippet="")
+                for x in links_raw if isinstance(x, dict) and x.get("url")
+            ][:12]
+            return BrowserFetchResult(
+                url=page.url,
+                title=title or page.url,
+                render_mode="browser",
+                text=clean,
+                highlights=_highlights(clean, query),
+                links=links,
+                status_code=resp.status if resp else None,
+                caveats=[
+                    "浏览器摘要读取的是当前可见公开页面，可能受登录墙、地区、反爬、懒加载影响。",
+                    "该结果属于 discourse/web source，不参与 canonical 事实判断。",
+                ],
+            )
+        finally:
+            await browser.close()
 
 
 async def _search(provider: str, api_key: str, query: str, n: int, timeout: float) -> list[dict]:
@@ -211,36 +334,12 @@ class FetchUrlSummaryTool(Tool):
     result_model = UrlSummaryResult
 
     async def run(self, args: UrlSummaryArgs) -> ToolResult[UrlSummaryResult]:
-        if not args.url.startswith(("http://", "https://")):
-            return ToolResult(ok=False, error="只支持 http/https URL")
         try:
-            async with httpx.AsyncClient(
-                timeout=settings.http_timeout,
-                follow_redirects=True,
-                headers={"User-Agent": settings.bangumi_user_agent},
-            ) as c:
-                r = await c.get(args.url)
-                r.raise_for_status()
-                content_type = r.headers.get("content-type", "")
-                if "text/html" not in content_type and "text/plain" not in content_type:
-                    return ToolResult(ok=False, error=f"暂不摘要该 content-type：{content_type}")
-                raw = r.text
+            result, _ = await _fetch_static_url(args.url, args.query, args.max_chars)
+        except ValueError as e:
+            return ToolResult(ok=False, error=str(e))
         except Exception as e:  # noqa: BLE001
             return ToolResult(ok=False, error=f"URL 读取失败：{type(e).__name__}")
-        parser = _TextExtractor()
-        parser.feed(raw)
-        clean = parser.text[: args.max_chars]
-        title = parser.title or args.url
-        result = UrlSummaryResult(
-            url=str(r.url),
-            title=title[:120],
-            text=clean,
-            highlights=_highlights(clean, args.query),
-            caveats=[
-                "按需 URL 摘要是网页话语源，不是 canonical 事实源。",
-                "只读取单页公开内容，不做站点级爬取；登录墙/反爬/动态渲染页面可能缺失正文。",
-            ],
-        )
         return ToolResult(
             ok=True,
             data=result,
@@ -248,5 +347,59 @@ class FetchUrlSummaryTool(Tool):
         )
 
 
+class BrowserFetchSummaryTool(Tool):
+    name = "browser_fetch_summary"
+    description = (
+        "动态网页读取/摘要：先静态读取，必要时用 Playwright 渲染公开页面、有限滚动并抽取可见文本/链接。"
+        "用于 B站/论坛/动态网页/JS 渲染页面的单页摘要；不访问 localhost/内网，不处理登录墙。"
+    )
+    args_model = BrowserFetchArgs
+    result_model = BrowserFetchResult
+
+    async def run(self, args: BrowserFetchArgs) -> ToolResult[BrowserFetchResult]:
+        static_result: UrlSummaryResult | None = None
+        static_status: int | None = None
+        if args.render in {"auto", "never"}:
+            try:
+                static_result, static_status = await _fetch_static_url(args.url, args.query, args.max_chars)
+                if args.render == "never" or len(static_result.text) >= 500:
+                    data = BrowserFetchResult(
+                        url=static_result.url,
+                        title=static_result.title,
+                        render_mode="static",
+                        text=static_result.text,
+                        highlights=static_result.highlights,
+                        status_code=static_status,
+                        caveats=static_result.caveats,
+                    )
+                    return ToolResult(ok=True, data=data, sources=[Citation(title=data.title, url=data.url, source="web")])
+            except ValueError as e:
+                return ToolResult(ok=False, error=str(e))
+            except Exception:
+                static_result = None
+        try:
+            data = await _browser_fetch(args.url, args.query, args.max_chars, args.scrolls)
+        except Exception as e:  # noqa: BLE001
+            if static_result is not None:
+                data = BrowserFetchResult(
+                    url=static_result.url,
+                    title=static_result.title,
+                    render_mode="static_fallback",
+                    text=static_result.text,
+                    highlights=static_result.highlights,
+                    status_code=static_status,
+                    caveats=static_result.caveats + [f"浏览器渲染失败：{type(e).__name__}: {str(e)[:160]}"],
+                )
+                return ToolResult(ok=True, data=data, sources=[Citation(title=data.title, url=data.url, source="web")])
+            return ToolResult(ok=False, error=f"浏览器摘要失败：{type(e).__name__}: {str(e)[:180]}")
+        return ToolResult(
+            ok=True,
+            data=data,
+            sources=[Citation(title=data.title, url=data.url, source="web")] + [
+                Citation(title=x.title or x.url, url=x.url, source="web") for x in data.links[:4]
+            ],
+        )
+
+
 def build_websearch_tools() -> list[Tool]:
-    return [WebSearchTool(), FetchUrlSummaryTool()]
+    return [WebSearchTool(), FetchUrlSummaryTool(), BrowserFetchSummaryTool()]
