@@ -308,6 +308,8 @@ def summarize(result: ToolResult) -> str:
     if d.get("queue"):
         names = [x.get("name") for x in d["queue"][:4] if isinstance(x, dict) and x.get("name")]
         return f"追番副驾：{len(d['queue'])} 个本周候选" + (f"：{', '.join(names)}" if names else "")
+    if d.get("week") and d.get("sections"):
+        return f"周报：{d.get('week')} · {len(d.get('sections') or [])} 个分区"
     if d.get("sections"):
         types = [x.get("subject_type") for x in d["sections"] if isinstance(x, dict)]
         return f"口味报告：{len(d['sections'])} 个媒介分区（{', '.join(str(x) for x in types[:5])}）"
@@ -356,6 +358,7 @@ _PANEL_TOOLS = {
     "build_aspect_profile",
     "plan_watch_copilot",
     "build_taste_report",
+    "build_weekly_digest",
     "get_user_memory",
     "remember_user_preference",
     "forget_user_memory",
@@ -538,6 +541,29 @@ def _safe_watch_copilot_payload(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _safe_weekly_digest_payload(data: dict[str, Any]) -> dict[str, Any]:
+    sections = []
+    for section in _trim_dicts(data.get("sections"), limit=5):
+        copied = dict(section)
+        items = []
+        for item in _trim_dicts(copied.get("items"), limit=8):
+            item_copy = dict(item)
+            item_copy["why"] = _trim_strings(item_copy.get("why"), limit=5, text_limit=140)
+            item_copy["tags"] = _trim_strings(item_copy.get("tags"), limit=8, text_limit=40)
+            items.append(item_copy)
+        copied["items"] = items
+        copied["notes"] = _trim_strings(copied.get("notes"), limit=4, text_limit=140)
+        sections.append(copied)
+    return {
+        "username": data.get("username"),
+        "week": data.get("week"),
+        "profile_tags": _trim_strings(data.get("profile_tags"), limit=12, text_limit=40),
+        "sections": sections,
+        "next_actions": _trim_strings(data.get("next_actions"), limit=8, text_limit=160),
+        "caveats": _trim_strings(data.get("caveats"), limit=8, text_limit=180),
+    }
+
+
 def _safe_taste_report_payload(data: dict[str, Any]) -> dict[str, Any]:
     sections = []
     for section in _trim_dicts(data.get("sections"), limit=5):
@@ -621,6 +647,8 @@ def panel_data_from_payload(name: str, payload: dict[str, Any] | None) -> dict[s
         return _safe_aspect_profile_payload(data)
     if name == "plan_watch_copilot":
         return _safe_watch_copilot_payload(data)
+    if name == "build_weekly_digest":
+        return _safe_weekly_digest_payload(data)
     if name == "build_taste_report":
         return _safe_taste_report_payload(data)
     if name == "explore_voice_network":

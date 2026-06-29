@@ -28,6 +28,8 @@ from ..review.tool import (
 
 _BILI_SEARCH_API = "https://api.bilibili.com/x/web-interface/search/type"
 _BILI_REPLY_API = "https://api.bilibili.com/x/v2/reply"
+_BILI_PAGELIST_API = "https://api.bilibili.com/x/player/pagelist"
+_BILI_PLAYER_API = "https://api.bilibili.com/x/player/v2"
 _BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
 
 
@@ -60,6 +62,12 @@ class BiliVideoCommentsArgs(BaseModel):
     aid: int = Field(..., description="B站 av/aid；可先用 search_bilibili_guide_videos 获得")
     query: str | None = Field(None, description="可选语义关键词；当前只做轻量词法优先，不做全文 RAG")
     limit: int = Field(20, ge=1, le=50)
+
+
+class BiliVideoSubtitleArgs(BaseModel):
+    aid: int | None = Field(None, description="B站 av/aid；aid 或 bvid 至少传一个")
+    bvid: str | None = Field(None, description="B站 BV 号；aid 或 bvid 至少传一个")
+    max_segments: int = Field(60, ge=10, le=160, description="最多返回多少条字幕片段")
 
 
 class GuideVideoLink(BaseModel):
@@ -100,6 +108,23 @@ class BiliVideoCommentsResult(BaseModel):
     aspect_summary: list[AspectSummary] = Field(default_factory=list)
     opinion_summary: list[str] = Field(default_factory=list)
     source_url: str
+    caveats: list[str] = Field(default_factory=list)
+
+
+class BiliSubtitleSegment(BaseModel):
+    start: float | None = None
+    end: float | None = None
+    text: str
+
+
+class BiliVideoSubtitleResult(BaseModel):
+    aid: int | None = None
+    bvid: str | None = None
+    cid: int | None = None
+    subtitle_url: str = ""
+    count: int = 0
+    segments: list[BiliSubtitleSegment] = Field(default_factory=list)
+    rough_summary: list[str] = Field(default_factory=list)
     caveats: list[str] = Field(default_factory=list)
 
 
@@ -308,6 +333,63 @@ def _summarize_aspect_opinions(opinions: list[AspectOpinion]) -> list[str]:
     return _format_aspect_summary(_build_aspect_summary(opinions))
 
 
+@scached()
+def _sync_bili_pagelist(aid: int | None, bvid: str | None) -> dict:
+    params = {"aid": aid} if aid else {"bvid": bvid}
+    r = httpx.get(
+        _BILI_PAGELIST_API,
+        params=params,
+        headers={"User-Agent": _BROWSER_UA, "Referer": "https://www.bilibili.com/"},
+        timeout=settings.http_timeout,
+    )
+    r.raise_for_status()
+    return _bili_json(r.json())
+
+
+@scached()
+def _sync_bili_player(aid: int | None, bvid: str | None, cid: int) -> dict:
+    params = {"cid": cid}
+    if aid:
+        params["aid"] = aid
+    if bvid:
+        params["bvid"] = bvid
+    r = httpx.get(
+        _BILI_PLAYER_API,
+        params=params,
+        headers={"User-Agent": _BROWSER_UA, "Referer": "https://www.bilibili.com/"},
+        timeout=settings.http_timeout,
+    )
+    r.raise_for_status()
+    return _bili_json(r.json())
+
+
+@scached()
+def _sync_subtitle_json(url: str) -> dict:
+    full = "https:" + url if url.startswith("//") else url
+    r = httpx.get(
+        full,
+        headers={"User-Agent": _BROWSER_UA, "Referer": "https://www.bilibili.com/"},
+        timeout=settings.http_timeout,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def _rough_subtitle_summary(segments: list[BiliSubtitleSegment]) -> list[str]:
+    texts = [s.text for s in segments if s.text.strip()]
+    if not texts:
+        return []
+    total = len(texts)
+    picks = [0, total // 3, (total * 2) // 3]
+    out = []
+    for idx in picks:
+        window = " ".join(texts[idx : min(idx + 4, total)])
+        window = re.sub(r"\s+", " ", window).strip()
+        if window and window not in out:
+            out.append(window[:180])
+    return out
+
+
 class FindVideosTool(Tool):
     name = "find_related_videos"
     description = (
@@ -479,5 +561,78 @@ class GetBiliVideoCommentsTool(Tool):
         )
 
 
+class GetBiliVideoSubtitlesTool(Tool):
+    name = "get_bilibili_video_subtitles"
+    description = (
+        "读取 B站公开视频的公开字幕/ASR 片段，用于导视/漫评视频内容摘要。"
+        "如果视频没有公开字幕或被风控，会明确失败；字幕是话语源，不是事实源。"
+    )
+    args_model = BiliVideoSubtitleArgs
+    result_model = BiliVideoSubtitleResult
+
+    async def run(self, args: BiliVideoSubtitleArgs) -> ToolResult[BiliVideoSubtitleResult]:
+        if args.aid is None and not args.bvid:
+            return ToolResult(ok=False, error="aid 或 bvid 至少传一个")
+        try:
+            pages = await asyncio.to_thread(_sync_bili_pagelist, args.aid, args.bvid)
+            first = ((pages.get("data") or []) or [{}])[0]
+            cid = first.get("cid")
+            if not cid:
+                return ToolResult(ok=False, error="未能从 B站 pagelist 获取 cid")
+            player = await asyncio.to_thread(_sync_bili_player, args.aid, args.bvid, int(cid))
+        except (httpx.HTTPError, httpx.TransportError, ValueError) as e:
+            return ToolResult(ok=False, error=f"B站字幕元数据读取失败：{type(e).__name__}")
+        subtitles = (((player.get("data") or {}).get("subtitle") or {}).get("subtitles") or [])
+        if not subtitles:
+            return ToolResult(
+                ok=False,
+                error="该视频未暴露公开字幕/ASR；可回退到标题、简介或评论区摘要。",
+            )
+        sub = subtitles[0]
+        url = sub.get("subtitle_url") or ""
+        if not url:
+            return ToolResult(ok=False, error="字幕条目缺少 subtitle_url")
+        try:
+            payload = await asyncio.to_thread(_sync_subtitle_json, url)
+        except (httpx.HTTPError, httpx.TransportError, ValueError) as e:
+            return ToolResult(ok=False, error=f"B站字幕正文读取失败：{type(e).__name__}")
+        segments = []
+        for raw in (payload.get("body") or [])[: args.max_segments]:
+            text_value = str(raw.get("content") or "").strip()
+            if text_value:
+                segments.append(
+                    BiliSubtitleSegment(
+                        start=raw.get("from"),
+                        end=raw.get("to"),
+                        text=text_value[:220],
+                    )
+                )
+        video_id = args.bvid or (f"av{args.aid}" if args.aid else "")
+        source_url = f"https://www.bilibili.com/video/{video_id}" if video_id else "https://www.bilibili.com/"
+        return ToolResult(
+            ok=True,
+            data=BiliVideoSubtitleResult(
+                aid=args.aid,
+                bvid=args.bvid,
+                cid=int(cid),
+                subtitle_url=url,
+                count=len(segments),
+                segments=segments,
+                rough_summary=_rough_subtitle_summary(segments),
+                caveats=[
+                    "B站字幕/ASR 是视频话语源，不是 canonical 事实源。",
+                    "字幕可能不完整、自动识别错误或包含剧透；回答时需标注来源和风险。",
+                ],
+            ),
+            sources=[Citation(title=f"Bilibili 字幕 {video_id}", url=source_url, source="bilibili")],
+        )
+
+
 def build_video_tools() -> list[Tool]:
-    return [FindVideosTool(), FindGuideVideosTool(), SearchBiliGuideVideosTool(), GetBiliVideoCommentsTool()]
+    return [
+        FindVideosTool(),
+        FindGuideVideosTool(),
+        SearchBiliGuideVideosTool(),
+        GetBiliVideoCommentsTool(),
+        GetBiliVideoSubtitlesTool(),
+    ]

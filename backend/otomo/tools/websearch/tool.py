@@ -6,6 +6,8 @@ provider 可换（Tavily/Exa/Serper），无 key 时优雅报"未配置"。结�
 """
 from __future__ import annotations
 
+import re
+from html.parser import HTMLParser
 from typing import Any
 
 import httpx
@@ -37,6 +39,77 @@ class WebSearchResult(BaseModel):
     query: str
     provider: str
     hits: list[WebHit] = Field(default_factory=list)
+
+
+class UrlSummaryArgs(BaseModel):
+    url: str = Field(..., description="要按需读取的公开网页 URL")
+    query: str | None = Field(None, description="可选关注点/关键词，用于优先挑相关片段")
+    max_chars: int = Field(1800, ge=400, le=5000, description="最多返回多少字符的清洗正文")
+
+
+class UrlSummaryResult(BaseModel):
+    url: str
+    title: str = ""
+    source_role: str = "discourse"
+    text: str = ""
+    highlights: list[str] = Field(default_factory=list)
+    caveats: list[str] = Field(default_factory=list)
+
+
+class _TextExtractor(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.skip = False
+        self.title_mode = False
+        self.title_parts: list[str] = []
+        self.parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in {"script", "style", "noscript", "svg", "canvas"}:
+            self.skip = True
+        if tag == "title":
+            self.title_mode = True
+        if tag in {"p", "br", "div", "li", "h1", "h2", "h3"}:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in {"script", "style", "noscript", "svg", "canvas"}:
+            self.skip = False
+        if tag == "title":
+            self.title_mode = False
+        if tag in {"p", "li", "h1", "h2", "h3"}:
+            self.parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if self.skip:
+            return
+        text = re.sub(r"\s+", " ", data).strip()
+        if not text:
+            return
+        if self.title_mode:
+            self.title_parts.append(text)
+        else:
+            self.parts.append(text)
+
+    @property
+    def title(self) -> str:
+        return " ".join(self.title_parts).strip()
+
+    @property
+    def text(self) -> str:
+        raw = " ".join(self.parts)
+        raw = re.sub(r"\s+", " ", raw)
+        return raw.strip()
+
+
+def _highlights(text: str, query: str | None, limit: int = 6) -> list[str]:
+    if not text:
+        return []
+    sentences = [s.strip() for s in re.split(r"[。！？!?；;\n]+", text) if len(s.strip()) >= 8]
+    if query:
+        terms = [t for t in re.split(r"\s+", query) if t]
+        sentences.sort(key=lambda s: 0 if any(t in s for t in terms) else 1)
+    return [s[:220] for s in sentences[:limit]]
 
 
 async def _search(provider: str, api_key: str, query: str, n: int, timeout: float) -> list[dict]:
@@ -128,5 +201,52 @@ class WebSearchTool(Tool):
         return ToolResult(ok=False, error=f"全网搜索均无结果或失败（{last}）")
 
 
+class FetchUrlSummaryTool(Tool):
+    name = "fetch_url_summary"
+    description = (
+        "按需读取单个公开网页 URL，返回标题、清洗正文片段和 highlights。"
+        "用于用户给具体帖子/专栏/论坛楼/网页时做摘要；这是 discourse source，不是事实源。"
+    )
+    args_model = UrlSummaryArgs
+    result_model = UrlSummaryResult
+
+    async def run(self, args: UrlSummaryArgs) -> ToolResult[UrlSummaryResult]:
+        if not args.url.startswith(("http://", "https://")):
+            return ToolResult(ok=False, error="只支持 http/https URL")
+        try:
+            async with httpx.AsyncClient(
+                timeout=settings.http_timeout,
+                follow_redirects=True,
+                headers={"User-Agent": settings.bangumi_user_agent},
+            ) as c:
+                r = await c.get(args.url)
+                r.raise_for_status()
+                content_type = r.headers.get("content-type", "")
+                if "text/html" not in content_type and "text/plain" not in content_type:
+                    return ToolResult(ok=False, error=f"暂不摘要该 content-type：{content_type}")
+                raw = r.text
+        except Exception as e:  # noqa: BLE001
+            return ToolResult(ok=False, error=f"URL 读取失败：{type(e).__name__}")
+        parser = _TextExtractor()
+        parser.feed(raw)
+        clean = parser.text[: args.max_chars]
+        title = parser.title or args.url
+        result = UrlSummaryResult(
+            url=str(r.url),
+            title=title[:120],
+            text=clean,
+            highlights=_highlights(clean, args.query),
+            caveats=[
+                "按需 URL 摘要是网页话语源，不是 canonical 事实源。",
+                "只读取单页公开内容，不做站点级爬取；登录墙/反爬/动态渲染页面可能缺失正文。",
+            ],
+        )
+        return ToolResult(
+            ok=True,
+            data=result,
+            sources=[Citation(title=result.title, url=result.url, source="web")],
+        )
+
+
 def build_websearch_tools() -> list[Tool]:
-    return [WebSearchTool()]
+    return [WebSearchTool(), FetchUrlSummaryTool()]

@@ -524,6 +524,50 @@ function WatchCopilotPanel({ data }: { data: AnyRecord }) {
   );
 }
 
+function WeeklyDigestPanel({ data }: { data: AnyRecord }) {
+  const sections = list(data.sections);
+  return (
+    <Panel title={`本周周报 · ${text(data.username)}`} subtitle={text(data.week, "本周")}>
+      <div className="evidence-row">
+        {list<string>(data.profile_tags).slice(0, 10).map((tag) => <Badge key={tag} tone="dim">{tag}</Badge>)}
+      </div>
+      {sections.map((section, i) => (
+        <div key={`${section.title}-${i}`}>
+          <div className="section-title">{text(section.title)}</div>
+          <div className="rec-grid">
+            {list(section.items).slice(0, 6).map((item, idx) => (
+              <a className="rec-card" href={`https://bgm.tv/subject/${item.id}`} target="_blank" rel="noreferrer" key={`${item.id}-${idx}`}>
+                {item.image ? <img src={item.image} alt="" /> : <div className="rec-noimg" />}
+                <div className="rec-body">
+                  <div className="card-title">{text(item.name)}</div>
+                  <div className="card-meta">
+                    {text(item.status)} · {text(item.action)} · BGM {item.bangumi_score ?? "暂无"}
+                  </div>
+                  <div className="compact-list inline">
+                    {list<string>(item.why).slice(0, 3).map((why, j) => <span key={j}>{why}</span>)}
+                  </div>
+                </div>
+              </a>
+            ))}
+          </div>
+          {list<string>(section.notes).length > 0 && (
+            <div className="caveats">{list<string>(section.notes).map((n, j) => <span key={j}>{n}</span>)}</div>
+          )}
+        </div>
+      ))}
+      {list<string>(data.next_actions).length > 0 && (
+        <>
+          <div className="section-title">下一步</div>
+          <div className="compact-list">{list<string>(data.next_actions).map((n, i) => <span key={i}>{n}</span>)}</div>
+        </>
+      )}
+      {list<string>(data.caveats).length > 0 && (
+        <div className="caveats">{list<string>(data.caveats).map((n, i) => <span key={i}>{n}</span>)}</div>
+      )}
+    </Panel>
+  );
+}
+
 function _wrapText(ctx: CanvasRenderingContext2D, content: string, x: number, y: number, maxW: number, lh: number): number {
   let line = "";
   for (const ch of String(content)) {
@@ -1017,6 +1061,7 @@ export function EvidencePanels({
   const recommend = list(evidence.recommend_subjects);
   const aspect = list(evidence.build_aspect_profile);
   const watchCopilot = list(evidence.plan_watch_copilot);
+  const weeklyDigest = list(evidence.build_weekly_digest);
   const tasteReport = list(evidence.build_taste_report);
   const explorer = list(evidence.explore_voice_network);
   const episodeRadar = list(evidence.episode_buzz_radar);
@@ -1035,7 +1080,7 @@ export function EvidencePanels({
   ];
   if (
     !review.length && !taste.length && !season.length && !recommend.length && !memory.length
-    && !aspect.length && !watchCopilot.length && !tasteReport.length && !explorer.length
+    && !aspect.length && !watchCopilot.length && !weeklyDigest.length && !tasteReport.length && !explorer.length
     && !episodeRadar.length && !claimChecks.length
   ) return null;
   return (
@@ -1058,6 +1103,7 @@ export function EvidencePanels({
       {explorer.map((data, i) => <ExplorerPanel data={data} key={`explorer-${i}`} />)}
       {episodeRadar.map((data, i) => <EpisodeRadarPanel data={data} key={`ep-radar-${i}`} />)}
       {watchCopilot.map((data, i) => <WatchCopilotPanel data={data} key={`watch-copilot-${i}`} />)}
+      {weeklyDigest.map((data, i) => <WeeklyDigestPanel data={data} key={`weekly-${i}`} />)}
       {recommend.map((data, i) => <RecommendPanel data={data} onCritique={onCritique} key={`recommend-${i}`} />)}
     </div>
   );
