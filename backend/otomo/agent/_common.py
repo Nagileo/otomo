@@ -109,6 +109,20 @@ def _memory_prompt_lines(memory: dict[str, Any]) -> list[str]:
             lines.append("- 已知观看进度：" + "、".join(parts) + "；涉及这些作品时按进度防剧透。")
     if recent:
         lines.append("- 近期推荐反馈：" + "；".join(recent) + "。")
+    watch_plan = memory.get("watch_plan") or []
+    if isinstance(watch_plan, list) and watch_plan:
+        plan_bits = []
+        for item in watch_plan[:8]:
+            if isinstance(item, dict):
+                name = item.get("name") or item.get("subject_id")
+                status = item.get("status") or "plan"
+                if name:
+                    plan_bits.append(f"{name}:{status}")
+        if plan_bits:
+            lines.append("- 本地计划板：" + "；".join(plan_bits) + "。")
+    pending_write_actions = memory.get("pending_write_actions") or []
+    if isinstance(pending_write_actions, list) and pending_write_actions:
+        lines.append("- 有待用户确认的 Bangumi 写回动作；不要声称已执行，等待前端确认。")
     profiles = memory.get("profile_snapshot") or {}
     if isinstance(profiles, dict) and profiles:
         chunks = []
@@ -346,12 +360,24 @@ _PANEL_TOOLS = {
     "remember_user_preference",
     "forget_user_memory",
     "record_recommendation_feedback",
+    "prepare_bangumi_write_action",
+    "cancel_bangumi_write_action",
+    "upsert_watch_plan_item",
+    "list_watch_plan",
+    "record_decision_log",
+    "save_recommendation_list",
 }
 _MEMORY_TOOLS = {
     "get_user_memory",
     "remember_user_preference",
     "forget_user_memory",
     "record_recommendation_feedback",
+    "prepare_bangumi_write_action",
+    "cancel_bangumi_write_action",
+    "upsert_watch_plan_item",
+    "list_watch_plan",
+    "record_decision_log",
+    "save_recommendation_list",
 }
 _MEMORY_STATE_TOOLS = _MEMORY_TOOLS | {"build_aspect_profile", "build_taste_report"}
 
@@ -549,6 +575,10 @@ def _safe_memory_payload(data: dict[str, Any]) -> dict[str, Any]:
         "recent_feedback": _trim_dicts(memory.get("recent_feedback"), limit=10),
         "profile_snapshot": memory.get("profile_snapshot") if isinstance(memory.get("profile_snapshot"), dict) else {},
         "aspect_profiles": memory.get("aspect_profiles") if isinstance(memory.get("aspect_profiles"), dict) else {},
+        "pending_write_actions": _trim_dicts(memory.get("pending_write_actions"), limit=8),
+        "recent_decisions": _trim_dicts(memory.get("recent_decisions"), limit=10),
+        "watch_plan": _trim_dicts(memory.get("watch_plan"), limit=20),
+        "recommendation_lists": _trim_dicts(memory.get("recommendation_lists"), limit=6),
         "updated_at": memory.get("updated_at"),
     }
 

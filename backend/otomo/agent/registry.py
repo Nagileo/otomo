@@ -21,14 +21,20 @@ class ToolRegistry:
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)
 
-    def openai_tools(self) -> list[dict[str, Any]]:
-        return [t.openai_schema() for t in self._tools.values()]
+    def openai_tools(self, include_write: bool = False) -> list[dict[str, Any]]:
+        return [
+            t.openai_schema()
+            for t in self._tools.values()
+            if include_write or not getattr(t, "is_write", False)
+        ]
 
-    async def dispatch(self, name: str, arguments_json: str) -> ToolResult:
+    async def dispatch(self, name: str, arguments_json: str, *, allow_write: bool = False) -> ToolResult:
         """解析 LLM 给的 JSON 参数 → 校验 → 执行。任何异常都收敛成 ok=False 的 ToolResult。"""
         tool = self._tools.get(name)
         if tool is None:
             return ToolResult(ok=False, error=f"unknown tool: {name}")
+        if getattr(tool, "is_write", False) and not allow_write:
+            return ToolResult(ok=False, error=f"write tool requires explicit user confirmation: {name}")
         try:
             raw = json.loads(arguments_json or "{}")
         except json.JSONDecodeError as e:

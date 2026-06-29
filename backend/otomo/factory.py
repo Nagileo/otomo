@@ -33,6 +33,7 @@ from .tools.vndb import build_vndb_tools
 from .tools.watchorder import build_watchorder_tools
 from .tools.websearch import build_websearch_tools
 from .tools.wiki import build_wiki_tools
+from .tools.writeback import build_writeback_tools
 from .tools.yuc import build_yuc_tools
 
 RunnerKind = Literal["react", "plan", "adaptive", "langgraph"]
@@ -69,6 +70,8 @@ def build_registry(
     for tool in build_anilist_tools():
         registry.register(tool)
     for tool in build_memory_tools(client, shared_ltm):
+        registry.register(tool)
+    for tool in build_writeback_tools(client, shared_ltm):
         registry.register(tool)
     for tool in build_aspect_profile_tools(client, shared_ltm):
         registry.register(tool)

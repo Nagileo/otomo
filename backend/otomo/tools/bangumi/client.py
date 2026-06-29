@@ -37,6 +37,9 @@ class _TTLCache:
     def set(self, key: str, val: Any) -> None:
         self._store[key] = (time.monotonic(), val)
 
+    def clear(self) -> None:
+        self._store.clear()
+
 
 class BangumiClient:
     def __init__(
@@ -93,6 +96,8 @@ class BangumiClient:
                     await asyncio.sleep(0.5 * (attempt + 1))
                     continue
                 r.raise_for_status()
+                if r.status_code == 204 or not r.content:
+                    return {}
                 return r.json()
             except httpx.TransportError as e:  # 连接/超时类
                 last_exc = e
@@ -114,6 +119,18 @@ class BangumiClient:
             return cached
         data = await self._request_json("POST", path, params=params, json_body=json_body)
         self._cache.set(key, data)
+        return data
+
+    async def _mutate(
+        self,
+        method: str,
+        path: str,
+        json_body: dict[str, Any],
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        """Uncached mutation helper. Clears local read cache after successful writes."""
+        data = await self._request_json(method, path, params=params, json_body=json_body)
+        self._cache.clear()
         return data
 
     # ---- v0 端点 ---- #
@@ -187,6 +204,28 @@ class BangumiClient:
     async def get_me(self) -> Any:
         """用 token 取当前用户信息（含 username）。需要 BANGUMI_TOKEN。"""
         return await self._get("/v0/me")
+
+    async def get_user_collection(self, username: str, subject_id: int) -> Any:
+        """获取用户单个条目收藏。未收藏/私有不可见时上抛 httpx.HTTPStatusError。"""
+        return await self._get(f"/v0/users/{username}/collections/{subject_id}")
+
+    async def set_my_collection(self, subject_id: int, json_body: dict[str, Any]) -> Any:
+        """新增或修改当前 token 用户的单个条目收藏。需要 write:collection scope."""
+        return await self._mutate("POST", f"/v0/users/-/collections/{subject_id}", json_body)
+
+    async def patch_my_collection(self, subject_id: int, json_body: dict[str, Any]) -> Any:
+        """修改当前 token 用户已有条目收藏。需要 write:collection scope."""
+        return await self._mutate("PATCH", f"/v0/users/-/collections/{subject_id}", json_body)
+
+    async def set_my_episode_collection(self, episode_id: int, ep_type: int) -> Any:
+        """更新当前 token 用户单集收藏状态。需要该条目已收藏和 write:collection scope."""
+        return await self._mutate(
+            "PUT", f"/v0/users/-/collections/-/episodes/{episode_id}", {"type": ep_type}
+        )
+
+    async def get_my_episode_collection(self, episode_id: int) -> Any:
+        """获取当前 token 用户单集收藏状态。"""
+        return await self._get(f"/v0/users/-/collections/-/episodes/{episode_id}")
 
     async def get_user_collections(
         self, username: str, subject_type: int = 2, collection_type: int | None = 2,

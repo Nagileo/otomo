@@ -5,7 +5,8 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Literal
+import json
+from typing import Any, AsyncIterator, Literal
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -61,9 +62,57 @@ class ChatRequest(BaseModel):
     progress_episode: int | None = None
 
 
+class ActionRequest(BaseModel):
+    action_id: str
+    username: str | None = None
+    reason: str = ""
+
+
+class UndoActionRequest(BaseModel):
+    action_id: str | None = None
+    username: str | None = None
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+async def _dispatch_action(app: FastAPI, tool_name: str, payload: dict[str, Any], *, allow_write: bool) -> dict[str, Any]:
+    result = await app.state.registry.dispatch(
+        tool_name, json.dumps(payload, ensure_ascii=False), allow_write=allow_write
+    )
+    return result.model_dump(mode="json", exclude_none=True)
+
+
+@app.post("/actions/confirm")
+async def confirm_action(req: ActionRequest) -> dict[str, Any]:
+    return await _dispatch_action(
+        app,
+        "execute_bangumi_write_action",
+        {"username": req.username, "action_id": req.action_id, "confirmed": True},
+        allow_write=True,
+    )
+
+
+@app.post("/actions/cancel")
+async def cancel_action(req: ActionRequest) -> dict[str, Any]:
+    return await _dispatch_action(
+        app,
+        "cancel_bangumi_write_action",
+        {"username": req.username, "action_id": req.action_id, "reason": req.reason},
+        allow_write=False,
+    )
+
+
+@app.post("/actions/undo")
+async def undo_action(req: UndoActionRequest) -> dict[str, Any]:
+    return await _dispatch_action(
+        app,
+        "undo_bangumi_write_action",
+        {"username": req.username, "action_id": req.action_id, "confirmed": True},
+        allow_write=True,
+    )
 
 
 async def _attach_memory_state(app: FastAPI, state: AgentState | None) -> None:
