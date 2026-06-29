@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     llm_base_url: str = "https://api.deepseek.com"
     llm_api_key: str = ""
     llm_model: str = "deepseek-v4-flash"
+    vlm_base_url: str = ""
+    vlm_api_key: str = ""
+    vlm_model: str = ""
 
     # ---- Web search（全网兜底，provider 可换；不填 key 则 web_search 工具优雅报"未配置"）----
     # 分级：默认用 provider(免费优先 tavily)；高质量需求升级到 quality_provider(serper便宜/bocha中文最佳)。

@@ -568,6 +568,44 @@ function WeeklyDigestPanel({ data }: { data: AnyRecord }) {
   );
 }
 
+function ScreenshotIdentifyPanel({ data }: { data: AnyRecord }) {
+  const candidates = list(data.candidates);
+  return (
+    <Panel title="截图识别候选" subtitle={text(data.question, "")}>
+      <div className="rec-grid">
+        {candidates.map((item, i) => (
+          <a
+            className="rec-card"
+            href={item.bangumi_id ? `https://bgm.tv/subject/${item.bangumi_id}` : "#"}
+            target="_blank"
+            rel="noreferrer"
+            key={`${item.title}-${i}`}
+          >
+            {item.image ? <img src={item.image} alt="" /> : <div className="rec-noimg" />}
+            <div className="rec-body">
+              <div className="card-title">{text(item.bangumi_name || item.title)}</div>
+              <div className="card-meta">
+                VLM {pct(item.confidence)} · BGM {item.bangumi_score ?? "未对齐"}
+              </div>
+              <p className="card-note">{text(item.reason || item.match_note, "")}</p>
+              {item.match_note && <Badge tone={item.bangumi_id ? "good" : "warn"}>{text(item.match_note)}</Badge>}
+            </div>
+          </a>
+        ))}
+      </div>
+      {data.raw_vlm_answer && (
+        <>
+          <div className="section-title">VLM 原始摘要</div>
+          <p className="evidence-copy">{text(data.raw_vlm_answer)}</p>
+        </>
+      )}
+      {list<string>(data.caveats).length > 0 && (
+        <div className="caveats">{list<string>(data.caveats).map((n, i) => <span key={i}>{n}</span>)}</div>
+      )}
+    </Panel>
+  );
+}
+
 function _wrapText(ctx: CanvasRenderingContext2D, content: string, x: number, y: number, maxW: number, lh: number): number {
   let line = "";
   for (const ch of String(content)) {
@@ -1065,6 +1103,7 @@ export function EvidencePanels({
   const tasteReport = list(evidence.build_taste_report);
   const explorer = list(evidence.explore_voice_network);
   const episodeRadar = list(evidence.episode_buzz_radar);
+  const screenshot = list(evidence.identify_acgn_screenshot);
   const claimChecks = list(evidence.claim_check);
   const memory = [
     ...list(evidence.get_user_memory),
@@ -1081,7 +1120,7 @@ export function EvidencePanels({
   if (
     !review.length && !taste.length && !season.length && !recommend.length && !memory.length
     && !aspect.length && !watchCopilot.length && !weeklyDigest.length && !tasteReport.length && !explorer.length
-    && !episodeRadar.length && !claimChecks.length
+    && !episodeRadar.length && !screenshot.length && !claimChecks.length
   ) return null;
   return (
     <div className="evidence-stack">
@@ -1102,6 +1141,7 @@ export function EvidencePanels({
       {season.map((data, i) => <SeasonGuidePanel data={data} key={`season-${i}`} />)}
       {explorer.map((data, i) => <ExplorerPanel data={data} key={`explorer-${i}`} />)}
       {episodeRadar.map((data, i) => <EpisodeRadarPanel data={data} key={`ep-radar-${i}`} />)}
+      {screenshot.map((data, i) => <ScreenshotIdentifyPanel data={data} key={`screenshot-${i}`} />)}
       {watchCopilot.map((data, i) => <WatchCopilotPanel data={data} key={`watch-copilot-${i}`} />)}
       {weeklyDigest.map((data, i) => <WeeklyDigestPanel data={data} key={`weekly-${i}`} />)}
       {recommend.map((data, i) => <RecommendPanel data={data} onCritique={onCritique} key={`recommend-${i}`} />)}

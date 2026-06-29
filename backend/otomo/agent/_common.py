@@ -327,6 +327,9 @@ def summarize(result: ToolResult) -> str:
             label = x.get("author") or x.get("video_title") or "B站导视"
             parts.append(f"{label}：{summary}" if summary else str(label))
         return f"{d.get('count', 0)} 部；导视评论 {len(digests)} 个视频；" + " / ".join(parts)
+    if d.get("candidates") and d.get("raw_vlm_answer") is not None:
+        names = [x.get("bangumi_name") or x.get("title") for x in d.get("candidates", [])[:4] if isinstance(x, dict)]
+        return f"截图识别候选 {len(d.get('candidates') or [])} 个" + (f"：{', '.join(str(x) for x in names if x)}" if names else "")
     if d.get("opinion_summary"):
         joined = "；".join(str(x) for x in d["opinion_summary"][:3])
         return f"{d.get('count', 0)} 条；{joined}"
@@ -355,6 +358,7 @@ _PANEL_TOOLS = {
     "recommend_subjects",
     "explore_voice_network",
     "episode_buzz_radar",
+    "identify_acgn_screenshot",
     "build_aspect_profile",
     "plan_watch_copilot",
     "build_taste_report",
@@ -628,6 +632,21 @@ def _safe_episode_radar_payload(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _safe_multimodal_payload(data: dict[str, Any]) -> dict[str, Any]:
+    candidates = []
+    for item in _trim_dicts(data.get("candidates"), limit=10):
+        copied = dict(item)
+        copied["reason"] = _trim_text(copied.get("reason"), 180)
+        copied["match_note"] = _trim_text(copied.get("match_note"), 160)
+        candidates.append(copied)
+    return {
+        "question": data.get("question"),
+        "raw_vlm_answer": _trim_text(data.get("raw_vlm_answer"), 600),
+        "candidates": candidates,
+        "caveats": _trim_strings(data.get("caveats"), limit=6, text_limit=180),
+    }
+
+
 def panel_data_from_payload(name: str, payload: dict[str, Any] | None) -> dict[str, Any] | None:
     """Return UI-safe structured payload for tools that have dedicated evidence panels."""
     if name not in _PANEL_TOOLS or not isinstance(payload, dict):
@@ -655,6 +674,8 @@ def panel_data_from_payload(name: str, payload: dict[str, Any] | None) -> dict[s
         return _safe_explorer_payload(data)
     if name == "episode_buzz_radar":
         return _safe_episode_radar_payload(data)
+    if name == "identify_acgn_screenshot":
+        return _safe_multimodal_payload(data)
     if name in _MEMORY_TOOLS:
         return _safe_memory_payload(data)
     return None
