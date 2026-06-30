@@ -6,6 +6,8 @@ from otomo.agent._common import runtime_state_prompt
 from otomo.agent.contracts import AgentState
 from otomo.tools.multimodal import tool as multimodal_tool
 from otomo.tools.multimodal.tool import (
+    AnalyzeVideoFramesArgs,
+    AnalyzeVideoFramesTool,
     ExtractVisualTextArgs,
     ExtractVisualTextTool,
     ImageSourceSearchArgs,
@@ -204,6 +206,44 @@ def test_image_source_search_merges_trace_and_saucenao(monkeypatch):
     assert res.data
     assert {m.engine for m in res.data.matches} == {"trace.moe", "saucenao"}
     assert any(link["source"] == "pixiv" for link in res.data.navigation_links)
+
+
+def test_analyze_video_frames_uses_frame_images(monkeypatch):
+    from otomo import config
+
+    monkeypatch.setattr(config.settings, "vlm_model", "fake-vlm")
+
+    async def fake_vlm(_image_url: str, _system_prompt: str, _question: str):
+        return '{"markdown_text":"本月推荐：摇曳露营△","structured_items":[{"type":"work","name":"摇曳露营△","value":"推荐","note":"PPT"}],"visual_tags":["PPT","日常"],"confidence":0.66}'
+
+    async def fake_trace(_image_url: str):
+        return [
+            {
+                "anilist": {"id": 98444, "title": {"native": "摇曳露营△"}},
+                "episode": 2,
+                "from": 34.0,
+                "similarity": 0.9,
+                "image": "https://trace.example/frame.jpg",
+            }
+        ]
+
+    monkeypatch.setattr(multimodal_tool, "_call_vlm_with_prompt", fake_vlm)
+    monkeypatch.setattr(multimodal_tool, "_trace_moe_search", fake_trace)
+    tool = AnalyzeVideoFramesTool(FakeBangumiClient())
+    res = asyncio.run(
+        tool.run(
+            AnalyzeVideoFramesArgs(
+                frame_image_urls=["data:image/png;base64,iVBORw0KGgo="],
+                purpose="both",
+                mode="ppt",
+            )
+        )
+    )
+    assert res.ok
+    assert res.data
+    assert res.data.frame_count == 1
+    assert "摇曳露营" in res.data.merged_ocr_text
+    assert res.data.candidate_subjects[0].bangumi_id == 207195
 
 
 def test_upload_store_resolves_upload_uri(tmp_path):

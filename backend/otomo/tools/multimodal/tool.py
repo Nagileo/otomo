@@ -11,8 +11,11 @@ import base64
 import hashlib
 import json
 import re
+import shutil
+import tempfile
 from typing import Any
 from typing import Literal
+from pathlib import Path
 
 import httpx
 from openai import AsyncOpenAI
@@ -159,6 +162,10 @@ def _cache_key(prefix: str, value: str) -> str:
         except Exception:  # noqa: BLE001
             pass
     return f"{prefix}:url:{hashlib.sha256(value.encode('utf-8')).hexdigest()}"
+
+
+def _data_url_from_bytes(payload: bytes, mime_type: str = "image/jpeg") -> str:
+    return f"data:{mime_type};base64,{base64.b64encode(payload).decode('ascii')}"
 
 
 async def _trace_moe_search(image_url: str) -> list[dict[str, Any]]:
@@ -877,6 +884,59 @@ async def _saucenao_search(image_url: str, limit: int) -> list[dict[str, Any]]:
     return result
 
 
+async def _extract_video_frames(
+    *,
+    video_url: str = "",
+    local_video_path: str = "",
+    max_frames: int = 6,
+    sample_interval_seconds: int = 30,
+) -> list[dict[str, Any]]:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("未找到 ffmpeg；请安装 ffmpeg 或直接传 frame_image_urls")
+    source = local_video_path.strip() or video_url.strip()
+    if not source:
+        return []
+    if local_video_path:
+        path = Path(local_video_path).expanduser()
+        if not path.exists() or not path.is_file():
+            raise FileNotFoundError(f"video not found: {local_video_path}")
+        source = str(path)
+    interval = max(1, int(sample_interval_seconds))
+    max_frames = max(1, min(int(max_frames), 12))
+    with tempfile.TemporaryDirectory(prefix="otomo_frames_") as tmp:
+        out_pattern = str(Path(tmp) / "frame_%03d.jpg")
+        proc = await asyncio.create_subprocess_exec(
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            source,
+            "-vf",
+            f"fps=1/{interval}",
+            "-frames:v",
+            str(max_frames),
+            out_pattern,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise RuntimeError((stderr or b"ffmpeg failed").decode("utf-8", errors="ignore")[:500])
+        frames: list[dict[str, Any]] = []
+        for idx, path in enumerate(sorted(Path(tmp).glob("frame_*.jpg"))):
+            frames.append(
+                {
+                    "index": idx,
+                    "timestamp": _format_seconds(float(idx * interval)),
+                    "image_url": _data_url_from_bytes(path.read_bytes(), "image/jpeg"),
+                }
+            )
+        return frames
+
+
 class ImageSourceSearchTool(Tool):
     name = "search_image_source"
     description = (
@@ -971,10 +1031,180 @@ class ImageSourceSearchTool(Tool):
         )
 
 
+class VideoFrameEvidence(BaseModel):
+    index: int
+    timestamp: str = ""
+    ocr_text: str = ""
+    structured_items: list[VisualTextItem] = Field(default_factory=list)
+    candidates: list[VisualCandidate] = Field(default_factory=list)
+    visual_tags: list[str] = Field(default_factory=list)
+    confidence: float = Field(0.0, ge=0.0, le=1.0)
+
+
+class AnalyzeVideoFramesArgs(BaseModel):
+    video_url: str = Field("", description="可直接访问的视频文件 URL；不支持 B站普通页面 URL 后台下载")
+    local_video_path: str = Field("", description="本地视频文件路径；仅处理用户自己提供/有权分析的视频")
+    frame_image_urls: list[str] = Field(default_factory=list, description="已经截好的关键帧 URL / data URL / upload://...；优先使用")
+    purpose: Literal["ocr", "identify", "both"] = Field("both", description="ocr=抽文字；identify=关键帧识番；both=两者都做")
+    mode: Literal["auto", "subtitle", "ranking", "magazine", "ppt", "table"] = "ppt"
+    subject_type: Literal["anime", "book", "music", "game", "real"] = "anime"
+    max_frames: int = Field(6, ge=1, le=12)
+    sample_interval_seconds: int = Field(30, ge=5, le=300)
+    question: str = Field("分析视频关键帧里的文字、榜单、作品和视觉线索。")
+
+
+class AnalyzeVideoFramesResult(BaseModel):
+    frame_count: int = 0
+    purpose: str = "both"
+    frames: list[VideoFrameEvidence] = Field(default_factory=list)
+    merged_ocr_text: str = ""
+    candidate_subjects: list[VisualCandidate] = Field(default_factory=list)
+    caveats: list[str] = Field(default_factory=list)
+
+
+class AnalyzeVideoFramesTool(Tool):
+    name = "analyze_video_frames"
+    description = (
+        "对用户提供的视频文件/直链或关键帧图片抽帧分析：无字幕 PPT/榜单视频可 OCR，动画片段可用 trace.moe 做关键帧识番。"
+        "不后台下载 B站普通页面视频；如需分析 B站无字幕内容，请上传/提供有权分析的视频或关键帧。"
+    )
+    args_model = AnalyzeVideoFramesArgs
+    result_model = AnalyzeVideoFramesResult
+
+    def __init__(self, client: BangumiClient) -> None:
+        self.client = client
+
+    async def _ocr_frame(self, image_url: str, args: AnalyzeVideoFramesArgs) -> tuple[str, list[VisualTextItem], list[str], float]:
+        if not settings.vlm_model:
+            return "", [], [], 0.0
+        mode_hint = f"视频关键帧 OCR，mode={args.mode}，重点保留榜单/PPT/字幕中的作品名、评分、日期、观点短语。"
+        raw = await _call_vlm_with_prompt(image_url, _OCR_PROMPT, f"{args.question}\n{mode_hint}")
+        payload = _extract_json(raw)
+        if not payload:
+            return raw[:1500], [], [], 0.25
+        text = str(payload.get("markdown_text") or payload.get("text") or "").strip()[:1800]
+        items = [
+            VisualTextItem(
+                type=str(x.get("type") or "other")[:40],
+                name=str(x.get("name") or "")[:120],
+                value=str(x.get("value") or "")[:400],
+                note=str(x.get("note") or "")[:180],
+            )
+            for x in (payload.get("structured_items") or [])
+            if isinstance(x, dict)
+        ]
+        tags = [str(x).strip() for x in (payload.get("visual_tags") or []) if str(x).strip()]
+        confidence = max(0.0, min(float(payload.get("confidence") or 0.0), 1.0))
+        return text, items, tags, confidence
+
+    async def _identify_frame(self, image_url: str, index: int, args: AnalyzeVideoFramesArgs) -> list[VisualCandidate]:
+        if args.subject_type != "anime":
+            return []
+        rows = []
+        try:
+            rows = await _trace_moe_search(image_url)
+        except Exception:  # noqa: BLE001
+            return []
+        out: list[VisualCandidate] = []
+        for row in rows[:3]:
+            similarity = float(row.get("similarity") or 0.0)
+            if similarity < 0.72:
+                continue
+            title = (_anilist_titles(row) or [""])[0]
+            if not title:
+                continue
+            start = row.get("from")
+            timestamp = _format_seconds(float(start)) if isinstance(start, (int, float)) else ""
+            cand = VisualCandidate(
+                title=title,
+                reason=f"关键帧 {index + 1} trace.moe 识番" + (f" · {timestamp}" if timestamp else ""),
+                confidence=min(similarity, 0.99),
+                source="trace.moe",
+                image_index=index,
+                image=row.get("image"),
+                episode=row.get("episode"),
+                timestamp=timestamp,
+            )
+            await IdentifyScreenshotTool(self.client)._anchor_subject(cand, args.subject_type)
+            out.append(cand)
+        return out
+
+    async def run(self, args: AnalyzeVideoFramesArgs) -> ToolResult[AnalyzeVideoFramesResult]:
+        frame_urls = [x for x in args.frame_image_urls if str(x).strip()][: args.max_frames]
+        extracted: list[dict[str, Any]] = []
+        caveats = [
+            "视频帧分析只处理用户提供/有权分析的视频或关键帧；不会后台下载 B站普通页面视频。",
+            "抽帧 OCR/识番是采样结果，可能漏掉未采样时间点的信息。",
+        ]
+        if frame_urls:
+            extracted = [{"index": idx, "timestamp": "", "image_url": url} for idx, url in enumerate(frame_urls)]
+        elif args.video_url or args.local_video_path:
+            try:
+                extracted = await _extract_video_frames(
+                    video_url=args.video_url,
+                    local_video_path=args.local_video_path,
+                    max_frames=args.max_frames,
+                    sample_interval_seconds=args.sample_interval_seconds,
+                )
+            except Exception as e:  # noqa: BLE001
+                return ToolResult(ok=False, error=f"抽帧失败：{type(e).__name__}: {e}")
+        else:
+            return ToolResult(ok=False, error="需要 video_url/local_video_path 或 frame_image_urls")
+
+        frames: list[VideoFrameEvidence] = []
+        all_candidates: list[VisualCandidate] = []
+        for frame in extracted:
+            idx = int(frame.get("index") or 0)
+            image_url = str(frame.get("image_url") or "")
+            ocr_text = ""
+            items: list[VisualTextItem] = []
+            tags: list[str] = []
+            confidence = 0.0
+            if args.purpose in {"ocr", "both"}:
+                ocr_text, items, tags, confidence = await self._ocr_frame(image_url, args)
+            candidates: list[VisualCandidate] = []
+            if args.purpose in {"identify", "both"}:
+                candidates = await self._identify_frame(image_url, idx, args)
+                all_candidates.extend(candidates)
+            frames.append(
+                VideoFrameEvidence(
+                    index=idx,
+                    timestamp=str(frame.get("timestamp") or ""),
+                    ocr_text=ocr_text,
+                    structured_items=items[:8],
+                    candidates=candidates[:5],
+                    visual_tags=tags[:10],
+                    confidence=max(confidence, max([c.confidence for c in candidates], default=0.0)),
+                )
+            )
+        merged: dict[str, VisualCandidate] = {}
+        for cand in sorted(all_candidates, key=lambda x: x.confidence, reverse=True):
+            key = str(cand.bangumi_id or "").strip() or cand.title.lower()
+            merged.setdefault(key, cand)
+        data = AnalyzeVideoFramesResult(
+            frame_count=len(frames),
+            purpose=args.purpose,
+            frames=frames,
+            merged_ocr_text="\n\n".join(f"[{f.timestamp or f.index}] {f.ocr_text}" for f in frames if f.ocr_text)[:4000],
+            candidate_subjects=list(merged.values())[:8],
+            caveats=caveats + ([] if settings.vlm_model else ["未配置 VLM_MODEL，OCR 分析已跳过，仅可做 trace.moe 关键帧识番。"]),
+        )
+        return ToolResult(
+            ok=True,
+            data=data,
+            sources=[
+                Citation(title=c.bangumi_name or c.title, url=f"https://bgm.tv/subject/{c.bangumi_id}", source="bangumi", image=c.image)
+                for c in data.candidate_subjects[:5]
+                if c.bangumi_id
+            ],
+        )
+
+
 def build_multimodal_tools(client: BangumiClient) -> list[Tool]:
     return [
         IdentifyScreenshotTool(client),
         ExtractVisualTextTool(client),
         VisualStyleRecommendTool(client),
         ImageSourceSearchTool(),
+        AnalyzeVideoFramesTool(client),
     ]

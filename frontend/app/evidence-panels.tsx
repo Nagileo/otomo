@@ -809,6 +809,70 @@ function ImageSourcePanel({ data }: { data: AnyRecord }) {
   );
 }
 
+function VideoFramePanel({ data }: { data: AnyRecord }) {
+  const frames = list(data.frames);
+  const subjects = list(data.candidate_subjects);
+  return (
+    <Panel title="视频关键帧分析" subtitle={`${data.frame_count ?? frames.length} 帧 · ${text(data.purpose, "both")}`}>
+      {data.merged_ocr_text && (
+        <>
+          <div className="section-title">合并 OCR 摘要</div>
+          <pre className="ocr-block">{text(data.merged_ocr_text)}</pre>
+        </>
+      )}
+      {subjects.length > 0 && (
+        <>
+          <div className="section-title">识番候选</div>
+          <div className="rec-grid">
+            {subjects.map((item, i) => (
+              <a className="rec-card" href={item.bangumi_id ? `https://bgm.tv/subject/${item.bangumi_id}` : "#"} target="_blank" rel="noreferrer" key={`${item.title}-${i}`}>
+                {item.image ? <img src={item.image} alt="" /> : <div className="rec-noimg" />}
+                <div className="rec-body">
+                  <div className="card-title">{text(item.bangumi_name || item.title)}</div>
+                  <div className="card-meta">
+                    {text(item.source, "trace")} · conf {pct(item.confidence)}
+                    {item.episode != null ? ` · 第 ${item.episode} 集` : ""}
+                    {item.timestamp ? ` · ${item.timestamp}` : ""}
+                  </div>
+                </div>
+              </a>
+            ))}
+          </div>
+        </>
+      )}
+      {frames.length > 0 && (
+        <>
+          <div className="section-title">逐帧证据</div>
+          <div className="rating-grid">
+            {frames.map((frame, i) => (
+              <div className="rating-card" key={`${frame.index}-${i}`}>
+                <div className="rating-source">frame {frame.index ?? i}{frame.timestamp ? ` · ${frame.timestamp}` : ""}</div>
+                <div className="card-meta">confidence {pct(frame.confidence)}</div>
+                {frame.ocr_text && <p className="card-note">{text(frame.ocr_text)}</p>}
+                {list<string>(frame.visual_tags).length > 0 && (
+                  <div className="evidence-row tight">
+                    {list<string>(frame.visual_tags).slice(0, 5).map((tag) => <Badge key={tag} tone="dim">{tag}</Badge>)}
+                  </div>
+                )}
+                {list(frame.structured_items).length > 0 && (
+                  <div className="compact-list inline">
+                    {list(frame.structured_items).slice(0, 3).map((item, idx) => (
+                      <span key={idx}>{text(item.name || item.value, "条目")}</span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+      {list<string>(data.caveats).length > 0 && (
+        <div className="caveats">{list<string>(data.caveats).map((n, i) => <span key={i}>{n}</span>)}</div>
+      )}
+    </Panel>
+  );
+}
+
 function _wrapText(ctx: CanvasRenderingContext2D, content: string, x: number, y: number, maxW: number, lh: number): number {
   let line = "";
   for (const ch of String(content)) {
@@ -1344,6 +1408,7 @@ export function EvidencePanels({
   const visualText = list(evidence.extract_visual_text);
   const visualStyle = list(evidence.recommend_by_visual_style);
   const imageSource = list(evidence.search_image_source);
+  const videoFrames = list(evidence.analyze_video_frames);
   const claimChecks = list(evidence.claim_check);
   const memory = [
     ...list(evidence.get_user_memory),
@@ -1360,7 +1425,8 @@ export function EvidencePanels({
   if (
     !review.length && !taste.length && !season.length && !recommend.length && !memory.length
     && !aspect.length && !watchCopilot.length && !weeklyDigest.length && !tasteReport.length && !explorer.length
-    && !episodeRadar.length && !screenshot.length && !visualText.length && !visualStyle.length && !imageSource.length && !claimChecks.length
+    && !episodeRadar.length && !screenshot.length && !visualText.length && !visualStyle.length && !imageSource.length
+    && !videoFrames.length && !claimChecks.length
   ) return null;
   return (
     <div className="evidence-stack">
@@ -1368,6 +1434,7 @@ export function EvidencePanels({
       {visualText.map((data, i) => <VisualTextPanel data={data} key={`visual-text-${i}`} />)}
       {visualStyle.map((data, i) => <VisualStylePanel data={data} key={`visual-style-${i}`} />)}
       {imageSource.map((data, i) => <ImageSourcePanel data={data} key={`image-source-${i}`} />)}
+      {videoFrames.map((data, i) => <VideoFramePanel data={data} key={`video-frames-${i}`} />)}
       {recommend.map((data, i) => <RecommendPanel data={data} onCritique={onCritique} key={`recommend-${i}`} />)}
       {season.map((data, i) => <SeasonGuidePanel data={data} key={`season-${i}`} />)}
       {review.map((data, i) => <ReviewEvidencePanel data={data} key={`review-${i}`} />)}

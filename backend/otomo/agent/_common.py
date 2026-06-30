@@ -383,6 +383,7 @@ _PANEL_TOOLS = {
     "extract_visual_text",
     "recommend_by_visual_style",
     "search_image_source",
+    "analyze_video_frames",
     "build_aspect_profile",
     "plan_watch_copilot",
     "build_taste_report",
@@ -765,6 +766,25 @@ def _safe_image_source_payload(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _safe_video_frames_payload(data: dict[str, Any]) -> dict[str, Any]:
+    frames = []
+    for item in _trim_dicts(data.get("frames"), limit=12):
+        copied = dict(item)
+        copied["ocr_text"] = _trim_text(copied.get("ocr_text"), 700)
+        copied["structured_items"] = _trim_dicts(copied.get("structured_items"), limit=6)
+        copied["candidates"] = _trim_dicts(copied.get("candidates"), limit=5)
+        copied["visual_tags"] = _trim_strings(copied.get("visual_tags"), limit=10, text_limit=40)
+        frames.append(copied)
+    return {
+        "frame_count": data.get("frame_count"),
+        "purpose": data.get("purpose"),
+        "frames": frames,
+        "merged_ocr_text": _trim_text(data.get("merged_ocr_text"), 1800),
+        "candidate_subjects": _trim_dicts(data.get("candidate_subjects"), limit=8),
+        "caveats": _trim_strings(data.get("caveats"), limit=8, text_limit=180),
+    }
+
+
 def panel_data_from_payload(name: str, payload: dict[str, Any] | None) -> dict[str, Any] | None:
     """Return UI-safe structured payload for tools that have dedicated evidence panels."""
     if name not in _PANEL_TOOLS or not isinstance(payload, dict):
@@ -802,6 +822,8 @@ def panel_data_from_payload(name: str, payload: dict[str, Any] | None) -> dict[s
         return _safe_visual_style_payload(data)
     if name == "search_image_source":
         return _safe_image_source_payload(data)
+    if name == "analyze_video_frames":
+        return _safe_video_frames_payload(data)
     if name in _MEMORY_TOOLS:
         return _safe_memory_payload(data)
     return None
