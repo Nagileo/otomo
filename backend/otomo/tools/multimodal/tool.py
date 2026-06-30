@@ -83,6 +83,16 @@ _PROMPT = """你是 ACGN 截图识别助手。请根据图片识别可能的作�
 "visual_tags":["画风/题材/色调标签"],"ocr_text":"能读出的字幕/台词/榜单文字","notes":["..."]}
 不知道就返回空 candidates，不要编造确定结论。"""
 
+_OCR_PROMPT = """你是 ACGN 场景 OCR / 情报图结构化助手。请读取图片里的文字，并按用户指定任务结构化。
+只输出 JSON：
+{"markdown_text":"尽量保留层级/表格/换行的 Markdown 文本",
+"structured_items":[{"type":"work|character|date|score|staff|quote|platform|other","name":"实体名或项目名","value":"数值/时间/台词/说明","note":"上下文"}],
+"entities":["可回锚到 Bangumi 的作品/角色/音乐/游戏名"],
+"visual_tags":["截图类型/题材/画面标签"],
+"confidence":0.0到1.0,
+"notes":["不确定点/遮挡/低清晰度说明"]}
+不要臆造看不清的文字；看不清就写不确定。"""
+
 
 def _extract_json(text: str) -> dict:
     try:
@@ -188,6 +198,10 @@ def _anilist_titles(raw: dict[str, Any]) -> list[str]:
 
 
 async def _call_vlm(image_url: str, question: str) -> str:
+    return await _call_vlm_with_prompt(image_url, _PROMPT, question)
+
+
+async def _call_vlm_with_prompt(image_url: str, system_prompt: str, question: str) -> str:
     if not settings.vlm_model:
         raise RuntimeError("未配置 VLM_MODEL；截图识别需要现成 VLM API")
     resolved_url = upload_store.resolve_image_url(image_url)
@@ -201,7 +215,7 @@ async def _call_vlm(image_url: str, question: str) -> str:
     resp = await client.chat.completions.create(
         model=settings.vlm_model,
         messages=[
-            {"role": "system", "content": _PROMPT},
+            {"role": "system", "content": system_prompt},
             {
                 "role": "user",
                 "content": [
@@ -461,5 +475,184 @@ class IdentifyScreenshotTool(Tool):
         )
 
 
+class VisualTextItem(BaseModel):
+    type: str = "other"
+    name: str = ""
+    value: str = ""
+    note: str = ""
+
+
+class AnchoredVisualEntity(BaseModel):
+    name: str
+    subject_type: Literal["anime", "book", "music", "game", "real"] = "anime"
+    bangumi_id: int | None = None
+    bangumi_name: str = ""
+    bangumi_score: float | None = None
+    image: str | None = None
+    confidence: float = Field(0.0, ge=0.0, le=1.0)
+
+
+class ExtractVisualTextArgs(BaseModel):
+    image_url: str = Field("", description="单张图片 URL / data URL / upload://...；兼容旧调用")
+    image_urls: list[str] = Field(default_factory=list, description="多张图片 URL / data URL / upload://...；最多处理 4 张")
+    mode: Literal["auto", "subtitle", "ranking", "magazine", "ppt", "table"] = Field(
+        "auto", description="subtitle=台词/字幕，ranking=榜单，magazine=杂志情报页，ppt=B站导视PPT帧，table=表格"
+    )
+    question: str = Field("读取图片文字并结构化可检索信息。", description="额外关注点")
+    subject_type: Literal["anime", "book", "music", "game", "real"] = "anime"
+    anchor_entities: bool = Field(True, description="把抽出的作品名实体回锚 Bangumi")
+    limit: int = Field(8, ge=1, le=20)
+
+
+class ExtractVisualTextResult(BaseModel):
+    mode: str
+    image_count: int
+    markdown_text: str = ""
+    structured_items: list[VisualTextItem] = Field(default_factory=list)
+    entities: list[AnchoredVisualEntity] = Field(default_factory=list)
+    visual_tags: list[str] = Field(default_factory=list)
+    confidence: float = Field(0.0, ge=0.0, le=1.0)
+    raw_vlm_answer: str = ""
+    caveats: list[str] = Field(default_factory=list)
+
+
+class ExtractVisualTextTool(Tool):
+    name = "extract_visual_text"
+    description = (
+        "读取 ACGN 图片里的台词/字幕/榜单/杂志/PPT/表格文字，输出 Markdown 与结构化条目；"
+        "可把作品实体回锚 Bangumi。用于截图 OCR、B站无字幕PPT帧、情报图整理。"
+    )
+    args_model = ExtractVisualTextArgs
+    result_model = ExtractVisualTextResult
+
+    def __init__(self, client: BangumiClient) -> None:
+        self.client = client
+
+    async def _anchor_entity(self, name: str, subject_type: str, confidence: float) -> AnchoredVisualEntity:
+        ent = AnchoredVisualEntity(name=name, subject_type=subject_type, confidence=confidence)
+        stype = SUBJECT_TYPE.get(subject_type, 2)
+        try:
+            res = await self.client.search_subjects(name, stype, limit=3)
+        except Exception:  # noqa: BLE001
+            return ent
+        rows = res.get("data") or []
+        if not rows:
+            return ent
+        row = rows[0]
+        ent.bangumi_id = row.get("id")
+        ent.bangumi_name = row.get("name_cn") or row.get("name") or ""
+        ent.bangumi_score = row.get("score") or ((row.get("rating") or {}).get("score"))
+        img = row.get("images") or {}
+        ent.image = img.get("common") or img.get("medium") or img.get("grid")
+        ent.confidence = min(0.9, max(confidence, 0.62))
+        return ent
+
+    def _parse_payload(self, raw: str) -> tuple[str, list[VisualTextItem], list[str], list[str], float, list[str]]:
+        payload = _extract_json(raw)
+        if not payload:
+            return raw[:4000], [], _extract_titles(raw), [], 0.25, ["VLM 未返回 JSON，已降级为原文 OCR 摘要。"]
+        markdown = str(payload.get("markdown_text") or payload.get("text") or "").strip()
+        items: list[VisualTextItem] = []
+        for item in payload.get("structured_items") or []:
+            if isinstance(item, dict):
+                items.append(
+                    VisualTextItem(
+                        type=str(item.get("type") or "other")[:40],
+                        name=str(item.get("name") or "")[:120],
+                        value=str(item.get("value") or "")[:500],
+                        note=str(item.get("note") or "")[:240],
+                    )
+                )
+        entities = [str(x).strip() for x in (payload.get("entities") or []) if str(x).strip()]
+        if not entities:
+            entities = [x for x in _extract_titles(markdown or raw)]
+        tags = [str(x).strip() for x in (payload.get("visual_tags") or []) if str(x).strip()]
+        confidence = max(0.0, min(float(payload.get("confidence") or 0.0), 1.0))
+        notes = [str(x).strip() for x in (payload.get("notes") or []) if str(x).strip()]
+        return markdown, items, entities, tags, confidence, notes
+
+    async def run(self, args: ExtractVisualTextArgs) -> ToolResult[ExtractVisualTextResult]:
+        images = _image_inputs(IdentifyScreenshotArgs(image_url=args.image_url, image_urls=args.image_urls))
+        if not images:
+            return ToolResult(ok=False, error="需要 image_url 或 image_urls")
+        if not settings.vlm_model:
+            return ToolResult(ok=False, error="extract_visual_text 需要配置 VLM_MODEL（建议 Qwen-VL / 百炼视觉模型）")
+
+        mode_hint = {
+            "auto": "自动判断图片类型，优先保留文字与可检索实体。",
+            "subtitle": "重点读取字幕/台词/对白，不要补写看不清的句子。",
+            "ranking": "重点抽取榜单名次、作品名、评分、日期、平台。",
+            "magazine": "重点抽取杂志/情报页里的作品名、staff、日期、标题和注释。",
+            "ppt": "重点抽取 PPT/导视帧里的标题、作品列表、分数、播放日期、UP主观点短语。",
+            "table": "重点还原表格结构，尽量输出 Markdown 表格。",
+        }[args.mode]
+        question = f"{args.question}\n模式：{args.mode}。{mode_hint}"
+        raws = await asyncio.gather(
+            *[_call_vlm_with_prompt(url, _OCR_PROMPT, question) for url in images],
+            return_exceptions=True,
+        )
+        markdown_parts: list[str] = []
+        items: list[VisualTextItem] = []
+        entity_names: list[str] = []
+        tags: list[str] = []
+        confidences: list[float] = []
+        notes: list[str] = []
+        raw_parts: list[str] = []
+        for idx, raw_item in enumerate(raws):
+            if isinstance(raw_item, Exception):
+                notes.append(f"image {idx + 1}: {type(raw_item).__name__}: {raw_item}")
+                continue
+            raw = str(raw_item)
+            raw_parts.append(f"[image {idx + 1}]\n{raw}")
+            markdown, parsed_items, parsed_entities, parsed_tags, conf, parsed_notes = self._parse_payload(raw)
+            if markdown:
+                markdown_parts.append(f"## image {idx + 1}\n{markdown}")
+            items.extend(parsed_items)
+            for name in parsed_entities:
+                if name not in entity_names:
+                    entity_names.append(name)
+            for tag in parsed_tags:
+                if tag not in tags:
+                    tags.append(tag)
+            if conf:
+                confidences.append(conf)
+            notes.extend(parsed_notes)
+
+        entities: list[AnchoredVisualEntity] = []
+        if args.anchor_entities and entity_names:
+            entities = await asyncio.gather(
+                *[self._anchor_entity(name, args.subject_type, 0.45) for name in entity_names[: args.limit]]
+            )
+        confidence = sum(confidences) / len(confidences) if confidences else (0.35 if markdown_parts else 0.0)
+        data = ExtractVisualTextResult(
+            mode=args.mode,
+            image_count=len(images),
+            markdown_text="\n\n".join(markdown_parts)[:6000],
+            structured_items=items[: args.limit],
+            entities=entities[: args.limit],
+            visual_tags=tags[:16],
+            confidence=confidence,
+            raw_vlm_answer="\n\n".join(raw_parts)[:1600],
+            caveats=[
+                "OCR/结构化结果来自 VLM，可能受清晰度、遮挡、字体和日文/中文混排影响。",
+                "已回锚的作品实体可作为检索入口；未回锚文本不得当作 canonical 事实。",
+                *notes[:4],
+            ],
+        )
+        return ToolResult(
+            ok=True,
+            data=data,
+            sources=[
+                Citation(
+                    title=e.bangumi_name or e.name,
+                    url=f"https://bgm.tv/subject/{e.bangumi_id}" if e.bangumi_id else images[0],
+                    source="bangumi" if e.bangumi_id else "image",
+                    image=e.image,
+                )
+                for e in entities[:5]
+            ],
+        )
+
+
 def build_multimodal_tools(client: BangumiClient) -> list[Tool]:
-    return [IdentifyScreenshotTool(client)]
+    return [IdentifyScreenshotTool(client), ExtractVisualTextTool(client)]

@@ -380,6 +380,7 @@ _PANEL_TOOLS = {
     "explore_voice_network",
     "episode_buzz_radar",
     "identify_acgn_screenshot",
+    "extract_visual_text",
     "build_aspect_profile",
     "plan_watch_copilot",
     "build_taste_report",
@@ -702,6 +703,33 @@ def _safe_multimodal_payload(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _safe_visual_text_payload(data: dict[str, Any]) -> dict[str, Any]:
+    items = []
+    for item in _trim_dicts(data.get("structured_items"), limit=12):
+        copied = dict(item)
+        copied["name"] = _trim_text(copied.get("name"), 120)
+        copied["value"] = _trim_text(copied.get("value"), 300)
+        copied["note"] = _trim_text(copied.get("note"), 180)
+        items.append(copied)
+    entities = []
+    for item in _trim_dicts(data.get("entities"), limit=10):
+        copied = dict(item)
+        copied["name"] = _trim_text(copied.get("name"), 100)
+        copied["bangumi_name"] = _trim_text(copied.get("bangumi_name"), 100)
+        entities.append(copied)
+    return {
+        "mode": data.get("mode"),
+        "image_count": data.get("image_count"),
+        "markdown_text": _trim_text(data.get("markdown_text"), 1800),
+        "structured_items": items,
+        "entities": entities,
+        "visual_tags": _trim_strings(data.get("visual_tags"), limit=16, text_limit=40),
+        "confidence": data.get("confidence"),
+        "raw_vlm_answer": _trim_text(data.get("raw_vlm_answer"), 600),
+        "caveats": _trim_strings(data.get("caveats"), limit=6, text_limit=180),
+    }
+
+
 def panel_data_from_payload(name: str, payload: dict[str, Any] | None) -> dict[str, Any] | None:
     """Return UI-safe structured payload for tools that have dedicated evidence panels."""
     if name not in _PANEL_TOOLS or not isinstance(payload, dict):
@@ -733,6 +761,8 @@ def panel_data_from_payload(name: str, payload: dict[str, Any] | None) -> dict[s
         return _safe_episode_radar_payload(data)
     if name == "identify_acgn_screenshot":
         return _safe_multimodal_payload(data)
+    if name == "extract_visual_text":
+        return _safe_visual_text_payload(data)
     if name in _MEMORY_TOOLS:
         return _safe_memory_payload(data)
     return None

@@ -5,7 +5,14 @@ import asyncio
 from otomo.agent._common import runtime_state_prompt
 from otomo.agent.contracts import AgentState
 from otomo.tools.multimodal import tool as multimodal_tool
-from otomo.tools.multimodal.tool import IdentifyScreenshotArgs, IdentifyScreenshotTool, _extract_titles, _image_inputs
+from otomo.tools.multimodal.tool import (
+    ExtractVisualTextArgs,
+    ExtractVisualTextTool,
+    IdentifyScreenshotArgs,
+    IdentifyScreenshotTool,
+    _extract_titles,
+    _image_inputs,
+)
 from otomo.uploads import ImageUploadStore
 
 
@@ -99,6 +106,35 @@ def test_vlm_character_candidate_anchors_to_bangumi(monkeypatch):
     assert res.data.character_candidates[0].bangumi_id == 123
     assert "日常" in res.data.visual_tags
     assert "欢迎来到露营地" in res.data.ocr_text
+
+
+def test_extract_visual_text_requires_vlm(monkeypatch):
+    from otomo import config
+
+    monkeypatch.setattr(config.settings, "vlm_model", "")
+    tool = ExtractVisualTextTool(FakeBangumiClient())
+    res = asyncio.run(tool.run(ExtractVisualTextArgs(image_url="upload://missing")))
+    assert not res.ok
+    assert "VLM_MODEL" in (res.error or "")
+
+
+def test_extract_visual_text_anchors_entities(monkeypatch):
+    from otomo import config
+
+    monkeypatch.setattr(config.settings, "vlm_model", "fake-vlm")
+
+    async def fake_vlm(_image_url: str, _system_prompt: str, _question: str):
+        return '{"markdown_text":"|作品|评分|\\n|摇曳露营△|8.1|","structured_items":[{"type":"work","name":"摇曳露营△","value":"8.1","note":"榜单评分"}],"entities":["摇曳露营△"],"visual_tags":["榜单","露营"],"confidence":0.77,"notes":["清晰"]}'
+
+    monkeypatch.setattr(multimodal_tool, "_call_vlm_with_prompt", fake_vlm)
+    tool = ExtractVisualTextTool(FakeBangumiClient())
+    res = asyncio.run(tool.run(ExtractVisualTextArgs(image_url="data:image/png;base64,iVBORw0KGgo=", mode="ranking")))
+    assert res.ok
+    assert res.data
+    assert "摇曳露营" in res.data.markdown_text
+    assert res.data.structured_items[0].type == "work"
+    assert res.data.entities[0].bangumi_id == 207195
+    assert "榜单" in res.data.visual_tags
 
 
 def test_upload_store_resolves_upload_uri(tmp_path):

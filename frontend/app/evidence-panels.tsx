@@ -650,6 +650,79 @@ function ScreenshotIdentifyPanel({ data }: { data: AnyRecord }) {
   );
 }
 
+function VisualTextPanel({ data }: { data: AnyRecord }) {
+  const items = list(data.structured_items);
+  const entities = list(data.entities);
+  const tags = list<string>(data.visual_tags);
+  return (
+    <Panel
+      title={`图片 OCR / 结构化 · ${text(data.mode, "auto")}`}
+      subtitle={`${data.image_count ?? 1} 张图 · 置信度 ${pct(data.confidence)}`}
+    >
+      {tags.length > 0 && (
+        <div className="evidence-row">
+          {tags.map((tag) => <Badge key={tag} tone="dim">{tag}</Badge>)}
+        </div>
+      )}
+      {data.markdown_text && (
+        <>
+          <div className="section-title">读取文本</div>
+          <pre className="ocr-block">{text(data.markdown_text)}</pre>
+        </>
+      )}
+      {items.length > 0 && (
+        <>
+          <div className="section-title">结构化条目</div>
+          <div className="rating-grid">
+            {items.map((item, i) => (
+              <div className="rating-card" key={`${item.type}-${item.name}-${i}`}>
+                <div className="rating-source">{text(item.type)}</div>
+                <div className="card-title">{text(item.name || item.value, "条目")}</div>
+                {item.value && <p className="card-note">{text(item.value)}</p>}
+                {item.note && <div className="card-meta">{text(item.note)}</div>}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+      {entities.length > 0 && (
+        <>
+          <div className="section-title">Bangumi 回锚实体</div>
+          <div className="rec-grid">
+            {entities.map((item, i) => (
+              <a
+                className="rec-card"
+                href={item.bangumi_id ? `https://bgm.tv/subject/${item.bangumi_id}` : "#"}
+                target="_blank"
+                rel="noreferrer"
+                key={`${item.name}-${i}`}
+              >
+                {item.image ? <img src={item.image} alt="" /> : <div className="rec-noimg" />}
+                <div className="rec-body">
+                  <div className="card-title">{text(item.bangumi_name || item.name)}</div>
+                  <div className="card-meta">
+                    {item.bangumi_id ? "已回锚" : "未对齐"} · 置信度 {pct(item.confidence)}
+                    {item.bangumi_score ? ` · BGM ${item.bangumi_score}` : ""}
+                  </div>
+                </div>
+              </a>
+            ))}
+          </div>
+        </>
+      )}
+      {data.raw_vlm_answer && (
+        <details className="quiet-detail">
+          <summary>查看视觉模型原始结构化输出</summary>
+          <p className="evidence-copy">{text(data.raw_vlm_answer)}</p>
+        </details>
+      )}
+      {list<string>(data.caveats).length > 0 && (
+        <div className="caveats">{list<string>(data.caveats).map((n, i) => <span key={i}>{n}</span>)}</div>
+      )}
+    </Panel>
+  );
+}
+
 function _wrapText(ctx: CanvasRenderingContext2D, content: string, x: number, y: number, maxW: number, lh: number): number {
   let line = "";
   for (const ch of String(content)) {
@@ -1182,6 +1255,7 @@ export function EvidencePanels({
   const explorer = list(evidence.explore_voice_network);
   const episodeRadar = list(evidence.episode_buzz_radar);
   const screenshot = list(evidence.identify_acgn_screenshot);
+  const visualText = list(evidence.extract_visual_text);
   const claimChecks = list(evidence.claim_check);
   const memory = [
     ...list(evidence.get_user_memory),
@@ -1198,11 +1272,12 @@ export function EvidencePanels({
   if (
     !review.length && !taste.length && !season.length && !recommend.length && !memory.length
     && !aspect.length && !watchCopilot.length && !weeklyDigest.length && !tasteReport.length && !explorer.length
-    && !episodeRadar.length && !screenshot.length && !claimChecks.length
+    && !episodeRadar.length && !screenshot.length && !visualText.length && !claimChecks.length
   ) return null;
   return (
     <div className="evidence-stack">
       {screenshot.map((data, i) => <ScreenshotIdentifyPanel data={data} key={`screenshot-${i}`} />)}
+      {visualText.map((data, i) => <VisualTextPanel data={data} key={`visual-text-${i}`} />)}
       {recommend.map((data, i) => <RecommendPanel data={data} onCritique={onCritique} key={`recommend-${i}`} />)}
       {season.map((data, i) => <SeasonGuidePanel data={data} key={`season-${i}`} />)}
       {review.map((data, i) => <ReviewEvidencePanel data={data} key={`review-${i}`} />)}
