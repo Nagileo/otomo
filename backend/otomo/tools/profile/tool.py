@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 from collections import Counter
 from typing import Literal
 
@@ -50,6 +51,8 @@ class CollectionDashboardArgs(BaseModel):
     )
     max_items_per_type: int = Field(1000, ge=100, le=3000, description="每个媒介最多拉取多少收藏")
     include_memory: bool = True
+    enrich_people: bool = Field(True, description="是否对代表性高分条目补 staff/studio/CV 统计")
+    enrich_limit: int = Field(24, ge=0, le=60, description="每个媒介最多补多少个条目的 staff/CV enrichment")
 
 
 class TasteReportSection(BaseModel):
@@ -86,7 +89,12 @@ class DashboardMediaStats(BaseModel):
     rating_distribution: dict[str, int] = Field(default_factory=dict)
     year_distribution: dict[str, int] = Field(default_factory=dict)
     decade_distribution: dict[str, int] = Field(default_factory=dict)
+    yearly_activity: list[dict] = Field(default_factory=list)
     top_tags: list[dict] = Field(default_factory=list)
+    tag_drift: list[dict] = Field(default_factory=list)
+    studio_affinity: list[dict] = Field(default_factory=list)
+    staff_affinity: list[dict] = Field(default_factory=list)
+    cv_affinity: list[dict] = Field(default_factory=list)
     high_rated: list[dict] = Field(default_factory=list)
     backlog: list[dict] = Field(default_factory=list)
     on_hold_or_abandoned: list[dict] = Field(default_factory=list)
@@ -103,6 +111,7 @@ class CollectionDashboardResult(BaseModel):
     plan_summary: dict[str, int] = Field(default_factory=dict)
     weekly_subscription: dict = Field(default_factory=dict)
     memory_signals: dict[str, list[dict]] = Field(default_factory=dict)
+    enrichment: dict = Field(default_factory=dict)
     recommendations_for_next_step: list[str] = Field(default_factory=list)
     caveats: list[str] = Field(default_factory=list)
 
@@ -179,6 +188,37 @@ def _dashboard_subject_card(item: dict) -> dict:
     }
 
 
+def _subject_id(item: dict) -> int | None:
+    sid = _subject(item).get("id")
+    try:
+        return int(sid)
+    except (TypeError, ValueError):
+        return None
+
+
+def _item_rate(item: dict) -> int:
+    try:
+        return int(item.get("rate") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _item_status(item: dict) -> int:
+    try:
+        return int(item.get("type") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _tag_names(item: dict) -> list[str]:
+    names: list[str] = []
+    for tag in _subject(item).get("tags") or []:
+        name = (tag or {}).get("name")
+        if name:
+            names.append(str(name))
+    return names
+
+
 def _rating_strictness(avg: float | None, rated: int) -> str:
     if not avg or rated < 8:
         return "评分样本偏少，暂不判断严格度。"
@@ -189,23 +229,266 @@ def _rating_strictness(avg: float | None, rated: int) -> str:
     return "评分分布较均衡：适合综合标签、评分、同步率和近期反馈排序。"
 
 
-def _dashboard_stats(subject_type: str, items: list[dict]) -> DashboardMediaStats:
-    status = Counter(_STATUS_LABEL.get(int(x.get("type") or 0), "未知") for x in items)
-    rates = [int(x.get("rate") or 0) for x in items if int(x.get("rate") or 0) > 0]
+def _yearly_activity(items: list[dict]) -> list[dict]:
+    by_year: dict[str, dict] = {}
+    for item in items:
+        year = _year(item)
+        if not year:
+            continue
+        bucket = by_year.setdefault(
+            year,
+            {
+                "year": year,
+                "total": 0,
+                "rated": 0,
+                "completed": 0,
+                "planning_or_current": 0,
+                "on_hold_or_abandoned": 0,
+                "high_rated": 0,
+                "_score_sum": 0,
+            },
+        )
+        rate = _item_rate(item)
+        status = _item_status(item)
+        bucket["total"] += 1
+        if rate > 0:
+            bucket["rated"] += 1
+            bucket["_score_sum"] += rate
+        if rate >= 9:
+            bucket["high_rated"] += 1
+        if status == 2:
+            bucket["completed"] += 1
+        elif status in {1, 3}:
+            bucket["planning_or_current"] += 1
+        elif status in {4, 5}:
+            bucket["on_hold_or_abandoned"] += 1
+    rows: list[dict] = []
+    for year, bucket in sorted(by_year.items(), key=lambda kv: kv[0], reverse=True):
+        rated = int(bucket.pop("rated") or 0)
+        score_sum = int(bucket.pop("_score_sum") or 0)
+        bucket["rated"] = rated
+        bucket["avg_rating"] = round(score_sum / rated, 2) if rated else None
+        rows.append(bucket)
+    return rows
+
+
+def _weighted_tags(items: list[dict]) -> Counter[str]:
+    tags: Counter[str] = Counter()
+    for item in items:
+        weight = max(_item_rate(item), 1)
+        for name in _tag_names(item):
+            tags[name] += weight
+    return tags
+
+
+def _tag_drift(items: list[dict]) -> list[dict]:
+    dated = [x for x in items if _year(x)]
+    if len(dated) < 8:
+        return []
+    dated.sort(key=lambda x: (_year(x), _subject_title(x)))
+    mid = len(dated) // 2
+    older, recent = dated[:mid], dated[mid:]
+    old_tags = _weighted_tags(older)
+    recent_tags = _weighted_tags(recent)
+    old_total = max(sum(old_tags.values()), 1)
+    recent_total = max(sum(recent_tags.values()), 1)
+    rows: list[dict] = []
+    for tag in set(old_tags) | set(recent_tags):
+        old_share = old_tags[tag] / old_total
+        recent_share = recent_tags[tag] / recent_total
+        delta = recent_share - old_share
+        if abs(delta) < 0.01:
+            continue
+        rows.append(
+            {
+                "tag": tag,
+                "trend": "rising" if delta > 0 else "receding",
+                "delta": round(delta, 4),
+                "recent_weight": int(recent_tags[tag]),
+                "older_weight": int(old_tags[tag]),
+                "recent_share": round(recent_share, 4),
+                "older_share": round(old_share, 4),
+            }
+        )
+    return sorted(rows, key=lambda x: abs(float(x.get("delta") or 0)), reverse=True)[:14]
+
+
+def _sample_enrichment_items(items: list[dict], limit: int) -> list[dict]:
+    if limit <= 0:
+        return []
+    scored = [x for x in items if _subject_id(x)]
+    scored.sort(
+        key=lambda x: (
+            _item_rate(x),
+            1 if _item_status(x) == 2 else 0,
+            _year(x),
+            _subject_title(x),
+        ),
+        reverse=True,
+    )
+    out: list[dict] = []
+    seen: set[int] = set()
+    for item in scored:
+        sid = _subject_id(item)
+        if not sid or sid in seen:
+            continue
+        seen.add(sid)
+        out.append(item)
+        if len(out) >= limit:
+            break
+    return out
+
+
+_STUDIO_ROLE_HINTS = ("动画制作", "制作", "制作协力", "studio", "开发")
+_STAFF_ROLE_HINTS = (
+    "导演", "监督", "脚本", "系列构成", "原作", "音乐", "人物设定", "角色设计",
+    "美术", "摄影", "演出", "分镜", "企画", "制作", "动画制作", "开发", "剧本", "原画",
+)
+
+
+def _person_name(row: dict) -> str:
+    return str(row.get("name_cn") or row.get("name") or "").strip()
+
+
+def _relation(row: dict) -> str:
+    return str(row.get("relation") or "staff").strip() or "staff"
+
+
+def _role_matches(relation: str, hints: tuple[str, ...]) -> bool:
+    relation_l = relation.lower()
+    return any(h.lower() in relation_l for h in hints)
+
+
+def _rank_affinity(counter: dict[tuple[str, str], dict], limit: int = 10) -> list[dict]:
+    rows = sorted(
+        counter.values(),
+        key=lambda x: (int(x.get("count") or 0), float(x.get("weighted_score") or 0), str(x.get("name") or "")),
+        reverse=True,
+    )
+    out: list[dict] = []
+    for row in rows[:limit]:
+        copied = dict(row)
+        works = copied.get("works") or []
+        copied["works"] = works[:5]
+        copied["weighted_score"] = round(float(copied.get("weighted_score") or 0), 2)
+        out.append(copied)
+    return out
+
+
+def _bump_affinity(
+    counter: dict[tuple[str, str], dict],
+    name: str,
+    relation: str,
+    item: dict,
+) -> None:
+    if not name:
+        return
+    key = (name, relation)
+    rate = _item_rate(item)
+    row = counter.setdefault(
+        key,
+        {
+            "name": name,
+            "relation": relation,
+            "count": 0,
+            "weighted_score": 0.0,
+            "works": [],
+        },
+    )
+    row["count"] += 1
+    row["weighted_score"] += max(rate, 1)
+    work = _dashboard_subject_card(item)
+    if work.get("id") and all(w.get("id") != work.get("id") for w in row["works"]):
+        row["works"].append(work)
+
+
+async def _enrich_people_stats(
+    client: BangumiClient,
+    subject_type: str,
+    items: list[dict],
+    limit: int,
+) -> dict:
+    sampled = _sample_enrichment_items(items, limit)
+    if not sampled:
+        return {
+            "sampled_count": 0,
+            "sampled_subjects": [],
+            "studio_affinity": [],
+            "staff_affinity": [],
+            "cv_affinity": [],
+            "failures": [],
+        }
+    semaphore = asyncio.Semaphore(4)
+    staff_counter: dict[tuple[str, str], dict] = {}
+    studio_counter: dict[tuple[str, str], dict] = {}
+    cv_counter: dict[tuple[str, str], dict] = {}
+    failures: list[dict] = []
+
+    async def load_persons(item: dict) -> None:
+        sid = _subject_id(item)
+        if not sid:
+            return
+        try:
+            async with semaphore:
+                persons = await client.get_subject_persons(sid)
+        except Exception as exc:  # noqa: BLE001 - enrichment 不应拖垮仪表盘
+            failures.append({"subject_id": sid, "name": _subject_title(item), "stage": "persons", "error": str(exc)[:160]})
+            return
+        for row in persons or []:
+            name = _person_name(row)
+            relation = _relation(row)
+            if not name:
+                continue
+            if _role_matches(relation, _STAFF_ROLE_HINTS):
+                _bump_affinity(staff_counter, name, relation, item)
+            if subject_type == "anime" and _role_matches(relation, _STUDIO_ROLE_HINTS):
+                _bump_affinity(studio_counter, name, relation, item)
+            elif subject_type == "game" and _role_matches(relation, ("开发", "发行", "制作")):
+                _bump_affinity(studio_counter, name, relation, item)
+
+    async def load_characters(item: dict) -> None:
+        if subject_type not in {"anime", "game"}:
+            return
+        sid = _subject_id(item)
+        if not sid:
+            return
+        try:
+            async with semaphore:
+                characters = await client.get_subject_characters(sid)
+        except Exception as exc:  # noqa: BLE001
+            failures.append({"subject_id": sid, "name": _subject_title(item), "stage": "characters", "error": str(exc)[:160]})
+            return
+        for char in (characters or [])[:14]:
+            actors = char.get("actors") or []
+            if not actors:
+                continue
+            actor = actors[0]
+            name = str(actor.get("name") or actor.get("name_cn") or "").strip()
+            if name:
+                _bump_affinity(cv_counter, name, "CV", item)
+
+    await asyncio.gather(*(load_persons(item) for item in sampled))
+    await asyncio.gather(*(load_characters(item) for item in sampled[: max(8, limit // 2)]))
+    return {
+        "sampled_count": len(sampled),
+        "sampled_subjects": [_dashboard_subject_card(x) for x in sampled[:10]],
+        "studio_affinity": _rank_affinity(studio_counter),
+        "staff_affinity": _rank_affinity(staff_counter),
+        "cv_affinity": _rank_affinity(cv_counter),
+        "failures": failures[:8],
+    }
+
+
+def _dashboard_stats(subject_type: str, items: list[dict], enrichment: dict | None = None) -> DashboardMediaStats:
+    status = Counter(_STATUS_LABEL.get(_item_status(x), "未知") for x in items)
+    rates = [_item_rate(x) for x in items if _item_rate(x) > 0]
     rating_dist = Counter(str(x) for x in rates)
     years = Counter(_year(x) for x in items if _year(x))
     decades = Counter(f"{y[:3]}0s" for y in years for _ in range(years[y]))
-    tags: Counter[str] = Counter()
-    for item in items:
-        rate = int(item.get("rate") or 0)
-        weight = max(rate, 1)
-        for tag in _subject(item).get("tags") or []:
-            name = (tag or {}).get("name")
-            if name:
-                tags[name] += weight
-    high = sorted([x for x in items if int(x.get("rate") or 0) >= 9], key=lambda x: -int(x.get("rate") or 0))
-    backlog = [x for x in items if int(x.get("type") or 0) in {1, 3}]
-    dropped = [x for x in items if int(x.get("type") or 0) in {4, 5}]
+    tags = _weighted_tags(items)
+    high = sorted([x for x in items if _item_rate(x) >= 9], key=lambda x: -_item_rate(x))
+    backlog = [x for x in items if _item_status(x) in {1, 3}]
+    dropped = [x for x in items if _item_status(x) in {4, 5}]
     notes: list[str] = []
     if not items:
         notes.append("该媒介没有可见收藏。")
@@ -215,6 +498,8 @@ def _dashboard_stats(subject_type: str, items: list[dict]) -> DashboardMediaStat
         notes.append("book 池内包含漫画/轻小说/小说，推荐时应继续按标签拆分。")
     if subject_type == "music":
         notes.append("music 池更适合按 OST/主题歌/角色歌/艺人专辑拆分。")
+    if enrichment and enrichment.get("sampled_count"):
+        notes.append(f"staff/CV/studio enrichment 基于 {enrichment.get('sampled_count')} 个高分/已评分代表条目采样统计。")
     return DashboardMediaStats(
         subject_type=subject_type,
         total=len(items),
@@ -224,7 +509,12 @@ def _dashboard_stats(subject_type: str, items: list[dict]) -> DashboardMediaStat
         rating_distribution=dict(sorted(rating_dist.items(), key=lambda kv: int(kv[0]))),
         year_distribution=dict(years.most_common(12)),
         decade_distribution=dict(decades.most_common()),
+        yearly_activity=_yearly_activity(items),
         top_tags=[{"tag": k, "weight": v} for k, v in tags.most_common(14)],
+        tag_drift=_tag_drift(items),
+        studio_affinity=(enrichment or {}).get("studio_affinity") or [],
+        staff_affinity=(enrichment or {}).get("staff_affinity") or [],
+        cv_affinity=(enrichment or {}).get("cv_affinity") or [],
         high_rated=[_dashboard_subject_card(x) for x in high[:10]],
         backlog=[_dashboard_subject_card(x) for x in backlog[:10]],
         on_hold_or_abandoned=[_dashboard_subject_card(x) for x in dropped[:10]],
@@ -378,6 +668,7 @@ class CollectionDashboardTool(Tool):
         mem = self.ltm.load_user(username)
         media: list[DashboardMediaStats] = []
         global_tags: Counter[str] = Counter()
+        enrichment_by_type: dict[str, dict] = {}
         seen_types = list(dict.fromkeys(args.subject_types))
         for subject_type in seen_types:
             items = await self.client.get_all_user_collections(
@@ -386,7 +677,11 @@ class CollectionDashboardTool(Tool):
                 collection_type=None,
                 max_items=args.max_items_per_type,
             )
-            stats = _dashboard_stats(subject_type, items)
+            enrichment = {}
+            if args.enrich_people and args.enrich_limit > 0:
+                enrichment = await _enrich_people_stats(self.client, subject_type, items, args.enrich_limit)
+                enrichment_by_type[subject_type] = enrichment
+            stats = _dashboard_stats(subject_type, items, enrichment)
             media.append(stats)
             for row in stats.top_tags:
                 global_tags[str(row.get("tag"))] += int(row.get("weight") or 0)
@@ -396,6 +691,10 @@ class CollectionDashboardTool(Tool):
                 "avg_rating": stats.avg_rating,
                 "status_counts": stats.status_counts,
                 "top_tags": stats.top_tags[:12],
+                "tag_drift": stats.tag_drift[:8],
+                "studio_affinity": stats.studio_affinity[:5],
+                "staff_affinity": stats.staff_affinity[:5],
+                "cv_affinity": stats.cv_affinity[:5],
                 "updated_at": now_iso(),
             }
         self.ltm.save_user(mem)
@@ -420,6 +719,19 @@ class CollectionDashboardTool(Tool):
             rating_strictness=_rating_strictness(avg, total_rated),
             plan_summary=dict(plan_status.most_common()),
             weekly_subscription=mem.weekly_digest_subscription.model_dump(mode="json"),
+            enrichment={
+                "enabled": bool(args.enrich_people and args.enrich_limit > 0),
+                "limit_per_type": args.enrich_limit,
+                "sampled_by_type": {
+                    k: {
+                        "sampled_count": v.get("sampled_count") or 0,
+                        "sampled_subjects": v.get("sampled_subjects") or [],
+                        "failures": v.get("failures") or [],
+                    }
+                    for k, v in enrichment_by_type.items()
+                },
+                "method": "每个媒介按高分/已评分代表条目采样，拉取 Bangumi persons/characters 后聚合 staff/studio/CV 命中。",
+            },
             memory_signals={
                 "likes": [x.model_dump(mode="json") for x in mem.likes[:8]] if args.include_memory else [],
                 "dislikes": [x.model_dump(mode="json") for x in mem.dislikes[:8]] if args.include_memory else [],
@@ -433,7 +745,7 @@ class CollectionDashboardTool(Tool):
             ],
             caveats=[
                 "仪表盘只统计 Bangumi 可见收藏与 Otomo 本地记忆；平台外观看历史不会出现。",
-                "staff/CV/studio 严肃统计需要额外逐条拉取 staff/persons，当前先预留为后续 enrichment。",
+                "staff/CV/studio 是代表作采样统计，不等同于全量收藏的绝对排名；高分样本会被优先纳入。",
             ],
         )
         return ToolResult(

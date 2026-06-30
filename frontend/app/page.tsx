@@ -484,11 +484,37 @@ export default function Home() {
           kind: "obs",
           name: "visual_feedback",
           ok: true,
-          summary: payload.signal === "correct" ? "已记录：截图识别正确" : "已记录：截图识别不对",
+          summary: payload.corrected_subject_id
+            ? `已记录视觉纠错：正确条目 ${payload.corrected_subject_name || payload.corrected_subject_id}`
+            : payload.signal === "correct"
+              ? "已记录：截图识别正确"
+              : payload.signal === "ambiguous"
+                ? "已记录：截图识别不确定"
+                : "已记录：截图识别不对",
         },
       ]);
     } catch (e) {
       setTrace((t) => [...t, { kind: "obs", name: "visual_feedback", ok: false, summary: String(e) }]);
+    }
+  }
+
+  async function searchVisualCorrection(query: string, subjectType?: string): Promise<Record<string, any>[]> {
+    try {
+      const res = await fetch(`${BACKEND}/feedback/visual/search_subjects`, {
+        method: "POST",
+        credentials: "include",
+        headers: csrfHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ keyword: query, subject_type: subjectType || "anime", limit: 8 }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok || !payload.ok) {
+        setTrace((t) => [...t, { kind: "obs", name: "visual_search", ok: false, summary: payload.detail || payload.error || `HTTP ${res.status}` }]);
+        return [];
+      }
+      return list(payload.subjects);
+    } catch (e) {
+      setTrace((t) => [...t, { kind: "obs", name: "visual_search", ok: false, summary: String(e) }]);
+      return [];
     }
   }
 
@@ -712,6 +738,7 @@ export default function Home() {
             onCancelAction={(id) => postAction("cancel", id)}
             onUndoAction={(id) => postAction("undo", id)}
             onVisualFeedback={postVisualFeedback}
+            onVisualCorrectionSearch={searchVisualCorrection}
           />
           {spoiler?.progress_episode != null && (
             <div className="filter-note">🔒 已按第 {spoiler.progress_episode} 集进度过滤分集剧情内容</div>

@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 from typing import Any, AsyncIterator
 
-from .agent.contracts import ClaimCheckEvent
+from .agent.contracts import ClaimCheckEvent, FinalEvent
 from .claim_verifier import verify_answer_claims
 from .config import settings
 
@@ -109,6 +109,84 @@ def _obs_for_verifier(ev: Any) -> dict[str, Any]:
     }
 
 
+_CLAIM_REVISION_PROMPT = """你是 Otomo 的事实修正器。请只根据「本轮 observation」和「claim verifier 修正建议」修正最终回答。
+
+要求：
+- 删除或降级 unsupported/block 事实断言，不要补新事实。
+- 如果证据只支持更弱结论，就写“本轮证据只能确认……”。
+- 保留用户可用的建议、结构和语气，但不要保留未被证据支持的制作公司、评分、年份、声优、排名等硬事实。
+- 只输出修正后的最终回答，不要解释你的修正过程。
+"""
+
+
+def _revision_payload(observations: list[dict[str, Any]], limit: int = 9000) -> str:
+    rows = []
+    for obs in observations[:30]:
+        rows.append(
+            {
+                "name": obs.get("name"),
+                "summary": obs.get("summary"),
+                "data": obs.get("data"),
+                "sources": obs.get("sources"),
+                "entities": obs.get("entities"),
+            }
+        )
+    text = json.dumps(rows, ensure_ascii=False)
+    return text[:limit]
+
+
+def _strip_revision_text(text: str) -> str:
+    out = str(text or "").strip()
+    for marker in ("｜DSML｜", "DSML", "tool_calls", "invoke name", "<｜"):
+        idx = out.find(marker)
+        if idx >= 0:
+            out = out[:idx].strip()
+    return out
+
+
+async def _maybe_revise_answer(
+    runner: Any,
+    answer: str,
+    claim_check: Any,
+    observations: list[dict[str, Any]],
+) -> tuple[str, Any | None]:
+    if not settings.claim_auto_revision_enabled or not claim_check.needs_revision:
+        return "", None
+    llm = getattr(runner, "llm", None)
+    model = getattr(runner, "model", None) or settings.llm_model
+    if llm is None or not model:
+        return "", None
+    hints = "\n".join(f"- {x}" for x in claim_check.revision_hints[:8])
+    messages = [
+        {"role": "system", "content": _CLAIM_REVISION_PROMPT},
+        {"role": "user", "content": (
+            "原始回答：\n"
+            f"{answer}\n\n"
+            "claim verifier 修正建议：\n"
+            f"{hints}\n\n"
+            "本轮 observation：\n"
+            f"{_revision_payload(observations)}"
+        )},
+    ]
+    try:
+        resp = await llm.chat.completions.create(model=model, messages=messages)
+    except Exception:  # noqa: BLE001 - 修正失败不能影响主回答
+        return "", None
+    revised = _strip_revision_text(resp.choices[0].message.content or "")
+    if not revised or revised == answer:
+        return "", None
+    revised_check = verify_answer_claims(revised, observations)
+    improved = (
+        revised_check.unsupported_count < claim_check.unsupported_count
+        or (claim_check.needs_revision and not revised_check.needs_revision)
+        or revised_check.support_rate > claim_check.support_rate
+    )
+    if not improved:
+        return "", None
+    revised_check.caveats.insert(0, "已根据 claim verifier 自动删除/降级未支持事实；修正后再次做本轮 evidence graph 校验。")
+    return revised, revised_check
+
+
 async def traced_stream(runner, message: str, state, meta: dict) -> AsyncIterator:
     """包裹 runner.stream：原样透传事件，run 结束把结构化 trace 落 JSONL。
 
@@ -156,6 +234,17 @@ async def traced_stream(runner, message: str, state, meta: dict) -> AsyncIterato
                 claim_event = ClaimCheckEvent(**rl_rec["claim_check"])
                 rec["events"].append(_summarize_event(claim_event))
                 yield claim_event
+                revised, revised_check = await _maybe_revise_answer(runner, final_answer, claim_check, rl_rec["observations"])
+                if revised and revised_check is not None:
+                    final_answer = revised
+                    rl_rec["answer"] = final_answer
+                    revised_final = FinalEvent(answer=final_answer, sources=ev.sources, steps=ev.steps)
+                    rec["events"].append({**_summarize_event(revised_final), "auto_revised": True})
+                    yield revised_final
+                    rl_rec["claim_revision"] = revised_check.model_dump(mode="json", exclude_none=True)
+                    revised_claim_event = ClaimCheckEvent(**rl_rec["claim_revision"])
+                    rec["events"].append({**_summarize_event(revised_claim_event), "after_auto_revision": True})
+                    yield revised_claim_event
     finally:
         rec["duration_ms"] = round((time.monotonic() - t0) * 1000)
         rec["n_tools"] = len(rec["tools"])

@@ -30,7 +30,7 @@ from ..uploads import upload_store
 from ..weekly import WeeklyDigestService
 from ..agent.plan_execute import PlanExecuteRunner
 from ..agent.react import ReActRunner
-from ..tools.bangumi.client import BangumiClient
+from ..tools.bangumi.client import SUBJECT_TYPE, BangumiClient
 from ..tools.moegirl.client import MoegirlClient
 
 
@@ -127,6 +127,13 @@ class VisualFeedbackRequest(BaseModel):
     corrected_subject_id: int | None = None
     corrected_subject_name: str = ""
     note: str = ""
+    auth_session_id: str | None = None
+
+
+class VisualFeedbackSearchRequest(BaseModel):
+    keyword: str
+    subject_type: Literal["anime", "book", "music", "game", "real"] = "anime"
+    limit: int = Field(8, ge=1, le=12)
     auth_session_id: str | None = None
 
 
@@ -438,6 +445,36 @@ async def visual_feedback(req: VisualFeedbackRequest, request: Request, response
             "feedback": item.model_dump(mode="json", exclude_none=True),
             "memory": memory_summary(mem).model_dump(mode="json", exclude_none=True),
         }
+    finally:
+        await client.aclose()
+
+
+@app.post("/feedback/visual/search_subjects")
+async def visual_feedback_search_subjects(
+    req: VisualFeedbackSearchRequest,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response, req.auth_session_id)
+    _require_csrf(request, session.auth_session_id)
+    keyword = req.keyword.strip()
+    if not keyword:
+        return {"ok": True, "subjects": []}
+    client = await _request_client(app, session.auth_session_id)
+    try:
+        raw = await client.search_subjects(keyword, SUBJECT_TYPE[req.subject_type], limit=req.limit)
+        subjects = []
+        for row in (raw.get("data") or [])[: req.limit]:
+            images = row.get("images") or {}
+            subjects.append({
+                "id": row.get("id"),
+                "name": row.get("name") or "",
+                "name_cn": row.get("name_cn") or "",
+                "score": row.get("score") or ((row.get("rating") or {}).get("score")),
+                "image": images.get("common") or images.get("medium") or images.get("grid") or "",
+                "url": f"https://bgm.tv/subject/{row.get('id')}" if row.get("id") else "",
+            })
+        return {"ok": True, "subjects": subjects}
     finally:
         await client.aclose()
 

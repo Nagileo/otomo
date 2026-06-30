@@ -15,7 +15,7 @@ from otomo.tools.aspect_profile.tool import (
     fallback_extract,
 )
 from otomo.profile import TasteProfile
-from otomo.tools.profile.tool import _next_actions, _persona
+from otomo.tools.profile.tool import _enrich_people_stats, _next_actions, _persona, _tag_drift, _yearly_activity
 from otomo.tools.recommend.tool import _candidate_aspects, _classify_book_subtype, _classify_music_subtype
 from otomo.tools.review.tool import RatingEvidence, _galgame_source_groups
 from otomo.tools.watchorder.tool import _eps
@@ -101,6 +101,57 @@ def test_taste_report_persona_and_next_actions():
     actions = _next_actions("book", profile, has_aspect=False)
     assert any("冷启动" in x for x in actions)
     assert any("comic" in x for x in actions)
+
+
+def test_dashboard_yearly_activity_and_tag_drift():
+    items = [
+        {"type": 2, "rate": 8, "subject": {"id": 1, "name": "old-a", "date": "2018-01-01", "tags": [{"name": "战斗"}]}},
+        {"type": 2, "rate": 7, "subject": {"id": 2, "name": "old-b", "date": "2018-04-01", "tags": [{"name": "战斗"}]}},
+        {"type": 4, "rate": 5, "subject": {"id": 3, "name": "old-c", "date": "2019-01-01", "tags": [{"name": "奇幻"}]}},
+        {"type": 2, "rate": 9, "subject": {"id": 4, "name": "old-d", "date": "2019-04-01", "tags": [{"name": "奇幻"}]}},
+        {"type": 2, "rate": 9, "subject": {"id": 5, "name": "new-a", "date": "2025-01-01", "tags": [{"name": "日常"}]}},
+        {"type": 2, "rate": 10, "subject": {"id": 6, "name": "new-b", "date": "2025-04-01", "tags": [{"name": "日常"}]}},
+        {"type": 3, "rate": 0, "subject": {"id": 7, "name": "new-c", "date": "2026-01-01", "tags": [{"name": "百合"}]}},
+        {"type": 2, "rate": 8, "subject": {"id": 8, "name": "new-d", "date": "2026-04-01", "tags": [{"name": "百合"}]}},
+    ]
+    yearly = _yearly_activity(items)
+    y2025 = next(x for x in yearly if x["year"] == "2025")
+    assert y2025["total"] == 2
+    assert y2025["avg_rating"] == 9.5
+    drift = _tag_drift(items)
+    assert {x["tag"] for x in drift if x["trend"] == "rising"} & {"日常", "百合"}
+    assert {x["tag"] for x in drift if x["trend"] == "receding"} & {"战斗", "奇幻"}
+
+
+class DashboardEnrichClient:
+    async def get_subject_persons(self, subject_id: int):
+        if subject_id == 10:
+            return [
+                {"id": 1, "name": "A-1 Pictures", "relation": "动画制作"},
+                {"id": 2, "name": "导演甲", "relation": "监督"},
+            ]
+        return [
+            {"id": 1, "name": "A-1 Pictures", "relation": "动画制作"},
+            {"id": 3, "name": "脚本乙", "relation": "脚本"},
+        ]
+
+    async def get_subject_characters(self, subject_id: int):
+        return [
+            {"id": 100 + subject_id, "name": "角色", "actors": [{"id": 5, "name": "声优丙"}]},
+        ]
+
+
+def test_dashboard_enrichment_collects_staff_studio_and_cv():
+    items = [
+        {"type": 2, "rate": 10, "subject": {"id": 10, "name": "A", "date": "2024-01-01"}},
+        {"type": 2, "rate": 9, "subject": {"id": 11, "name": "B", "date": "2025-01-01"}},
+    ]
+    enriched = asyncio.run(_enrich_people_stats(DashboardEnrichClient(), "anime", items, limit=8))
+    assert enriched["sampled_count"] == 2
+    assert enriched["studio_affinity"][0]["name"] == "A-1 Pictures"
+    assert enriched["studio_affinity"][0]["count"] == 2
+    assert {x["name"] for x in enriched["staff_affinity"]} >= {"导演甲", "脚本乙"}
+    assert enriched["cv_affinity"][0]["name"] == "声优丙"
 
 
 def test_galgame_source_groups_are_structured():

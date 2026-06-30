@@ -81,6 +81,7 @@ class Settings(BaseSettings):
     langfuse_host: str = "https://cloud.langfuse.com"
     trajectory_capture_enabled: bool = True
     trajectory_store_observations: bool = True
+    claim_auto_revision_enabled: bool = True
     weekly_scheduler_enabled: bool = True
     weekly_scheduler_interval_seconds: int = 900
     weekly_webhook_timeout: float = 8.0

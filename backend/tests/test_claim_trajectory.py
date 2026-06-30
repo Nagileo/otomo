@@ -69,6 +69,46 @@ class DummyRunner:
         yield FinalEvent(answer="《银之匙》Bangumi 评分 7.9。", steps=1)
 
 
+class FakeRevisionMessage:
+    content = "本轮 Bangumi staff 证据显示，《银之匙》的动画制作为 A-1 Pictures。"
+
+
+class FakeRevisionChoice:
+    message = FakeRevisionMessage()
+
+
+class FakeRevisionResponse:
+    choices = [FakeRevisionChoice()]
+
+
+class FakeRevisionCompletions:
+    async def create(self, **kwargs):
+        return FakeRevisionResponse()
+
+
+class FakeRevisionChat:
+    completions = FakeRevisionCompletions()
+
+
+class FakeRevisionLLM:
+    chat = FakeRevisionChat()
+
+
+class RevisionRunner:
+    llm = FakeRevisionLLM()
+    model = "fake"
+
+    async def stream(self, user_input: str, state: AgentState | None = None):
+        yield ObservationEvent(
+            name="get_subject_persons",
+            ok=True,
+            summary="A-1 Pictures relation=动画制作",
+            sources=[Citation(title="银之匙", url="https://bgm.tv/subject/1")],
+            data={"title": "银之匙", "staff": [{"relation": "动画制作", "name": "A-1 Pictures"}]},
+        )
+        yield FinalEvent(answer="《银之匙》是 8-bit 制作。", steps=1)
+
+
 def test_traced_stream_emits_claim_check(tmp_path, monkeypatch):
     import otomo.obs as obs
 
@@ -79,6 +119,17 @@ def test_traced_stream_emits_claim_check(tmp_path, monkeypatch):
     assert claim.supported_count >= 1
     assert (tmp_path / "traces.jsonl").exists()
     assert (tmp_path / "rl_runs.jsonl").exists()
+
+
+def test_traced_stream_auto_revises_blocking_claim(tmp_path, monkeypatch):
+    import otomo.obs as obs
+
+    monkeypatch.setattr(obs, "_TRACE_DIR", tmp_path)
+    events = asyncio.run(_collect(traced_stream(RevisionRunner(), "银之匙谁做的？", AgentState(), {"session_id": "s", "runner": "test"})))
+    assert [e.type for e in events] == ["observation", "final", "claim_check", "final", "claim_check"]
+    assert "8-bit" in events[1].answer
+    assert "A-1 Pictures" in events[3].answer
+    assert events[4].unsupported_count == 0
 
 
 async def _collect(aiter):

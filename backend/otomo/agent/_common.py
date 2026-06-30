@@ -643,6 +643,11 @@ def _safe_collection_dashboard_payload(data: dict[str, Any]) -> dict[str, Any]:
     for item in _trim_dicts(data.get("media"), limit=8):
         copied = dict(item)
         copied["top_tags"] = _trim_dicts(copied.get("top_tags"), limit=12)
+        copied["yearly_activity"] = _trim_dicts(copied.get("yearly_activity"), limit=16)
+        copied["tag_drift"] = _trim_dicts(copied.get("tag_drift"), limit=10)
+        copied["studio_affinity"] = _trim_dicts(copied.get("studio_affinity"), limit=8)
+        copied["staff_affinity"] = _trim_dicts(copied.get("staff_affinity"), limit=8)
+        copied["cv_affinity"] = _trim_dicts(copied.get("cv_affinity"), limit=8)
         copied["high_rated"] = _trim_dicts(copied.get("high_rated"), limit=8)
         copied["backlog"] = _trim_dicts(copied.get("backlog"), limit=8)
         copied["on_hold_or_abandoned"] = _trim_dicts(copied.get("on_hold_or_abandoned"), limit=8)
@@ -657,6 +662,7 @@ def _safe_collection_dashboard_payload(data: dict[str, Any]) -> dict[str, Any]:
         "rating_strictness": _trim_text(data.get("rating_strictness"), 240),
         "plan_summary": data.get("plan_summary") or {},
         "weekly_subscription": data.get("weekly_subscription") or {},
+        "enrichment": data.get("enrichment") if isinstance(data.get("enrichment"), dict) else {},
         "memory_signals": data.get("memory_signals") or {},
         "recommendations_for_next_step": _trim_strings(data.get("recommendations_for_next_step"), limit=6, text_limit=180),
         "caveats": _trim_strings(data.get("caveats"), limit=6, text_limit=180),
@@ -739,6 +745,7 @@ def _safe_multimodal_payload(data: dict[str, Any]) -> dict[str, Any]:
         characters.append(copied)
     return {
         "question": data.get("question"),
+        "subject_type": data.get("subject_type"),
         "image_refs": _trim_strings(data.get("image_refs"), limit=4, text_limit=500),
         "raw_vlm_answer": _trim_text(data.get("raw_vlm_answer"), 600),
         "candidates": candidates,

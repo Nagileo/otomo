@@ -1,4 +1,6 @@
-import type { ReactNode } from "react";
+"use client";
+
+import { useState, type ReactNode } from "react";
 
 type AnyRecord = Record<string, any>;
 type EvidenceMap = Record<string, AnyRecord[]>;
@@ -592,9 +594,11 @@ function WeeklyDigestPanel({ data }: { data: AnyRecord }) {
 function ScreenshotIdentifyPanel({
   data,
   onVisualFeedback,
+  onVisualCorrectionSearch,
 }: {
   data: AnyRecord;
   onVisualFeedback?: (payload: AnyRecord) => void;
+  onVisualCorrectionSearch?: (query: string, subjectType?: string) => Promise<AnyRecord[]>;
 }) {
   const candidates = list(data.candidates);
   const characters = list(data.character_candidates);
@@ -669,6 +673,15 @@ function ScreenshotIdentifyPanel({
                   >
                     不对
                   </button>
+                  {onVisualCorrectionSearch && (
+                    <VisualCorrectionButton
+                      item={item}
+                      imageUri={imageRefs[item.image_index ?? 0] || ""}
+                      subjectType={text(data.subject_type, "anime")}
+                      onSearch={onVisualCorrectionSearch}
+                      onSubmit={onVisualFeedback}
+                    />
+                  )}
                 </div>
               )}
             </div>
@@ -704,6 +717,114 @@ function ScreenshotIdentifyPanel({
         <div className="caveats">{list<string>(data.caveats).map((n, i) => <span key={i}>{n}</span>)}</div>
       )}
     </Panel>
+  );
+}
+
+function VisualCorrectionButton({
+  item,
+  imageUri,
+  subjectType,
+  onSearch,
+  onSubmit,
+}: {
+  item: AnyRecord;
+  imageUri: string;
+  subjectType: string;
+  onSearch: (query: string, subjectType?: string) => Promise<AnyRecord[]>;
+  onSubmit: (payload: AnyRecord) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState(text(item.predicted_title || item.title || item.bangumi_name, ""));
+  const [note, setNote] = useState("");
+  const [results, setResults] = useState<AnyRecord[]>([]);
+  const [busy, setBusy] = useState(false);
+
+  async function runSearch() {
+    const q = query.trim();
+    if (!q) return;
+    setBusy(true);
+    try {
+      setResults(await onSearch(q, subjectType));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function basePayload(signal: string) {
+    return {
+      image_uri: imageUri,
+      tool_name: "identify_acgn_screenshot",
+      predicted_subject_id: item.bangumi_id ?? null,
+      predicted_subject_name: item.bangumi_name || "",
+      predicted_title: item.title || item.bangumi_name || "",
+      source: item.source || "",
+      confidence: Number(item.confidence || 0),
+      signal,
+      note,
+    };
+  }
+
+  return (
+    <div className="correction-box">
+      <button type="button" className="inline-action" onClick={() => setOpen((v) => !v)}>
+        改正
+      </button>
+      {open && (
+        <div className="correction-panel">
+          <div className="correction-row">
+            <input
+              type="text"
+              value={query}
+              placeholder="搜索正确 Bangumi 条目"
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && runSearch()}
+            />
+            <button type="button" className="inline-action" disabled={busy || !query.trim()} onClick={runSearch}>
+              {busy ? "搜索中" : "搜索"}
+            </button>
+          </div>
+          <input
+            type="text"
+            value={note}
+            placeholder="可选备注：错在哪里 / 正确线索"
+            onChange={(e) => setNote(e.target.value)}
+          />
+          <div className="correction-results">
+            {results.map((cand) => (
+              <button
+                type="button"
+                key={cand.id}
+                className="correction-result"
+                onClick={() => {
+                  onSubmit({
+                    ...basePayload("wrong"),
+                    corrected_subject_id: cand.id ?? null,
+                    corrected_subject_name: cand.name_cn || cand.name || "",
+                  });
+                  setOpen(false);
+                }}
+              >
+                {cand.image ? <img src={cand.image} alt="" /> : <span className="shared-noimg" />}
+                <span>
+                  <strong>{text(cand.name_cn || cand.name)}</strong>
+                  <small>{cand.score ? `BGM ${cand.score}` : "Bangumi 候选"}</small>
+                </span>
+              </button>
+            ))}
+          </div>
+          <button
+            type="button"
+            className="inline-action"
+            onClick={() => {
+              onSubmit(basePayload("ambiguous"));
+              setOpen(false);
+            }}
+          >
+            只记录为不确定
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -1136,10 +1257,69 @@ function SubjectMiniList({ title, items }: { title: string; items: AnyRecord[] }
   );
 }
 
+function YearlyActivityList({ items }: { items: AnyRecord[] }) {
+  if (!items.length) return null;
+  return (
+    <div>
+      <div className="section-title">年度活动</div>
+      <div className="compact-list">
+        {items.slice(0, 8).map((item, i) => (
+          <span key={`${item.year}-${i}`}>
+            {text(item.year)} · {item.total ?? 0} 项
+            {item.avg_rating ? ` · 均分 ${item.avg_rating}` : ""}
+            {item.high_rated ? ` · 高分 ${item.high_rated}` : ""}
+            {item.on_hold_or_abandoned ? ` · 搁置/抛弃 ${item.on_hold_or_abandoned}` : ""}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function TagDriftList({ items }: { items: AnyRecord[] }) {
+  if (!items.length) return null;
+  const rising = items.filter((item) => item.trend === "rising").slice(0, 5);
+  const receding = items.filter((item) => item.trend === "receding").slice(0, 5);
+  return (
+    <div>
+      <div className="section-title">Tag 漂移</div>
+      <div className="evidence-row tight">
+        {rising.map((item, i) => (
+          <Badge key={`r-${item.tag}-${i}`} tone="good">↑ {text(item.tag)} {pct(Number(item.delta || 0) * 100)}%</Badge>
+        ))}
+        {receding.map((item, i) => (
+          <Badge key={`d-${item.tag}-${i}`} tone="warn">↓ {text(item.tag)} {pct(Math.abs(Number(item.delta || 0)) * 100)}%</Badge>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AffinityList({ title, items }: { title: string; items: AnyRecord[] }) {
+  if (!items.length) return null;
+  return (
+    <div>
+      <div className="section-title">{title}</div>
+      <div className="compact-list">
+        {items.slice(0, 6).map((item, i) => {
+          const works = list(item.works).slice(0, 3).map((w) => text(w.name, "")).filter(Boolean).join(" / ");
+          return (
+            <span key={`${item.name}-${item.relation}-${i}`}>
+              {text(item.name)}
+              <small> · {text(item.relation)} · 命中 {item.count ?? 0}{works ? ` · ${works}` : ""}</small>
+            </span>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function CollectionDashboardPanel({ data }: { data: AnyRecord }) {
   const totals = data.totals || {};
   const media = list(data.media);
   const weekly = data.weekly_subscription || {};
+  const enrichment = data.enrichment || {};
   return (
     <Panel title={`收藏仪表盘 · ${text(data.username)}`} subtitle={`生成于 ${text(data.generated_at, "-")}`}>
       <div className="metric-grid">
@@ -1152,6 +1332,14 @@ function CollectionDashboardPanel({ data }: { data: AnyRecord }) {
       <div className="evidence-row">
         {list(data.global_top_tags).slice(0, 14).map((tag) => <Badge key={tag.tag} tone="good">{text(tag.tag)} · {tag.weight}</Badge>)}
       </div>
+      {enrichment.enabled && (
+        <div className="evidence-row">
+          <Badge tone="dim">enrichment: 每类最多 {enrichment.limit_per_type ?? "-"} 条代表作</Badge>
+          {Object.entries(enrichment.sampled_by_type || {}).slice(0, 5).map(([subjectType, row]) => (
+            <Badge key={subjectType} tone="dim">{subjectType}: {(row as AnyRecord).sampled_count ?? 0} 样本</Badge>
+          ))}
+        </div>
+      )}
       <div className="rating-grid">
         {media.map((m, i) => (
           <div className="rating-card" key={`${m.subject_type}-${i}`}>
@@ -1164,9 +1352,14 @@ function CollectionDashboardPanel({ data }: { data: AnyRecord }) {
             <DistributionBadges data={m.rating_distribution} />
             <div className="section-title">年代趋势</div>
             <DistributionBadges data={m.decade_distribution} />
+            <YearlyActivityList items={list(m.yearly_activity)} />
             <div className="evidence-row tight">
               {list(m.top_tags).slice(0, 7).map((tag) => <Badge key={tag.tag} tone="dim">{text(tag.tag)}</Badge>)}
             </div>
+            <TagDriftList items={list(m.tag_drift)} />
+            <AffinityList title="制作公司 / 开发商命中" items={list(m.studio_affinity)} />
+            <AffinityList title="Staff 命中" items={list(m.staff_affinity)} />
+            <AffinityList title="CV 命中" items={list(m.cv_affinity)} />
             {list<string>(m.notes).length > 0 && (
               <div className="caveats">{list<string>(m.notes).map((n, j) => <span key={j}>{n}</span>)}</div>
             )}
@@ -1665,6 +1858,7 @@ export function EvidencePanels({
   onCancelAction,
   onUndoAction,
   onVisualFeedback,
+  onVisualCorrectionSearch,
 }: {
   evidence: EvidenceMap;
   mode?: EvidenceMode;
@@ -1673,6 +1867,7 @@ export function EvidencePanels({
   onCancelAction?: (id: string) => void;
   onUndoAction?: (id: string) => void;
   onVisualFeedback?: (payload: AnyRecord) => void;
+  onVisualCorrectionSearch?: (query: string, subjectType?: string) => Promise<AnyRecord[]>;
 }) {
   const devMode = mode === "dev";
   const review = list(evidence.review_subject);
@@ -1714,7 +1909,14 @@ export function EvidencePanels({
   ) return null;
   return (
     <div className={`evidence-stack ${devMode ? "dev-mode" : "user-mode"}`}>
-      {screenshot.map((data, i) => <ScreenshotIdentifyPanel data={data} onVisualFeedback={onVisualFeedback} key={`screenshot-${i}`} />)}
+      {screenshot.map((data, i) => (
+        <ScreenshotIdentifyPanel
+          data={data}
+          onVisualFeedback={onVisualFeedback}
+          onVisualCorrectionSearch={onVisualCorrectionSearch}
+          key={`screenshot-${i}`}
+        />
+      ))}
       {visualText.map((data, i) => <VisualTextPanel data={data} key={`visual-text-${i}`} />)}
       {visualStyle.map((data, i) => <VisualStylePanel data={data} key={`visual-style-${i}`} />)}
       {imageSource.map((data, i) => <ImageSourcePanel data={data} key={`image-source-${i}`} />)}
