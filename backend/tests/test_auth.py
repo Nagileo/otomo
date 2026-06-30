@@ -47,6 +47,39 @@ def test_auth_logout_deletes_token(tmp_path):
     assert not store.identity("sid").authenticated
 
 
+def test_auth_store_encrypts_saved_tokens(tmp_path):
+    store = AuthStore(tmp_path)
+    store.save_token(
+        BangumiToken(
+            auth_session_id="sid",
+            access_token="access-secret",
+            refresh_token="refresh-secret",
+            username="u",
+        )
+    )
+    raw = store._read("bangumi_token", "sid")
+    assert raw is not None
+    assert "access_token" not in raw
+    assert "refresh_token" not in raw
+    assert raw["access_token_enc"].startswith("fernet:")
+    assert raw["refresh_token_enc"].startswith("fernet:")
+    loaded = store.load_token("sid")
+    assert loaded is not None
+    assert loaded.access_token == "access-secret"
+    assert loaded.refresh_token == "refresh-secret"
+
+
+def test_auth_session_roundtrip_and_expiry(tmp_path, monkeypatch):
+    monkeypatch.setattr(config.settings, "session_ttl_seconds", 3600)
+    store = AuthStore(tmp_path)
+    session = store.get_or_create_session()
+    assert session.auth_session_id
+    assert session.csrf_token
+    loaded = store.load_session(session.auth_session_id)
+    assert loaded is not None
+    assert loaded.csrf_token == session.csrf_token
+
+
 def test_request_client_with_web_session_does_not_use_global_token(tmp_path, monkeypatch):
     monkeypatch.setattr(config.settings, "bangumi_token", "developer-global-token")
     app = SimpleNamespace(state=SimpleNamespace(auth=AuthStore(tmp_path)))

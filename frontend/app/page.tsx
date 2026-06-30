@@ -12,9 +12,21 @@ type Source = { title: string; url: string; source: string; image?: string };
 function Markdown({ text }: { text: string }) {
   return (
     <div className="md">
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={safeMarkdownUrl}>{text}</ReactMarkdown>
     </div>
   );
+}
+
+function safeMarkdownUrl(url: string) {
+  const raw = String(url || "").trim();
+  if (!raw) return "";
+  if (raw.startsWith("#") || raw.startsWith("/")) return raw;
+  try {
+    const parsed = new URL(raw);
+    return ["http:", "https:", "mailto:"].includes(parsed.protocol) ? raw : "";
+  } catch {
+    return "";
+  }
 }
 type TraceItem =
   | { kind: "call"; name: string; args: Record<string, unknown> }
@@ -60,6 +72,7 @@ type AuthState = {
   user_id?: number;
   oauth_configured?: boolean;
   dev_token_available?: boolean;
+  csrf_token?: string;
 };
 type AuthNotice = { tone: "good" | "warn" | "bad"; text: string };
 
@@ -248,16 +261,11 @@ export default function Home() {
   const answerRef = useRef("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const authSessionId = useRef("");
+  const csrfToken = useRef("");
   const sessionId = useRef("");  // 多轮会话 id（首次发送时生成；"新对话"会重置）
   const lastQ = useRef("");      // 最近一次用户问题（剧透 followup chips 重发用）
 
   useEffect(() => {
-    let sid = localStorage.getItem("otomo_auth_session_id") || "";
-    if (!sid) {
-      sid = crypto.randomUUID();
-      localStorage.setItem("otomo_auth_session_id", sid);
-    }
-    authSessionId.current = sid;
     const params = new URLSearchParams(window.location.search);
     const authStatus = params.get("bangumi_auth");
     if (authStatus === "ok") {
@@ -273,16 +281,27 @@ export default function Home() {
       const cleanUrl = `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`;
       window.history.replaceState(null, "", cleanUrl);
     }
-    void refreshAuthSession(sid);
+    void refreshAuthSession();
   }, []);
 
-  async function refreshAuthSession(sid = authSessionId.current) {
-    if (!sid) return;
+  function csrfHeaders(extra?: Record<string, string>) {
+    return {
+      ...(extra ?? {}),
+      ...(csrfToken.current ? { "x-otomo-csrf": csrfToken.current } : {}),
+    };
+  }
+
+  async function refreshAuthSession() {
     try {
-      const res = await fetch(`${BACKEND}/auth/session?auth_session_id=${encodeURIComponent(sid)}`);
-      if (res.ok) setAuth(await res.json());
+      const res = await fetch(`${BACKEND}/auth/session`, { credentials: "include" });
+      if (res.ok) {
+        const payload = await res.json();
+        authSessionId.current = payload.auth_session_id || "";
+        csrfToken.current = payload.csrf_token || "";
+        setAuth(payload);
+      }
     } catch {
-      setAuth({ auth_session_id: sid, authenticated: false });
+      setAuth({ auth_session_id: authSessionId.current, authenticated: false });
     }
   }
 
@@ -330,7 +349,8 @@ export default function Home() {
       const dataUrl = await readAsDataUrl(image.file);
       const res = await fetch(`${BACKEND}/uploads/image`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        headers: csrfHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({ data_url: dataUrl, filename: image.file.name }),
       });
       if (!res.ok) throw new Error(await res.text());
@@ -370,11 +390,11 @@ export default function Home() {
       setMessages((m) => [...m, { role: "user", content: q, attachments }]);
       const res = await fetch(`${BACKEND}/chat`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        headers: csrfHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
           message: q,
           session_id: sessionId.current,
-          auth_session_id: authSessionId.current,
           attachments,
           ...(spoilerMode ? { spoiler_mode: spoilerMode } : {}),
         }),
@@ -416,8 +436,9 @@ export default function Home() {
     try {
       const res = await fetch(`${BACKEND}/actions/${kind}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action_id: actionId, auth_session_id: authSessionId.current }),
+        credentials: "include",
+        headers: csrfHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ action_id: actionId }),
       });
       const payload = await res.json();
       if (!payload.ok) {
@@ -510,10 +531,7 @@ export default function Home() {
   }
 
   async function startBangumiLogin() {
-    if (!authSessionId.current) {
-      authSessionId.current = crypto.randomUUID();
-      localStorage.setItem("otomo_auth_session_id", authSessionId.current);
-    }
+    if (!authSessionId.current || !csrfToken.current) await refreshAuthSession();
     if (auth && !auth.oauth_configured) {
       setAuthNotice({
         tone: "warn",
@@ -523,7 +541,7 @@ export default function Home() {
       });
       return;
     }
-    const res = await fetch(`${BACKEND}/auth/bangumi/login?auth_session_id=${encodeURIComponent(authSessionId.current)}`);
+    const res = await fetch(`${BACKEND}/auth/bangumi/login`, { credentials: "include" });
     const payload = await res.json().catch(() => ({}));
     if (payload.authorization_url) window.location.href = payload.authorization_url;
     else {
@@ -534,15 +552,13 @@ export default function Home() {
   }
 
   async function loginWithLocalToken() {
-    if (!authSessionId.current) {
-      authSessionId.current = crypto.randomUUID();
-      localStorage.setItem("otomo_auth_session_id", authSessionId.current);
-    }
+    if (!authSessionId.current || !csrfToken.current) await refreshAuthSession();
     try {
       const res = await fetch(`${BACKEND}/auth/dev-token-login`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ auth_session_id: authSessionId.current }),
+        credentials: "include",
+        headers: csrfHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({}),
       });
       const payload = await res.json().catch(() => ({}));
       if (!res.ok || !payload.ok) {
@@ -550,6 +566,8 @@ export default function Home() {
         return;
       }
       setAuth(payload.identity);
+      authSessionId.current = payload.identity?.auth_session_id || authSessionId.current;
+      csrfToken.current = payload.identity?.csrf_token || csrfToken.current;
       setAuthNotice({ tone: "good", text: `已使用本地 BANGUMI_TOKEN 绑定：@${payload.identity?.username || "unknown"}` });
     } catch (e) {
       setAuthNotice({ tone: "bad", text: `本地 Token 绑定失败：${String(e)}` });
@@ -559,9 +577,12 @@ export default function Home() {
   async function logoutBangumi() {
     await fetch(`${BACKEND}/auth/logout`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ auth_session_id: authSessionId.current }),
+      credentials: "include",
+      headers: csrfHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({}),
     });
+    authSessionId.current = "";
+    csrfToken.current = "";
     setAuth({ auth_session_id: authSessionId.current, authenticated: false });
     setAuthNotice({ tone: "warn", text: "已退出当前浏览器会话的 Bangumi 绑定" });
     setMemory(null);

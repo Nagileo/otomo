@@ -18,6 +18,16 @@ class Settings(BaseSettings):
     bangumi_oauth_client_secret: str = ""
     bangumi_oauth_redirect_uri: str = "http://localhost:8000/auth/bangumi/callback"
     frontend_base_url: str = "http://localhost:3000"
+    cors_allowed_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+    auth_store_backend: str = "sqlite"  # sqlite | file
+    auth_store_path: str = "cache/auth/auth.sqlite3"
+    auth_encryption_key: str = ""       # Fernet key；空则开发环境自动生成 cache/auth/.fernet_key
+    session_cookie_name: str = "otomo_session"
+    csrf_cookie_name: str = "otomo_csrf"
+    csrf_header_name: str = "x-otomo-csrf"
+    cookie_secure: bool = False          # 生产 HTTPS 必须设 true
+    csrf_protection_enabled: bool = True
+    session_ttl_seconds: int = 60 * 60 * 24 * 30
 
     # ---- 萌娘百科 RAG（按需取+缓存，绝不入库；见 docs/02）----
     moegirl_api_base: str = "https://zh.moegirl.org.cn/api.php"

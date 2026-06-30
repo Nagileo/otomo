@@ -60,12 +60,29 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="Otomo Backend", version="0.1.0", lifespan=lifespan)
 
+
+def _cors_origins() -> list[str]:
+    return [x.strip() for x in settings.cors_allowed_origins.split(",") if x.strip()]
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=_cors_origins(),
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    response.headers.setdefault("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
+    return response
 
 
 class ChatRequest(BaseModel):
@@ -96,29 +113,91 @@ class UndoActionRequest(BaseModel):
     auth_session_id: str | None = None
 
 
+def _set_auth_cookies(response: Response, session) -> None:
+    max_age = max(int(settings.session_ttl_seconds), 60)
+    response.set_cookie(
+        settings.session_cookie_name,
+        session.auth_session_id,
+        max_age=max_age,
+        httponly=True,
+        secure=settings.cookie_secure,
+        samesite="lax",
+        path="/",
+    )
+    response.set_cookie(
+        settings.csrf_cookie_name,
+        session.csrf_token,
+        max_age=max_age,
+        httponly=False,
+        secure=settings.cookie_secure,
+        samesite="lax",
+        path="/",
+    )
+
+
+def _clear_auth_cookies(response: Response) -> None:
+    response.delete_cookie(settings.session_cookie_name, path="/")
+    response.delete_cookie(settings.csrf_cookie_name, path="/")
+
+
+def _auth_session_id(request: Request, explicit: str | None = None) -> str:
+    return explicit or request.cookies.get(settings.session_cookie_name, "") or ""
+
+
+def _ensure_auth_session(request: Request, response: Response, explicit: str | None = None):
+    session = app.state.auth.get_or_create_session(_auth_session_id(request, explicit) or None)
+    _set_auth_cookies(response, session)
+    return session
+
+
+def _require_csrf(request: Request, auth_session_id: str) -> None:
+    if not settings.csrf_protection_enabled:
+        return
+    session = app.state.auth.load_session(auth_session_id)
+    if not session:
+        raise HTTPException(status_code=403, detail="会话不存在或已过期，请刷新页面")
+    header_value = request.headers.get(settings.csrf_header_name) or request.headers.get("x-csrf-token") or ""
+    cookie_value = request.cookies.get(settings.csrf_cookie_name, "")
+    if not header_value or header_value != session.csrf_token or cookie_value != session.csrf_token:
+        raise HTTPException(status_code=403, detail="CSRF 校验失败，请刷新页面")
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
 @app.get("/auth/session")
-async def auth_session(auth_session_id: str) -> dict[str, Any]:
-    payload = app.state.auth.identity(auth_session_id).model_dump(mode="json")
+async def auth_session(
+    request: Request,
+    response: Response,
+    auth_session_id: str | None = None,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response, auth_session_id)
+    payload = app.state.auth.identity(session.auth_session_id).model_dump(mode="json")
     payload["oauth_configured"] = bool(settings.bangumi_oauth_client_id and settings.bangumi_oauth_client_secret)
     payload["dev_token_available"] = bool(settings.bangumi_token)
+    payload["csrf_token"] = session.csrf_token
     return payload
 
 
 @app.post("/weekly/run-due")
-async def weekly_run_due() -> dict[str, Any]:
+async def weekly_run_due(request: Request, response: Response) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
     count = await app.state.weekly_service.run_due_once()
     return {"ok": True, "generated": count}
 
 
 @app.get("/auth/bangumi/login")
-async def bangumi_login(auth_session_id: str) -> dict[str, Any]:
+async def bangumi_login(
+    request: Request,
+    response: Response,
+    auth_session_id: str | None = None,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response, auth_session_id)
     try:
-        url = build_authorization_url(app.state.auth, auth_session_id)
+        url = build_authorization_url(app.state.auth, session.auth_session_id)
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     return {"authorization_url": url}
@@ -130,12 +209,11 @@ def _is_local_request(request: Request) -> bool:
 
 
 @app.post("/auth/dev-token-login")
-async def dev_token_login(req: dict[str, str], request: Request) -> dict[str, Any]:
+async def dev_token_login(req: dict[str, str], request: Request, response: Response) -> dict[str, Any]:
     if not _is_local_request(request):
         raise HTTPException(status_code=403, detail="本地 Token 登录仅允许 localhost 开发调试")
-    auth_session_id = req.get("auth_session_id") or ""
-    if not auth_session_id:
-        raise HTTPException(status_code=400, detail="缺少 auth_session_id")
+    session = _ensure_auth_session(request, response, req.get("auth_session_id") or None)
+    _require_csrf(request, session.auth_session_id)
     if not settings.bangumi_token:
         raise HTTPException(status_code=400, detail="未配置 BANGUMI_TOKEN")
     try:
@@ -144,40 +222,51 @@ async def dev_token_login(req: dict[str, str], request: Request) -> dict[str, An
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=f"BANGUMI_TOKEN 验证失败：{type(e).__name__}: {str(e)[:160]}") from e
     token = BangumiToken(
-        auth_session_id=auth_session_id,
+        auth_session_id=session.auth_session_id,
         access_token=settings.bangumi_token,
         user_id=int(me["id"]) if me.get("id") is not None else None,
         username=str(me.get("username") or ""),
     )
     app.state.auth.save_token(token)
-    return {"ok": True, "identity": app.state.auth.identity(auth_session_id).model_dump(mode="json")}
+    identity = app.state.auth.identity(session.auth_session_id).model_dump(mode="json")
+    identity["csrf_token"] = session.csrf_token
+    return {"ok": True, "identity": identity}
 
 
 @app.get("/auth/bangumi/callback")
 async def bangumi_callback(code: str = "", state: str = "") -> RedirectResponse:
     status = "ok"
     params: dict[str, str] = {}
+    session_id = ""
     try:
         token = await exchange_oauth_code(app.state.auth, code, state)
+        session_id = token.auth_session_id
         params["user"] = token.username
     except Exception as e:  # noqa: BLE001
         status = "error"
         params["error"] = f"{type(e).__name__}: {str(e)[:180]}"
     params["bangumi_auth"] = status
     redirect_to = f"{settings.frontend_base_url.rstrip('/')}?{urlencode(params)}"
-    return RedirectResponse(redirect_to)
+    response = RedirectResponse(redirect_to)
+    if session_id:
+        session = app.state.auth.get_or_create_session(session_id)
+        _set_auth_cookies(response, session)
+    return response
 
 
 @app.post("/auth/logout")
-async def bangumi_logout(req: dict[str, str]) -> dict[str, Any]:
-    auth_session_id = req.get("auth_session_id") or ""
-    if auth_session_id:
-        app.state.auth.delete_token(auth_session_id)
-    return {"ok": True, "auth_session_id": auth_session_id}
+async def bangumi_logout(req: dict[str, str], request: Request, response: Response) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response, req.get("auth_session_id") or None)
+    _require_csrf(request, session.auth_session_id)
+    app.state.auth.delete_token(session.auth_session_id)
+    _clear_auth_cookies(response)
+    return {"ok": True, "auth_session_id": session.auth_session_id}
 
 
 @app.post("/uploads/image")
-async def upload_image(req: UploadImageRequest) -> dict[str, Any]:
+async def upload_image(req: UploadImageRequest, request: Request, response: Response) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
     try:
         image = upload_store.save_data_url(req.data_url, req.filename)
     except ValueError as e:
@@ -252,35 +341,41 @@ async def _dispatch_action(
 
 
 @app.post("/actions/confirm")
-async def confirm_action(req: ActionRequest) -> dict[str, Any]:
+async def confirm_action(req: ActionRequest, request: Request, response: Response) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response, req.auth_session_id)
+    _require_csrf(request, session.auth_session_id)
     return await _dispatch_action(
         app,
         "execute_bangumi_write_action",
         {"username": req.username, "action_id": req.action_id, "confirmed": True},
         allow_write=True,
-        auth_session_id=req.auth_session_id,
+        auth_session_id=session.auth_session_id,
     )
 
 
 @app.post("/actions/cancel")
-async def cancel_action(req: ActionRequest) -> dict[str, Any]:
+async def cancel_action(req: ActionRequest, request: Request, response: Response) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response, req.auth_session_id)
+    _require_csrf(request, session.auth_session_id)
     return await _dispatch_action(
         app,
         "cancel_bangumi_write_action",
         {"username": req.username, "action_id": req.action_id, "reason": req.reason},
         allow_write=False,
-        auth_session_id=req.auth_session_id,
+        auth_session_id=session.auth_session_id,
     )
 
 
 @app.post("/actions/undo")
-async def undo_action(req: UndoActionRequest) -> dict[str, Any]:
+async def undo_action(req: UndoActionRequest, request: Request, response: Response) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response, req.auth_session_id)
+    _require_csrf(request, session.auth_session_id)
     return await _dispatch_action(
         app,
         "undo_bangumi_write_action",
         {"username": req.username, "action_id": req.action_id, "confirmed": True},
         allow_write=True,
-        auth_session_id=req.auth_session_id,
+        auth_session_id=session.auth_session_id,
     )
 
 
@@ -301,8 +396,10 @@ async def _attach_memory_state(app: FastAPI, state: AgentState | None, client: B
 
 
 @app.post("/chat")
-async def chat(req: ChatRequest):
-    client = await _request_client(app, req.auth_session_id)
+async def chat(req: ChatRequest, request: Request):
+    session = app.state.auth.get_or_create_session(_auth_session_id(request, req.auth_session_id) or None)
+    _require_csrf(request, session.auth_session_id)
+    client = await _request_client(app, session.auth_session_id)
     registry = build_registry(client, app.state.moegirl, app.state.ltm)
     runner = _runner_from_registry(req.runner, registry)
     # 短期记忆：有 session_id 就复用既有状态，否则新建
@@ -342,7 +439,7 @@ async def chat(req: ChatRequest):
     async def event_gen() -> AsyncIterator[dict]:
         meta = {
             "session_id": req.session_id or "",
-            "auth_session_id": req.auth_session_id or "",
+            "auth_session_id": session.auth_session_id,
             "runner": req.runner,
         }
         try:
@@ -353,4 +450,6 @@ async def chat(req: ChatRequest):
                 state.short_term.pop("attachments", None)
             await client.aclose()
 
-    return EventSourceResponse(event_gen())
+    response = EventSourceResponse(event_gen())
+    _set_auth_cookies(response, session)
+    return response
