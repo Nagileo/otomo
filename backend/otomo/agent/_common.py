@@ -381,6 +381,8 @@ _PANEL_TOOLS = {
     "episode_buzz_radar",
     "identify_acgn_screenshot",
     "extract_visual_text",
+    "recommend_by_visual_style",
+    "search_image_source",
     "build_aspect_profile",
     "plan_watch_copilot",
     "build_taste_report",
@@ -730,6 +732,39 @@ def _safe_visual_text_payload(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _safe_visual_style_payload(data: dict[str, Any]) -> dict[str, Any]:
+    candidates = []
+    for item in _trim_dicts(data.get("candidates"), limit=12):
+        copied = dict(item)
+        copied["reason"] = _trim_text(copied.get("reason"), 160)
+        copied["matched_tags"] = _trim_strings(copied.get("matched_tags"), limit=8, text_limit=40)
+        candidates.append(copied)
+    return {
+        "style_description": _trim_text(data.get("style_description"), 900),
+        "visual_tags": _trim_strings(data.get("visual_tags"), limit=16, text_limit=40),
+        "bangumi_tags": _trim_strings(data.get("bangumi_tags"), limit=10, text_limit=40),
+        "candidates": candidates,
+        "confidence": data.get("confidence"),
+        "raw_vlm_answer": _trim_text(data.get("raw_vlm_answer"), 600),
+        "caveats": _trim_strings(data.get("caveats"), limit=6, text_limit=180),
+    }
+
+
+def _safe_image_source_payload(data: dict[str, Any]) -> dict[str, Any]:
+    matches = []
+    for item in _trim_dicts(data.get("matches"), limit=12):
+        copied = dict(item)
+        copied["title"] = _trim_text(copied.get("title"), 120)
+        copied["author"] = _trim_text(copied.get("author"), 80)
+        copied["note"] = _trim_text(copied.get("note"), 140)
+        matches.append(copied)
+    return {
+        "matches": matches,
+        "navigation_links": _trim_dicts(data.get("navigation_links"), limit=8),
+        "caveats": _trim_strings(data.get("caveats"), limit=8, text_limit=180),
+    }
+
+
 def panel_data_from_payload(name: str, payload: dict[str, Any] | None) -> dict[str, Any] | None:
     """Return UI-safe structured payload for tools that have dedicated evidence panels."""
     if name not in _PANEL_TOOLS or not isinstance(payload, dict):
@@ -763,6 +798,10 @@ def panel_data_from_payload(name: str, payload: dict[str, Any] | None) -> dict[s
         return _safe_multimodal_payload(data)
     if name == "extract_visual_text":
         return _safe_visual_text_payload(data)
+    if name == "recommend_by_visual_style":
+        return _safe_visual_style_payload(data)
+    if name == "search_image_source":
+        return _safe_image_source_payload(data)
     if name in _MEMORY_TOOLS:
         return _safe_memory_payload(data)
     return None

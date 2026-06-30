@@ -26,7 +26,9 @@ from ..bangumi.client import SUBJECT_TYPE, BangumiClient
 
 
 _TRACE_MOE_API = "https://api.trace.moe/search"
+_SAUCENAO_API = "https://saucenao.com/search.php"
 _trace_cache = TTLCache(settings.cache_ttl * 6)
+_saucenao_cache = TTLCache(settings.cache_ttl * 6)
 
 
 class IdentifyScreenshotArgs(BaseModel):
@@ -654,5 +656,325 @@ class ExtractVisualTextTool(Tool):
         )
 
 
+class VisualStyleCandidate(BaseModel):
+    id: int
+    name: str
+    score: float | None = None
+    image: str | None = None
+    matched_tags: list[str] = Field(default_factory=list)
+    reason: str = ""
+
+
+class VisualStyleRecommendArgs(BaseModel):
+    image_url: str = Field("", description="单张图片 URL / data URL / upload://...")
+    image_urls: list[str] = Field(default_factory=list, description="多张图片 URL / data URL / upload://...；最多处理 4 张")
+    subject_type: Literal["anime", "book", "music", "game", "real"] = "anime"
+    question: str = Field("分析画风、色调、构图和题材氛围，并推荐视觉/氛围相近的作品。")
+    limit: int = Field(8, ge=1, le=20)
+
+
+class VisualStyleRecommendResult(BaseModel):
+    style_description: str = ""
+    visual_tags: list[str] = Field(default_factory=list)
+    bangumi_tags: list[str] = Field(default_factory=list)
+    candidates: list[VisualStyleCandidate] = Field(default_factory=list)
+    confidence: float = Field(0.0, ge=0.0, le=1.0)
+    raw_vlm_answer: str = ""
+    caveats: list[str] = Field(default_factory=list)
+
+
+_STYLE_TAG_ALIASES = {
+    "日常": "日常",
+    "治愈": "治愈",
+    "百合": "百合",
+    "露营": "露营",
+    "户外": "户外",
+    "校园": "校园",
+    "芳文社": "芳文社",
+    "科幻": "科幻",
+    "赛博朋克": "赛博朋克",
+    "机甲": "机战",
+    "魔法少女": "魔法少女",
+    "运动": "运动",
+    "音乐": "音乐",
+    "偶像": "偶像",
+    "悬疑": "悬疑",
+    "恋爱": "恋爱",
+    "奇幻": "奇幻",
+    "萌系": "萌",
+    "废萌": "废萌",
+    "公路": "旅行",
+}
+
+
+class VisualStyleRecommendTool(Tool):
+    name = "recommend_by_visual_style"
+    description = (
+        "根据上传图片的画风/色调/构图/题材标签，映射 Bangumi tag 并召回视觉氛围相近的作品。"
+        "这是弱推荐入口，不用于事实判断。"
+    )
+    args_model = VisualStyleRecommendArgs
+    result_model = VisualStyleRecommendResult
+
+    def __init__(self, client: BangumiClient) -> None:
+        self.client = client
+
+    def _parse_style(self, raw: str) -> tuple[str, list[str], float]:
+        payload = _extract_json(raw)
+        if not payload:
+            return raw[:600], _extract_titles(raw), 0.25
+        desc = str(payload.get("style_description") or payload.get("description") or "").strip()
+        tags = [str(x).strip() for x in (payload.get("visual_tags") or payload.get("tags") or []) if str(x).strip()]
+        confidence = max(0.0, min(float(payload.get("confidence") or 0.0), 1.0))
+        return desc[:800], tags[:16], confidence
+
+    async def run(self, args: VisualStyleRecommendArgs) -> ToolResult[VisualStyleRecommendResult]:
+        images = _image_inputs(IdentifyScreenshotArgs(image_url=args.image_url, image_urls=args.image_urls))
+        if not images:
+            return ToolResult(ok=False, error="需要 image_url 或 image_urls")
+        if not settings.vlm_model:
+            return ToolResult(ok=False, error="recommend_by_visual_style 需要配置 VLM_MODEL")
+        system = """你是动画/漫画/游戏视觉风格分析助手。只输出 JSON：
+{"style_description":"画风、色调、构图、镜头、题材氛围的简短描述",
+"visual_tags":["日常","治愈","百合","校园","科幻"...],
+"confidence":0.0到1.0}
+不要猜测无法从画面看出的事实。"""
+        raws = await asyncio.gather(
+            *[_call_vlm_with_prompt(url, system, args.question) for url in images],
+            return_exceptions=True,
+        )
+        descs: list[str] = []
+        visual_tags: list[str] = []
+        confidences: list[float] = []
+        raw_parts: list[str] = []
+        for idx, raw_item in enumerate(raws):
+            if isinstance(raw_item, Exception):
+                continue
+            raw = str(raw_item)
+            raw_parts.append(f"[image {idx + 1}]\n{raw}")
+            desc, tags, conf = self._parse_style(raw)
+            if desc:
+                descs.append(desc)
+            for tag in tags:
+                if tag not in visual_tags:
+                    visual_tags.append(tag)
+            if conf:
+                confidences.append(conf)
+        bangumi_tags: list[str] = []
+        for tag in visual_tags:
+            mapped = _STYLE_TAG_ALIASES.get(tag) or _STYLE_TAG_ALIASES.get(tag.replace("系", ""))
+            if mapped and mapped not in bangumi_tags:
+                bangumi_tags.append(mapped)
+        if not bangumi_tags:
+            bangumi_tags = visual_tags[:4]
+        stype = SUBJECT_TYPE.get(args.subject_type, 2)
+        pool: dict[int, VisualStyleCandidate] = {}
+        for tag in bangumi_tags[:6]:
+            try:
+                res = await self.client.search_subjects("", stype, sort="rank", limit=10, tags=[tag])
+                rows = res.get("data") or []
+                if not rows:
+                    res = await self.client.search_subjects(tag, stype, sort="match", limit=10)
+                    rows = res.get("data") or []
+            except Exception:  # noqa: BLE001
+                continue
+            for row in rows:
+                sid = row.get("id")
+                if not sid:
+                    continue
+                img = row.get("images") or {}
+                item = pool.get(sid)
+                if not item:
+                    item = VisualStyleCandidate(
+                        id=sid,
+                        name=row.get("name_cn") or row.get("name") or f"subject {sid}",
+                        score=row.get("score") or ((row.get("rating") or {}).get("score")),
+                        image=img.get("common") or img.get("medium") or img.get("grid"),
+                        reason="视觉标签召回",
+                    )
+                    pool[sid] = item
+                if tag not in item.matched_tags:
+                    item.matched_tags.append(tag)
+        candidates = sorted(
+            pool.values(),
+            key=lambda x: (len(x.matched_tags), x.score or 0),
+            reverse=True,
+        )[: args.limit]
+        confidence = sum(confidences) / len(confidences) if confidences else 0.35
+        data = VisualStyleRecommendResult(
+            style_description="；".join(descs)[:1000],
+            visual_tags=visual_tags[:16],
+            bangumi_tags=bangumi_tags[:10],
+            candidates=candidates,
+            confidence=confidence,
+            raw_vlm_answer="\n\n".join(raw_parts)[:1200],
+            caveats=[
+                "画风/氛围推荐是弱语义入口，不能证明作品事实或制作公司一致。",
+                "Bangumi tag 召回会受标签覆盖和用户打标习惯影响，适合做探索，不适合当严格相似度。",
+            ],
+        )
+        return ToolResult(
+            ok=True,
+            data=data,
+            sources=[
+                Citation(title=c.name, url=f"https://bgm.tv/subject/{c.id}", source="bangumi", image=c.image)
+                for c in candidates[:5]
+            ],
+        )
+
+
+class ImageSourceMatch(BaseModel):
+    engine: str
+    title: str = ""
+    url: str = ""
+    source_site: str = ""
+    author: str = ""
+    similarity: float = 0.0
+    confidence: float = Field(0.0, ge=0.0, le=1.0)
+    thumbnail: str | None = None
+    anilist_id: int | None = None
+    episode: str | int | None = None
+    timestamp: str = ""
+    note: str = ""
+
+
+class ImageSourceSearchArgs(BaseModel):
+    image_url: str = Field("", description="单张图片 URL / data URL / upload://...")
+    image_urls: list[str] = Field(default_factory=list, description="多张图片 URL / data URL / upload://...；最多处理 4 张")
+    engines: list[Literal["trace_moe", "saucenao", "ascii2d", "pixiv"]] = Field(
+        default_factory=lambda: ["trace_moe", "saucenao", "ascii2d", "pixiv"],
+        description="trace_moe=动画截图；saucenao=插画/同人溯源；ascii2d/pixiv 仅生成导航入口或使用 SauceNAO 外链。",
+    )
+    limit: int = Field(8, ge=1, le=20)
+
+
+class ImageSourceSearchResult(BaseModel):
+    matches: list[ImageSourceMatch] = Field(default_factory=list)
+    navigation_links: list[dict[str, str]] = Field(default_factory=list)
+    caveats: list[str] = Field(default_factory=list)
+
+
+async def _saucenao_search(image_url: str, limit: int) -> list[dict[str, Any]]:
+    key = _cache_key("saucenao", image_url)
+    if (hit := _saucenao_cache.get(key)) is not None:
+        return hit
+    params = {
+        "output_type": 2,
+        "api_key": settings.saucenao_api_key,
+        "numres": min(limit, 10),
+    }
+    async with httpx.AsyncClient(timeout=settings.http_timeout) as client:
+        payload = _resolve_image_bytes(image_url)
+        if payload:
+            data, mime = payload
+            resp = await client.post(_SAUCENAO_API, params=params, files={"file": ("image", data, mime)})
+        else:
+            resp = await client.get(_SAUCENAO_API, params={**params, "url": upload_store.resolve_image_url(image_url)})
+        resp.raise_for_status()
+        body = resp.json() or {}
+    result = body.get("results") or []
+    _saucenao_cache.set(key, result)
+    return result
+
+
+class ImageSourceSearchTool(Tool):
+    name = "search_image_source"
+    description = (
+        "以图搜图/溯源：trace.moe 查动画截图，SauceNAO 查插画/同人/Pixiv 外链；"
+        "ascii2d/Pixiv 仅给导航或外链，不后台抓取。"
+    )
+    args_model = ImageSourceSearchArgs
+    result_model = ImageSourceSearchResult
+
+    async def run(self, args: ImageSourceSearchArgs) -> ToolResult[ImageSourceSearchResult]:
+        images = _image_inputs(IdentifyScreenshotArgs(image_url=args.image_url, image_urls=args.image_urls))
+        if not images:
+            return ToolResult(ok=False, error="需要 image_url 或 image_urls")
+        matches: list[ImageSourceMatch] = []
+        links: list[dict[str, str]] = []
+        caveats = [
+            "溯源只返回来源链接/候选，不下载、不托管、不分发原图。",
+            "同人图/Pixiv/R18 内容有版权与登录态边界；未配置 SauceNAO 时只提供导航入口。",
+        ]
+        for idx, image in enumerate(images):
+            if "trace_moe" in args.engines:
+                try:
+                    for row in (await _trace_moe_search(image))[: args.limit]:
+                        similarity = float(row.get("similarity") or 0.0)
+                        if similarity < 0.7:
+                            continue
+                        anilist = row.get("anilist")
+                        anilist_id = anilist.get("id") if isinstance(anilist, dict) else anilist
+                        title = (_anilist_titles(row) or [""])[0]
+                        start = row.get("from")
+                        timestamp = _format_seconds(float(start)) if isinstance(start, (int, float)) else ""
+                        matches.append(
+                            ImageSourceMatch(
+                                engine="trace.moe",
+                                title=title,
+                                url=row.get("video") or row.get("image") or "",
+                                source_site="trace.moe",
+                                similarity=similarity,
+                                confidence=min(similarity, 0.99),
+                                thumbnail=row.get("image"),
+                                anilist_id=int(anilist_id) if isinstance(anilist_id, int) else None,
+                                episode=row.get("episode"),
+                                timestamp=timestamp,
+                                note=f"image {idx + 1} 动画截图反查",
+                            )
+                        )
+                except Exception as e:  # noqa: BLE001
+                    caveats.append(f"trace.moe 查询失败：{type(e).__name__}")
+            if "saucenao" in args.engines:
+                if not settings.saucenao_api_key:
+                    caveats.append("未配置 SAUCENAO_API_KEY，已跳过 SauceNAO 结构化溯源。")
+                else:
+                    try:
+                        for row in (await _saucenao_search(image, args.limit))[: args.limit]:
+                            header = row.get("header") or {}
+                            data = row.get("data") or {}
+                            ext_urls = data.get("ext_urls") or []
+                            sim = float(header.get("similarity") or 0.0)
+                            matches.append(
+                                ImageSourceMatch(
+                                    engine="saucenao",
+                                    title=str(data.get("title") or data.get("eng_name") or data.get("jp_name") or ""),
+                                    url=str(ext_urls[0] if ext_urls else ""),
+                                    source_site=str(header.get("index_name") or "SauceNAO"),
+                                    author=str(data.get("member_name") or data.get("author_name") or data.get("creator") or ""),
+                                    similarity=sim,
+                                    confidence=min(max(sim / 100.0, 0.0), 0.99),
+                                    thumbnail=header.get("thumbnail"),
+                                    note=f"image {idx + 1} SauceNAO 候选",
+                                )
+                            )
+                    except Exception as e:  # noqa: BLE001
+                        caveats.append(f"SauceNAO 查询失败：{type(e).__name__}")
+            if image.startswith("http") and "ascii2d" in args.engines:
+                links.append({"title": f"ascii2d 搜索 image {idx + 1}", "url": f"https://ascii2d.net/search/url/{image}", "source": "ascii2d"})
+        if "pixiv" in args.engines:
+            pixiv_links = [m.url for m in matches if "pixiv.net" in m.url]
+            if pixiv_links:
+                links.extend({"title": "Pixiv 来源候选", "url": url, "source": "pixiv"} for url in pixiv_links[:5])
+            else:
+                caveats.append("Pixiv 没有稳定公开官方搜索 API；Otomo 不后台抓取 Pixiv，仅使用 SauceNAO 返回的 Pixiv 外链。")
+        matches.sort(key=lambda x: x.confidence, reverse=True)
+        data = ImageSourceSearchResult(matches=matches[: args.limit], navigation_links=links[:8], caveats=caveats)
+        return ToolResult(
+            ok=True,
+            data=data,
+            sources=[
+                Citation(title=m.title or m.engine, url=m.url or images[0], source=m.engine, image=m.thumbnail)
+                for m in data.matches[:5]
+                if m.url or m.thumbnail
+            ],
+        )
+
+
 def build_multimodal_tools(client: BangumiClient) -> list[Tool]:
-    return [IdentifyScreenshotTool(client), ExtractVisualTextTool(client)]
+    return [
+        IdentifyScreenshotTool(client),
+        ExtractVisualTextTool(client),
+        VisualStyleRecommendTool(client),
+        ImageSourceSearchTool(),
+    ]

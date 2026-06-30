@@ -82,5 +82,8 @@ class Settings(BaseSettings):
     browser_fetch_timeout_ms: int = 15000
     browser_fetch_max_scrolls: int = 3
 
+    # ---- 多模态溯源（可选；不配置则仅返回 trace.moe / 导航链接）----
+    saucenao_api_key: str = ""
+
 
 settings = Settings()

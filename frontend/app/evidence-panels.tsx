@@ -723,6 +723,92 @@ function VisualTextPanel({ data }: { data: AnyRecord }) {
   );
 }
 
+function VisualStylePanel({ data }: { data: AnyRecord }) {
+  const candidates = list(data.candidates);
+  const visualTags = list<string>(data.visual_tags);
+  const bangumiTags = list<string>(data.bangumi_tags);
+  return (
+    <Panel title="按画风/氛围推荐" subtitle={`置信度 ${pct(data.confidence)} · ${candidates.length} 个候选`}>
+      {data.style_description && <p className="evidence-copy">{text(data.style_description)}</p>}
+      {(visualTags.length > 0 || bangumiTags.length > 0) && (
+        <div className="evidence-row">
+          {visualTags.map((tag) => <Badge key={`v-${tag}`} tone="dim">{tag}</Badge>)}
+          {bangumiTags.map((tag) => <Badge key={`b-${tag}`} tone="good">BGM {tag}</Badge>)}
+        </div>
+      )}
+      <div className="rec-grid">
+        {candidates.map((item, i) => (
+          <a className="rec-card" href={`https://bgm.tv/subject/${item.id}`} target="_blank" rel="noreferrer" key={`${item.id}-${i}`}>
+            {item.image ? <img src={item.image} alt="" /> : <div className="rec-noimg" />}
+            <div className="rec-body">
+              <div className="card-title">{text(item.name)}</div>
+              <div className="card-meta">Bangumi {item.score ?? "暂无"} · {text(item.reason)}</div>
+              <div className="evidence-row tight">
+                {list<string>(item.matched_tags).map((tag) => <Badge key={tag} tone="dim">{tag}</Badge>)}
+              </div>
+            </div>
+          </a>
+        ))}
+      </div>
+      {data.raw_vlm_answer && (
+        <details className="quiet-detail">
+          <summary>查看视觉模型风格摘要</summary>
+          <p className="evidence-copy">{text(data.raw_vlm_answer)}</p>
+        </details>
+      )}
+      {list<string>(data.caveats).length > 0 && (
+        <div className="caveats">{list<string>(data.caveats).map((n, i) => <span key={i}>{n}</span>)}</div>
+      )}
+    </Panel>
+  );
+}
+
+function ImageSourcePanel({ data }: { data: AnyRecord }) {
+  const matches = list(data.matches);
+  const links = list(data.navigation_links);
+  return (
+    <Panel title="图片溯源候选" subtitle={`${matches.length} 个匹配 · ${links.length} 个导航入口`}>
+      {matches.length > 0 ? (
+        <div className="rec-grid">
+          {matches.map((item, i) => (
+            <a className="rec-card" href={item.url || "#"} target="_blank" rel="noreferrer" key={`${item.engine}-${i}`}>
+              {item.thumbnail ? <img src={item.thumbnail} alt="" /> : <div className="rec-noimg" />}
+              <div className="rec-body">
+                <div className="card-title">{text(item.title || item.source_site || item.engine)}</div>
+                <div className="card-meta">
+                  {text(item.engine)} · sim {pct(item.similarity)} · conf {pct(item.confidence)}
+                  {item.timestamp ? ` · ${item.timestamp}` : ""}
+                </div>
+                {item.author && <div className="card-meta">作者：{text(item.author)}</div>}
+                {item.episode != null && <Badge tone="good">第 {text(item.episode)} 集</Badge>}
+                {item.note && <p className="card-note">{text(item.note)}</p>}
+              </div>
+            </a>
+          ))}
+        </div>
+      ) : (
+        <EmptyHint text="没有结构化溯源候选；可能需要配置 SauceNAO API key 或换更清晰原图" />
+      )}
+      {links.length > 0 && (
+        <>
+          <div className="section-title">导航入口</div>
+          <div className="source-links">
+            {links.map((link, i) => (
+              <a key={`${link.url}-${i}`} href={link.url} target="_blank" rel="noreferrer">
+                <span>{text(link.source, "source")}</span>
+                {text(link.title)}
+              </a>
+            ))}
+          </div>
+        </>
+      )}
+      {list<string>(data.caveats).length > 0 && (
+        <div className="caveats">{list<string>(data.caveats).map((n, i) => <span key={i}>{n}</span>)}</div>
+      )}
+    </Panel>
+  );
+}
+
 function _wrapText(ctx: CanvasRenderingContext2D, content: string, x: number, y: number, maxW: number, lh: number): number {
   let line = "";
   for (const ch of String(content)) {
@@ -1256,6 +1342,8 @@ export function EvidencePanels({
   const episodeRadar = list(evidence.episode_buzz_radar);
   const screenshot = list(evidence.identify_acgn_screenshot);
   const visualText = list(evidence.extract_visual_text);
+  const visualStyle = list(evidence.recommend_by_visual_style);
+  const imageSource = list(evidence.search_image_source);
   const claimChecks = list(evidence.claim_check);
   const memory = [
     ...list(evidence.get_user_memory),
@@ -1272,12 +1360,14 @@ export function EvidencePanels({
   if (
     !review.length && !taste.length && !season.length && !recommend.length && !memory.length
     && !aspect.length && !watchCopilot.length && !weeklyDigest.length && !tasteReport.length && !explorer.length
-    && !episodeRadar.length && !screenshot.length && !visualText.length && !claimChecks.length
+    && !episodeRadar.length && !screenshot.length && !visualText.length && !visualStyle.length && !imageSource.length && !claimChecks.length
   ) return null;
   return (
     <div className="evidence-stack">
       {screenshot.map((data, i) => <ScreenshotIdentifyPanel data={data} key={`screenshot-${i}`} />)}
       {visualText.map((data, i) => <VisualTextPanel data={data} key={`visual-text-${i}`} />)}
+      {visualStyle.map((data, i) => <VisualStylePanel data={data} key={`visual-style-${i}`} />)}
+      {imageSource.map((data, i) => <ImageSourcePanel data={data} key={`image-source-${i}`} />)}
       {recommend.map((data, i) => <RecommendPanel data={data} onCritique={onCritique} key={`recommend-${i}`} />)}
       {season.map((data, i) => <SeasonGuidePanel data={data} key={`season-${i}`} />)}
       {review.map((data, i) => <ReviewEvidencePanel data={data} key={`review-${i}`} />)}

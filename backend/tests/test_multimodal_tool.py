@@ -8,8 +8,12 @@ from otomo.tools.multimodal import tool as multimodal_tool
 from otomo.tools.multimodal.tool import (
     ExtractVisualTextArgs,
     ExtractVisualTextTool,
+    ImageSourceSearchArgs,
+    ImageSourceSearchTool,
     IdentifyScreenshotArgs,
     IdentifyScreenshotTool,
+    VisualStyleRecommendArgs,
+    VisualStyleRecommendTool,
     _extract_titles,
     _image_inputs,
 )
@@ -17,8 +21,17 @@ from otomo.uploads import ImageUploadStore
 
 
 class FakeBangumiClient:
-    async def search_subjects(self, keyword: str, subject_type: int | None = None, limit: int = 10):
-        if keyword in {"摇曳露营△", "Yuru Camp"}:
+    async def search_subjects(
+        self,
+        keyword: str = "",
+        subject_type: int | None = None,
+        sort: str = "match",
+        limit: int = 10,
+        tags: list[str] | None = None,
+        offset: int = 0,
+        air_date: list[str] | None = None,
+    ):
+        if keyword in {"摇曳露营△", "Yuru Camp"} or tags:
             return {
                 "data": [
                     {
@@ -135,6 +148,62 @@ def test_extract_visual_text_anchors_entities(monkeypatch):
     assert res.data.structured_items[0].type == "work"
     assert res.data.entities[0].bangumi_id == 207195
     assert "榜单" in res.data.visual_tags
+
+
+def test_visual_style_recommend_maps_tags(monkeypatch):
+    from otomo import config
+
+    monkeypatch.setattr(config.settings, "vlm_model", "fake-vlm")
+
+    async def fake_vlm(_image_url: str, _system_prompt: str, _question: str):
+        return '{"style_description":"柔和色调的户外日常","visual_tags":["日常","治愈","露营"],"confidence":0.7}'
+
+    monkeypatch.setattr(multimodal_tool, "_call_vlm_with_prompt", fake_vlm)
+    tool = VisualStyleRecommendTool(FakeBangumiClient())
+    res = asyncio.run(tool.run(VisualStyleRecommendArgs(image_url="data:image/png;base64,iVBORw0KGgo=")))
+    assert res.ok
+    assert res.data
+    assert "日常" in res.data.bangumi_tags
+    assert res.data.candidates[0].id == 207195
+
+
+def test_image_source_search_merges_trace_and_saucenao(monkeypatch):
+    from otomo import config
+
+    monkeypatch.setattr(config.settings, "saucenao_api_key", "fake-key")
+
+    async def fake_trace(_image_url: str):
+        return [
+            {
+                "anilist": {"id": 98444, "title": {"native": "摇曳露营△"}},
+                "episode": 1,
+                "from": 12.0,
+                "similarity": 0.91,
+                "image": "https://trace.example/shot.jpg",
+                "video": "https://trace.example/shot.mp4",
+            }
+        ]
+
+    async def fake_saucenao(_image_url: str, _limit: int):
+        return [
+            {
+                "header": {"similarity": "88.5", "index_name": "Pixiv", "thumbnail": "https://thumb.example/a.jpg"},
+                "data": {
+                    "title": "camp fanart",
+                    "member_name": "artist",
+                    "ext_urls": ["https://www.pixiv.net/artworks/123"],
+                },
+            }
+        ]
+
+    monkeypatch.setattr(multimodal_tool, "_trace_moe_search", fake_trace)
+    monkeypatch.setattr(multimodal_tool, "_saucenao_search", fake_saucenao)
+    tool = ImageSourceSearchTool()
+    res = asyncio.run(tool.run(ImageSourceSearchArgs(image_url="https://example.com/a.jpg", engines=["trace_moe", "saucenao", "pixiv"])))
+    assert res.ok
+    assert res.data
+    assert {m.engine for m in res.data.matches} == {"trace.moe", "saucenao"}
+    assert any(link["source"] == "pixiv" for link in res.data.navigation_links)
 
 
 def test_upload_store_resolves_upload_uri(tmp_path):
