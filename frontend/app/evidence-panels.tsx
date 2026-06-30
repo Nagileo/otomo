@@ -1315,11 +1315,101 @@ function AffinityList({ title, items }: { title: string; items: AnyRecord[] }) {
   );
 }
 
+function DashboardOverview({ media, data }: { media: AnyRecord[]; data: AnyRecord }) {
+  const biggest = [...media].sort((a, b) => Number(b.total || 0) - Number(a.total || 0))[0];
+  const bestRated = [...media]
+    .filter((m) => Number(m.rated || 0) >= 3 && Number.isFinite(Number(m.avg_rating)))
+    .sort((a, b) => Number(b.avg_rating || 0) - Number(a.avg_rating || 0))[0];
+  const drift: AnyRecord[] = media
+    .flatMap((m): AnyRecord[] => list<AnyRecord>(m.tag_drift).map((item): AnyRecord => ({ ...item, subject_type: m.subject_type })))
+    .sort((a, b) => Math.abs(Number(b.delta || 0)) - Math.abs(Number(a.delta || 0)))
+    .slice(0, 4);
+  const creators: AnyRecord[] = media
+    .flatMap((m): AnyRecord[] => [
+      ...list<AnyRecord>(m.studio_affinity).map((x): AnyRecord => ({ ...x, kind: "制作/开发", subject_type: m.subject_type })),
+      ...list<AnyRecord>(m.staff_affinity).map((x): AnyRecord => ({ ...x, kind: "staff", subject_type: m.subject_type })),
+      ...list<AnyRecord>(m.cv_affinity).map((x): AnyRecord => ({ ...x, kind: "CV", subject_type: m.subject_type })),
+    ])
+    .sort((a, b) => Number(b.count || 0) - Number(a.count || 0))
+    .slice(0, 4);
+  return (
+    <div className="dashboard-overview">
+      <div className="overview-card">
+        <div className="metric-label">主收藏媒介</div>
+        <div className="overview-value">{text(biggest?.subject_type, "-")}</div>
+        <p className="card-note">{biggest ? `${biggest.total ?? 0} 项 · 已评分 ${biggest.rated ?? 0}` : "暂无收藏样本"}</p>
+      </div>
+      <div className="overview-card">
+        <div className="metric-label">均分最高媒介</div>
+        <div className="overview-value">{text(bestRated?.subject_type, "-")}</div>
+        <p className="card-note">{bestRated ? `均分 ${bestRated.avg_rating} · ${bestRated.rated ?? 0} 个评分` : "评分样本不足"}</p>
+      </div>
+      <div className="overview-card wide">
+        <div className="metric-label">近期口味漂移</div>
+        {drift.length ? (
+          <div className="evidence-row tight">
+            {drift.map((item, i) => (
+              <Badge key={`${item.subject_type}-${item.tag}-${i}`} tone={item.trend === "rising" ? "good" : "warn"}>
+                {item.subject_type} {item.trend === "rising" ? "↑" : "↓"} {text(item.tag)}
+              </Badge>
+            ))}
+          </div>
+        ) : (
+          <p className="card-note">年代样本不足，暂不判断 drift。</p>
+        )}
+      </div>
+      <div className="overview-card wide">
+        <div className="metric-label">高频创作者 / 声优</div>
+        {creators.length ? (
+          <div className="compact-list inline">
+            {creators.map((item, i) => (
+              <span key={`${item.kind}-${item.name}-${i}`}>
+                {text(item.name)} <small>· {text(item.kind)} · {text(item.subject_type)} · {item.count ?? 0}</small>
+              </span>
+            ))}
+          </div>
+        ) : (
+          <p className="card-note">尚无 enrichment 命中。</p>
+        )}
+      </div>
+      <div className="overview-card wide">
+        <div className="metric-label">下一步</div>
+        <p className="card-note">{text(list<string>(data.recommendations_for_next_step)[0], "可先运行推荐或弃坑分析，把仪表盘转成行动。")}</p>
+      </div>
+    </div>
+  );
+}
+
+function YearSparkline({ items }: { items: AnyRecord[] }) {
+  if (!items.length) return null;
+  const rows = [...items]
+    .sort((a, b) => String(a.year || "").localeCompare(String(b.year || "")))
+    .slice(-10);
+  const maxTotal = Math.max(...rows.map((x) => Number(x.total || 0)), 1);
+  return (
+    <div className="year-sparkline" aria-label="年度收藏趋势">
+      {rows.map((item, i) => {
+        const total = Number(item.total || 0);
+        const high = Number(item.high_rated || 0);
+        return (
+          <span className="year-bar-wrap" key={`${item.year}-${i}`} title={`${item.year}: ${total} 项，高分 ${high}`}>
+            <span className="year-bar" style={{ height: `${Math.max(10, Math.round((total / maxTotal) * 54))}px` }} />
+            <small>{String(item.year || "").slice(2)}</small>
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
 function CollectionDashboardPanel({ data }: { data: AnyRecord }) {
   const totals = data.totals || {};
   const media = list(data.media);
   const weekly = data.weekly_subscription || {};
   const enrichment = data.enrichment || {};
+  const [selectedType, setSelectedType] = useState("all");
+  const visibleMedia = selectedType === "all" ? media : media.filter((m) => m.subject_type === selectedType);
+  const mediaTypes = ["all", ...media.map((m) => String(m.subject_type || "")).filter(Boolean)];
   return (
     <Panel title={`收藏仪表盘 · ${text(data.username)}`} subtitle={`生成于 ${text(data.generated_at, "-")}`}>
       <div className="metric-grid">
@@ -1332,6 +1422,7 @@ function CollectionDashboardPanel({ data }: { data: AnyRecord }) {
       <div className="evidence-row">
         {list(data.global_top_tags).slice(0, 14).map((tag) => <Badge key={tag.tag} tone="good">{text(tag.tag)} · {tag.weight}</Badge>)}
       </div>
+      <DashboardOverview media={media} data={data} />
       {enrichment.enabled && (
         <div className="evidence-row">
           <Badge tone="dim">enrichment: 每类最多 {enrichment.limit_per_type ?? "-"} 条代表作</Badge>
@@ -1340,8 +1431,22 @@ function CollectionDashboardPanel({ data }: { data: AnyRecord }) {
           ))}
         </div>
       )}
+      <div className="dashboard-filter">
+        <div className="segmented" aria-label="收藏媒介筛选">
+          {mediaTypes.map((kind) => (
+            <button
+              type="button"
+              key={kind}
+              className={selectedType === kind ? "active" : ""}
+              onClick={() => setSelectedType(kind)}
+            >
+              {kind === "all" ? "全部" : kind}
+            </button>
+          ))}
+        </div>
+      </div>
       <div className="rating-grid">
-        {media.map((m, i) => (
+        {visibleMedia.map((m, i) => (
           <div className="rating-card" key={`${m.subject_type}-${i}`}>
             <div className="rating-source">{text(m.subject_type)}</div>
             <div className="rating-score">{m.total ?? 0}</div>
@@ -1352,6 +1457,7 @@ function CollectionDashboardPanel({ data }: { data: AnyRecord }) {
             <DistributionBadges data={m.rating_distribution} />
             <div className="section-title">年代趋势</div>
             <DistributionBadges data={m.decade_distribution} />
+            <YearSparkline items={list(m.yearly_activity)} />
             <YearlyActivityList items={list(m.yearly_activity)} />
             <div className="evidence-row tight">
               {list(m.top_tags).slice(0, 7).map((tag) => <Badge key={tag.tag} tone="dim">{text(tag.tag)}</Badge>)}
@@ -1369,6 +1475,7 @@ function CollectionDashboardPanel({ data }: { data: AnyRecord }) {
           </div>
         ))}
       </div>
+      {!visibleMedia.length && <EmptyHint text="该媒介暂无可展示收藏数据" />}
       <div className="memory-grid">
         <div className="rating-card">
           <div className="rating-source">计划板状态</div>

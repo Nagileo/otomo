@@ -255,6 +255,27 @@ button:disabled { opacity: .5; cursor: default; }
   color: var(--dim); font-size: 11px; line-height: 1.4;
 }
 .rating-score, .metric-value { font-size: 20px; font-weight: 800; margin: 4px 0; }
+.dashboard-overview {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(148px, 1fr)); gap: 8px; margin: 10px 0;
+}
+.overview-card {
+  min-width: 0; padding: 9px; border: 1px solid var(--border); border-radius: 8px; background: #0c0e13;
+}
+.overview-card.wide { grid-column: span 2; }
+.overview-value { margin-top: 4px; font-size: 18px; font-weight: 800; line-height: 1.2; overflow-wrap: anywhere; }
+.dashboard-filter { display: flex; justify-content: flex-end; margin: 10px 0 8px; }
+.year-sparkline {
+  display: flex; align-items: flex-end; gap: 4px; min-height: 72px; margin: 7px 0 4px;
+  padding: 6px; border: 1px solid var(--border); border-radius: 8px; background: #080a0f; overflow-x: auto;
+}
+.year-bar-wrap {
+  display: grid; align-items: end; justify-items: center; gap: 3px; flex: 1 0 16px; min-width: 16px;
+}
+.year-bar {
+  display: block; width: 100%; max-width: 18px; min-height: 10px; border-radius: 4px 4px 2px 2px;
+  background: linear-gradient(180deg, rgba(122, 162, 247, .92), rgba(122, 162, 247, .28));
+}
+.year-bar-wrap small { color: var(--dim); font-size: 9px; line-height: 1; }
 .card-title, .shared-name { font-size: 13px; font-weight: 700; line-height: 1.35; overflow-wrap: anywhere; }
 a.card-title { color: var(--text); text-decoration: none; }
 a.card-title:hover { color: var(--accent); }
@@ -361,7 +382,9 @@ a.card-title:hover { color: var(--accent); }
 @media (max-width: 520px) {
   .season-card, .rec-card { grid-template-columns: 52px 1fr; }
   .season-card img, .season-noimg, .rec-card img, .rec-noimg { width: 52px; height: 72px; }
-  .rating-grid, .metric-grid, .taste-groups { grid-template-columns: 1fr; }
+  .rating-grid, .metric-grid, .taste-groups, .dashboard-overview { grid-template-columns: 1fr; }
+  .overview-card.wide { grid-column: auto; }
+  .dashboard-filter { justify-content: flex-start; overflow-x: auto; }
   .action-card { grid-template-columns: 1fr; }
   .action-buttons { justify-content: flex-start; }
 }

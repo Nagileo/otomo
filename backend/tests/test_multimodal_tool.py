@@ -152,6 +152,23 @@ def test_extract_visual_text_anchors_entities(monkeypatch):
     assert "榜单" in res.data.visual_tags
 
 
+def test_extract_visual_text_respects_empty_entities_in_json(monkeypatch):
+    from otomo import config
+
+    monkeypatch.setattr(config.settings, "vlm_model", "fake-vlm")
+
+    async def fake_vlm(_image_url: str, _system_prompt: str, _question: str):
+        return '```json\n{"markdown_text":"","structured_items":[],"entities":[],"visual_tags":["blank_image"],"confidence":1.0,"notes":["无文字"]}\n```'
+
+    monkeypatch.setattr(multimodal_tool, "_call_vlm_with_prompt", fake_vlm)
+    tool = ExtractVisualTextTool(FakeBangumiClient())
+    res = asyncio.run(tool.run(ExtractVisualTextArgs(image_url="data:image/png;base64,iVBORw0KGgo=", mode="auto")))
+    assert res.ok
+    assert res.data
+    assert res.data.entities == []
+    assert "blank_image" in res.data.visual_tags
+
+
 def test_visual_style_recommend_maps_tags(monkeypatch):
     from otomo import config
 

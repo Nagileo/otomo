@@ -63,3 +63,20 @@ uvicorn otomo.api.app:app --reload --port 8000
 ```bash
 pytest        # 无网络的契约/注册表 smoke 测试
 ```
+
+## 本地 Smoke
+
+```bash
+# 启动临时后端并检查 health / auth session / CSRF / upload / Bangumi 搜索
+python scripts/smoke_http.py --start-server
+
+# 额外验证本地 BANGUMI_TOKEN 绑定与视觉反馈写入（会写入当前用户本地 memory）
+python scripts/smoke_http.py --start-server --dev-token-login
+
+# 额外验证 /chat SSE（会调用配置的 LLM）
+python scripts/smoke_http.py --start-server --chat "你好，简单介绍 Otomo"
+
+# 真实 VLM 通路测试（会调用 VLM_PROVIDER/VLM_MODEL）
+python scripts/smoke_vlm.py path/to/image.png --mode screenshot
+python scripts/smoke_vlm.py path/to/frame.jpg --mode ocr --ocr-mode ppt
+```

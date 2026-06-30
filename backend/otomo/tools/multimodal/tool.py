@@ -580,8 +580,8 @@ class ExtractVisualTextTool(Tool):
                     )
                 )
         entities = [str(x).strip() for x in (payload.get("entities") or []) if str(x).strip()]
-        if not entities:
-            entities = [x for x in _extract_titles(markdown or raw)]
+        if not entities and markdown:
+            entities = [x for x in _extract_titles(markdown)]
         tags = [str(x).strip() for x in (payload.get("visual_tags") or []) if str(x).strip()]
         confidence = max(0.0, min(float(payload.get("confidence") or 0.0), 1.0))
         notes = [str(x).strip() for x in (payload.get("notes") or []) if str(x).strip()]
