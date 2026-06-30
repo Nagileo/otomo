@@ -10,7 +10,7 @@ import json
 from typing import Any, AsyncIterator, Literal
 from urllib.parse import urlencode
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, Response
 from pydantic import BaseModel, Field
@@ -18,7 +18,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from ..agent.adaptive import AdaptiveRunner
 from ..agent.contracts import AgentState
-from ..auth import AuthStore, build_authorization_url, exchange_oauth_code, token_for_session
+from ..auth import AuthStore, BangumiToken, build_authorization_url, exchange_oauth_code, token_for_session
 from ..config import settings
 from ..memory import LongTermMemory
 from ..memory.models import memory_summary
@@ -103,7 +103,10 @@ async def health() -> dict[str, str]:
 
 @app.get("/auth/session")
 async def auth_session(auth_session_id: str) -> dict[str, Any]:
-    return app.state.auth.identity(auth_session_id).model_dump(mode="json")
+    payload = app.state.auth.identity(auth_session_id).model_dump(mode="json")
+    payload["oauth_configured"] = bool(settings.bangumi_oauth_client_id and settings.bangumi_oauth_client_secret)
+    payload["dev_token_available"] = bool(settings.bangumi_token)
+    return payload
 
 
 @app.post("/weekly/run-due")
@@ -119,6 +122,35 @@ async def bangumi_login(auth_session_id: str) -> dict[str, Any]:
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     return {"authorization_url": url}
+
+
+def _is_local_request(request: Request) -> bool:
+    host = request.client.host if request.client else ""
+    return host in {"127.0.0.1", "::1", "localhost"}
+
+
+@app.post("/auth/dev-token-login")
+async def dev_token_login(req: dict[str, str], request: Request) -> dict[str, Any]:
+    if not _is_local_request(request):
+        raise HTTPException(status_code=403, detail="本地 Token 登录仅允许 localhost 开发调试")
+    auth_session_id = req.get("auth_session_id") or ""
+    if not auth_session_id:
+        raise HTTPException(status_code=400, detail="缺少 auth_session_id")
+    if not settings.bangumi_token:
+        raise HTTPException(status_code=400, detail="未配置 BANGUMI_TOKEN")
+    try:
+        async with BangumiClient(token=settings.bangumi_token) as bgm:
+            me = await bgm.get_me()
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"BANGUMI_TOKEN 验证失败：{type(e).__name__}: {str(e)[:160]}") from e
+    token = BangumiToken(
+        auth_session_id=auth_session_id,
+        access_token=settings.bangumi_token,
+        user_id=int(me["id"]) if me.get("id") is not None else None,
+        username=str(me.get("username") or ""),
+    )
+    app.state.auth.save_token(token)
+    return {"ok": True, "identity": app.state.auth.identity(auth_session_id).model_dump(mode="json")}
 
 
 @app.get("/auth/bangumi/callback")

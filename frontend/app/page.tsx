@@ -58,6 +58,8 @@ type AuthState = {
   authenticated?: boolean;
   username?: string;
   user_id?: number;
+  oauth_configured?: boolean;
+  dev_token_available?: boolean;
 };
 type AuthNotice = { tone: "good" | "warn" | "bad"; text: string };
 
@@ -512,6 +514,15 @@ export default function Home() {
       authSessionId.current = crypto.randomUUID();
       localStorage.setItem("otomo_auth_session_id", authSessionId.current);
     }
+    if (auth && !auth.oauth_configured) {
+      setAuthNotice({
+        tone: "warn",
+        text: auth.dev_token_available
+          ? "当前未配置 Bangumi OAuth 应用；本地开发可先使用 BANGUMI_TOKEN 绑定。"
+          : "当前未配置 Bangumi OAuth 应用，也未检测到 BANGUMI_TOKEN。",
+      });
+      return;
+    }
     const res = await fetch(`${BACKEND}/auth/bangumi/login?auth_session_id=${encodeURIComponent(authSessionId.current)}`);
     const payload = await res.json().catch(() => ({}));
     if (payload.authorization_url) window.location.href = payload.authorization_url;
@@ -519,6 +530,29 @@ export default function Home() {
       const msg = payload.detail || "OAuth 未配置";
       setAuthNotice({ tone: "bad", text: `无法发起 Bangumi 登录：${msg}` });
       setTrace((t) => [...t, { kind: "obs", name: "bangumi_login", ok: false, summary: msg }]);
+    }
+  }
+
+  async function loginWithLocalToken() {
+    if (!authSessionId.current) {
+      authSessionId.current = crypto.randomUUID();
+      localStorage.setItem("otomo_auth_session_id", authSessionId.current);
+    }
+    try {
+      const res = await fetch(`${BACKEND}/auth/dev-token-login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ auth_session_id: authSessionId.current }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok || !payload.ok) {
+        setAuthNotice({ tone: "bad", text: `本地 Token 绑定失败：${payload.detail || payload.error || res.status}` });
+        return;
+      }
+      setAuth(payload.identity);
+      setAuthNotice({ tone: "good", text: `已使用本地 BANGUMI_TOKEN 绑定：@${payload.identity?.username || "unknown"}` });
+    } catch (e) {
+      setAuthNotice({ tone: "bad", text: `本地 Token 绑定失败：${String(e)}` });
     }
   }
 
@@ -552,7 +586,12 @@ export default function Home() {
             ) : (
               <>
                 <span className="badge dim">Bangumi 未绑定</span>
-                <button className="inline-action" onClick={startBangumiLogin} disabled={busy}>绑定</button>
+                <button className="inline-action" onClick={startBangumiLogin} disabled={busy}>
+                  {auth?.oauth_configured ? "OAuth 绑定" : "绑定"}
+                </button>
+                {auth?.dev_token_available && (
+                  <button className="inline-action" onClick={loginWithLocalToken} disabled={busy}>本地 Token</button>
+                )}
               </>
             )}
           </div>
