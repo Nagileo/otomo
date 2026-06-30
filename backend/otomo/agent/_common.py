@@ -227,7 +227,7 @@ def runtime_state_prompt(state: Any | None) -> str:
                 image_bits.append(f"{filename}({mime_type})={uri}")
         if image_bits:
             parts.append("- 本轮用户上传图片：" + "；".join(image_bits) + "。")
-            parts.append("- 若用户要求识别截图/角色/作品/画面线索，调用 identify_acgn_screenshot，并把 image_url 设为对应 upload://...；不要把 upload:// 当普通网页链接。")
+            parts.append("- 若用户要求识别截图/角色/作品/画面线索，调用 identify_acgn_screenshot；单图可传 image_url，多图传 image_urls=[upload://...]；不要把 upload:// 当普通网页链接。")
     return "\n".join(parts)
 
 
@@ -685,10 +685,19 @@ def _safe_multimodal_payload(data: dict[str, Any]) -> dict[str, Any]:
         copied["reason"] = _trim_text(copied.get("reason"), 180)
         copied["match_note"] = _trim_text(copied.get("match_note"), 160)
         candidates.append(copied)
+    characters = []
+    for item in _trim_dicts(data.get("character_candidates"), limit=8):
+        copied = dict(item)
+        copied["reason"] = _trim_text(copied.get("reason"), 160)
+        copied["match_note"] = _trim_text(copied.get("match_note"), 140)
+        characters.append(copied)
     return {
         "question": data.get("question"),
         "raw_vlm_answer": _trim_text(data.get("raw_vlm_answer"), 600),
         "candidates": candidates,
+        "character_candidates": characters,
+        "visual_tags": _trim_strings(data.get("visual_tags"), limit=12, text_limit=40),
+        "ocr_text": _trim_text(data.get("ocr_text"), 1000),
         "caveats": _trim_strings(data.get("caveats"), limit=6, text_limit=180),
     }
 

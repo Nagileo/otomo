@@ -581,8 +581,15 @@ function WeeklyDigestPanel({ data }: { data: AnyRecord }) {
 
 function ScreenshotIdentifyPanel({ data }: { data: AnyRecord }) {
   const candidates = list(data.candidates);
+  const characters = list(data.character_candidates);
+  const tags = list<string>(data.visual_tags);
   return (
     <Panel title="截图识别候选" subtitle={text(data.question, "")}>
+      {tags.length > 0 && (
+        <div className="evidence-row">
+          {tags.map((tag) => <Badge key={tag} tone="dim">{tag}</Badge>)}
+        </div>
+      )}
       <div className="rec-grid">
         {candidates.map((item, i) => (
           <a
@@ -596,14 +603,40 @@ function ScreenshotIdentifyPanel({ data }: { data: AnyRecord }) {
             <div className="rec-body">
               <div className="card-title">{text(item.bangumi_name || item.title)}</div>
               <div className="card-meta">
-                VLM {pct(item.confidence)} · BGM {item.bangumi_score ?? "未对齐"}
+                {text(item.source, "image")} · 置信度 {pct(item.confidence)}
+                {item.bangumi_score ? ` · BGM ${item.bangumi_score}` : ""}
               </div>
+              {(item.episode != null || item.timestamp) && (
+                <div className="evidence-row tight">
+                  {item.episode != null && <Badge tone="good">第 {text(item.episode)} 集</Badge>}
+                  {item.timestamp && <Badge tone="good">{text(item.timestamp)}</Badge>}
+                </div>
+              )}
               <p className="card-note">{text(item.reason || item.match_note, "")}</p>
               {item.match_note && <Badge tone={item.bangumi_id ? "good" : "warn"}>{text(item.match_note)}</Badge>}
             </div>
           </a>
         ))}
       </div>
+      {characters.length > 0 && (
+        <>
+          <div className="section-title">角色候选</div>
+          <div className="compact-list inline">
+            {characters.map((item, i) => (
+              <span key={`${item.name}-${i}`}>
+                {text(item.bangumi_name || item.name)} · 置信度 {pct(item.confidence)}
+                {item.match_note ? ` · ${text(item.match_note)}` : ""}
+              </span>
+            ))}
+          </div>
+        </>
+      )}
+      {data.ocr_text && (
+        <>
+          <div className="section-title">OCR / 画面文字</div>
+          <p className="evidence-copy">{text(data.ocr_text)}</p>
+        </>
+      )}
       {data.raw_vlm_answer && (
         <details className="quiet-detail">
           <summary>查看视觉模型摘要</summary>

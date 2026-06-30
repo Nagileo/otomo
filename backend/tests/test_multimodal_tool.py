@@ -4,12 +4,30 @@ import asyncio
 
 from otomo.agent._common import runtime_state_prompt
 from otomo.agent.contracts import AgentState
-from otomo.tools.multimodal.tool import IdentifyScreenshotArgs, IdentifyScreenshotTool, _extract_titles
+from otomo.tools.multimodal import tool as multimodal_tool
+from otomo.tools.multimodal.tool import IdentifyScreenshotArgs, IdentifyScreenshotTool, _extract_titles, _image_inputs
 from otomo.uploads import ImageUploadStore
 
 
 class FakeBangumiClient:
     async def search_subjects(self, keyword: str, subject_type: int | None = None, limit: int = 10):
+        if keyword in {"摇曳露营△", "Yuru Camp"}:
+            return {
+                "data": [
+                    {
+                        "id": 207195,
+                        "name": "ゆるキャン△",
+                        "name_cn": "摇曳露营△",
+                        "rating": {"score": 8.1},
+                        "images": {"common": "https://img.example/yuru.jpg"},
+                    }
+                ]
+            }
+        return {"data": []}
+
+    async def search_characters(self, keyword: str, limit: int = 10):
+        if keyword in {"各务原抚子", "各務原なでしこ"}:
+            return {"data": [{"id": 123, "name": "各務原なでしこ"}]}
         return {"data": []}
 
 
@@ -24,9 +42,63 @@ def test_identify_screenshot_requires_vlm_config(monkeypatch):
 
     monkeypatch.setattr(config.settings, "vlm_model", "")
     tool = IdentifyScreenshotTool(FakeBangumiClient())
-    res = asyncio.run(tool.run(IdentifyScreenshotArgs(image_url="https://example.com/a.png")))
+    res = asyncio.run(tool.run(IdentifyScreenshotArgs(image_url="https://example.com/a.png", use_trace_moe=False)))
     assert not res.ok
-    assert "VLM" in (res.error or "")
+    assert "视觉候选" in (res.error or "")
+
+
+def test_image_inputs_support_multiple_and_dedupe():
+    args = IdentifyScreenshotArgs(
+        image_url="upload://a",
+        image_urls=["upload://b", "upload://a", "upload://c", "upload://d", "upload://e"],
+    )
+    assert _image_inputs(args) == ["upload://a", "upload://b", "upload://c", "upload://d"]
+
+
+def test_trace_moe_candidate_anchors_to_bangumi(monkeypatch):
+    from otomo import config
+
+    monkeypatch.setattr(config.settings, "vlm_model", "")
+
+    async def fake_trace(_image_url: str):
+        return [
+            {
+                "anilist": {"id": 98444, "title": {"native": "摇曳露营△", "romaji": "Yuru Camp"}},
+                "episode": 1,
+                "from": 83.2,
+                "to": 86.0,
+                "similarity": 0.94,
+                "image": "https://trace.example/shot.jpg",
+            }
+        ]
+
+    monkeypatch.setattr(multimodal_tool, "_trace_moe_search", fake_trace)
+    tool = IdentifyScreenshotTool(FakeBangumiClient())
+    res = asyncio.run(tool.run(IdentifyScreenshotArgs(image_url="https://example.com/shot.jpg")))
+    assert res.ok
+    assert res.data
+    assert res.data.candidates[0].bangumi_id == 207195
+    assert res.data.candidates[0].source == "trace.moe"
+    assert res.data.candidates[0].timestamp == "01:23"
+
+
+def test_vlm_character_candidate_anchors_to_bangumi(monkeypatch):
+    from otomo import config
+
+    monkeypatch.setattr(config.settings, "vlm_model", "fake-vlm")
+
+    async def fake_vlm(_image_url: str, _question: str):
+        return '{"candidates":[{"title":"摇曳露营△","reason":"露营画面","confidence":0.6}],"characters":[{"name":"各务原抚子","reason":"粉发角色","confidence":0.55}],"visual_tags":["日常","户外"],"ocr_text":"欢迎来到露营地"}'
+
+    monkeypatch.setattr(multimodal_tool, "_call_vlm", fake_vlm)
+    tool = IdentifyScreenshotTool(FakeBangumiClient())
+    res = asyncio.run(tool.run(IdentifyScreenshotArgs(image_url="data:image/png;base64,iVBORw0KGgo=", use_trace_moe=False)))
+    assert res.ok
+    assert res.data
+    assert res.data.candidates[0].bangumi_id == 207195
+    assert res.data.character_candidates[0].bangumi_id == 123
+    assert "日常" in res.data.visual_tags
+    assert "欢迎来到露营地" in res.data.ocr_text
 
 
 def test_upload_store_resolves_upload_uri(tmp_path):
