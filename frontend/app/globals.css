@@ -178,8 +178,29 @@ button:disabled { opacity: .5; cursor: default; }
 .chip:hover { border-color: var(--accent); color: var(--accent); }
 
 .spoiler-state, .memory-state, .auth-state { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; align-items: center; }
+.auth-notice {
+  margin-top: 6px; max-width: 560px; padding: 6px 8px; border: 1px solid var(--border);
+  border-radius: 8px; background: #0c0e13; color: var(--dim); font-size: 12px; line-height: 1.45;
+}
+.auth-notice.good { color: var(--green); border-color: rgba(158, 206, 106, .34); background: rgba(158, 206, 106, .07); }
+.auth-notice.warn { color: #e0af68; border-color: rgba(224, 175, 104, .38); background: rgba(224, 175, 104, .07); }
+.auth-notice.bad { color: var(--red); border-color: rgba(247, 118, 142, .38); background: rgba(247, 118, 142, .07); }
+
+.evidence-toolbar {
+  display: flex; justify-content: space-between; align-items: center; gap: 10px;
+  margin-top: 12px; padding: 8px 10px; border: 1px solid var(--border);
+  border-radius: 8px; background: #10131a;
+}
+.evidence-toolbar-title { color: var(--text); font-size: 13px; font-weight: 700; }
+.evidence-toolbar-sub { color: var(--dim); font-size: 11px; margin-top: 2px; }
 
 .evidence-stack { display: grid; gap: 10px; margin-top: 14px; }
+.evidence-stack.user-mode .quiet-detail,
+.evidence-stack.user-mode .caveats,
+.evidence-stack.user-mode .mapping-list,
+.evidence-stack.user-mode .source-matrix {
+  display: none;
+}
 .evidence-panel {
   background: #11141b; border: 1px solid var(--border); border-radius: 8px;
   padding: 12px; overflow: hidden;

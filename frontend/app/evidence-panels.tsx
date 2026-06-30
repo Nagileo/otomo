@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 
 type AnyRecord = Record<string, any>;
 type EvidenceMap = Record<string, AnyRecord[]>;
+type EvidenceMode = "user" | "dev";
 type SpoilerState = {
   mode?: string;
   progress_episode?: number;
@@ -69,6 +70,14 @@ function sourceTone(source: any) {
   if (s === "derived_from_feedback") return "warn";
   if (s === "bangumi_profile") return "dim";
   return "dim";
+}
+
+function hasActionableMemory(data: AnyRecord) {
+  return (
+    list(data.pending_write_actions).length > 0
+    || list(data.inbox).some((item) => item?.unread)
+    || Boolean(data.weekly_digest_subscription?.pending)
+  );
 }
 
 function Badge({ children, tone = "dim" }: { children: ReactNode; tone?: string }) {
@@ -1383,22 +1392,25 @@ function ClaimCheckPanel({ data }: { data: AnyRecord }) {
 
 export function EvidencePanels({
   evidence,
+  mode = "user",
   onCritique,
   onConfirmAction,
   onCancelAction,
   onUndoAction,
 }: {
   evidence: EvidenceMap;
+  mode?: EvidenceMode;
   onCritique?: (q: string) => void;
   onConfirmAction?: (id: string) => void;
   onCancelAction?: (id: string) => void;
   onUndoAction?: (id: string) => void;
 }) {
+  const devMode = mode === "dev";
   const review = list(evidence.review_subject);
   const taste = list(evidence.compare_user_taste);
   const season = list(evidence.season_guide_brief);
   const recommend = list(evidence.recommend_subjects);
-  const aspect = list(evidence.build_aspect_profile);
+  const aspect = devMode ? list(evidence.build_aspect_profile) : [];
   const watchCopilot = list(evidence.plan_watch_copilot);
   const weeklyDigest = list(evidence.build_weekly_digest);
   const tasteReport = list(evidence.build_taste_report);
@@ -1409,8 +1421,8 @@ export function EvidencePanels({
   const visualStyle = list(evidence.recommend_by_visual_style);
   const imageSource = list(evidence.search_image_source);
   const videoFrames = list(evidence.analyze_video_frames);
-  const claimChecks = list(evidence.claim_check);
-  const memory = [
+  const claimChecks = devMode ? list(evidence.claim_check) : [];
+  const memoryEvidence = [
     ...list(evidence.get_user_memory),
     ...list(evidence.remember_user_preference),
     ...list(evidence.forget_user_memory),
@@ -1422,6 +1434,7 @@ export function EvidencePanels({
     ...list(evidence.record_decision_log),
     ...list(evidence.save_recommendation_list),
   ];
+  const memory = devMode ? memoryEvidence : memoryEvidence.filter(hasActionableMemory);
   if (
     !review.length && !taste.length && !season.length && !recommend.length && !memory.length
     && !aspect.length && !watchCopilot.length && !weeklyDigest.length && !tasteReport.length && !explorer.length
@@ -1429,7 +1442,7 @@ export function EvidencePanels({
     && !videoFrames.length && !claimChecks.length
   ) return null;
   return (
-    <div className="evidence-stack">
+    <div className={`evidence-stack ${devMode ? "dev-mode" : "user-mode"}`}>
       {screenshot.map((data, i) => <ScreenshotIdentifyPanel data={data} key={`screenshot-${i}`} />)}
       {visualText.map((data, i) => <VisualTextPanel data={data} key={`visual-text-${i}`} />)}
       {visualStyle.map((data, i) => <VisualStylePanel data={data} key={`visual-style-${i}`} />)}

@@ -192,6 +192,11 @@ async def _request_client(app: FastAPI, auth_session_id: str | None) -> BangumiC
     token = await token_for_session(app.state.auth, auth_session_id)
     if token:
         return BangumiClient(token=token.access_token)
+    if auth_session_id:
+        # Browser sessions must not silently fall back to the developer's local
+        # BANGUMI_TOKEN. Otherwise an unauthenticated user can appear to be
+        # operating with the machine owner's account during local testing.
+        return BangumiClient(token="")
     return BangumiClient()
 
 

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+from types import SimpleNamespace
+
 from otomo import config
+from otomo.api.app import _request_client
 from otomo.auth import AuthStore, BangumiToken, build_authorization_url
 
 
@@ -41,3 +45,25 @@ def test_auth_logout_deletes_token(tmp_path):
     store.save_token(BangumiToken(auth_session_id="sid", access_token="token", username="u"))
     store.delete_token("sid")
     assert not store.identity("sid").authenticated
+
+
+def test_request_client_with_web_session_does_not_use_global_token(tmp_path, monkeypatch):
+    monkeypatch.setattr(config.settings, "bangumi_token", "developer-global-token")
+    app = SimpleNamespace(state=SimpleNamespace(auth=AuthStore(tmp_path)))
+
+    client = asyncio.run(_request_client(app, "browser-session"))
+    try:
+        assert client._client.headers.get("Authorization") is None
+    finally:
+        asyncio.run(client.aclose())
+
+
+def test_request_client_without_web_session_keeps_global_token(tmp_path, monkeypatch):
+    monkeypatch.setattr(config.settings, "bangumi_token", "developer-global-token")
+    app = SimpleNamespace(state=SimpleNamespace(auth=AuthStore(tmp_path)))
+
+    client = asyncio.run(_request_client(app, None))
+    try:
+        assert client._client.headers.get("Authorization") == "Bearer developer-global-token"
+    finally:
+        asyncio.run(client.aclose())

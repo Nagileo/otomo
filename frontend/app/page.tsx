@@ -59,6 +59,7 @@ type AuthState = {
   username?: string;
   user_id?: number;
 };
+type AuthNotice = { tone: "good" | "warn" | "bad"; text: string };
 
 const MAX_IMAGES = 4;
 
@@ -239,6 +240,8 @@ export default function Home() {
   const [input, setInput] = useState("");
   const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
   const [traceMode, setTraceMode] = useState<"summary" | "dev">("summary");
+  const [evidenceMode, setEvidenceMode] = useState<"user" | "dev">("user");
+  const [authNotice, setAuthNotice] = useState<AuthNotice | null>(null);
   const [busy, setBusy] = useState(false);
   const answerRef = useRef("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -253,6 +256,21 @@ export default function Home() {
       localStorage.setItem("otomo_auth_session_id", sid);
     }
     authSessionId.current = sid;
+    const params = new URLSearchParams(window.location.search);
+    const authStatus = params.get("bangumi_auth");
+    if (authStatus === "ok") {
+      setAuthNotice({ tone: "good", text: `Bangumi 登录成功${params.get("user") ? `：@${params.get("user")}` : ""}` });
+    } else if (authStatus === "error") {
+      setAuthNotice({ tone: "bad", text: `Bangumi 登录失败：${params.get("error") || "unknown"}` });
+    }
+    if (authStatus) {
+      params.delete("bangumi_auth");
+      params.delete("user");
+      params.delete("error");
+      const query = params.toString();
+      const cleanUrl = `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`;
+      window.history.replaceState(null, "", cleanUrl);
+    }
     void refreshAuthSession(sid);
   }, []);
 
@@ -495,9 +513,13 @@ export default function Home() {
       localStorage.setItem("otomo_auth_session_id", authSessionId.current);
     }
     const res = await fetch(`${BACKEND}/auth/bangumi/login?auth_session_id=${encodeURIComponent(authSessionId.current)}`);
-    const payload = await res.json();
+    const payload = await res.json().catch(() => ({}));
     if (payload.authorization_url) window.location.href = payload.authorization_url;
-    else setTrace((t) => [...t, { kind: "obs", name: "bangumi_login", ok: false, summary: payload.detail || "OAuth 未配置" }]);
+    else {
+      const msg = payload.detail || "OAuth 未配置";
+      setAuthNotice({ tone: "bad", text: `无法发起 Bangumi 登录：${msg}` });
+      setTrace((t) => [...t, { kind: "obs", name: "bangumi_login", ok: false, summary: msg }]);
+    }
   }
 
   async function logoutBangumi() {
@@ -507,8 +529,11 @@ export default function Home() {
       body: JSON.stringify({ auth_session_id: authSessionId.current }),
     });
     setAuth({ auth_session_id: authSessionId.current, authenticated: false });
+    setAuthNotice({ tone: "warn", text: "已退出当前浏览器会话的 Bangumi 绑定" });
     setMemory(null);
   }
+
+  const hasEvidence = Object.values(evidence).some((rows) => list(rows).length > 0);
 
   return (
     <div className="wrap">
@@ -531,6 +556,7 @@ export default function Home() {
               </>
             )}
           </div>
+          {authNotice && <div className={`auth-notice ${authNotice.tone}`}>{authNotice.text}</div>}
         </div>
         <button className="ghost" onClick={newChat} disabled={busy}>+ 新对话</button>
       </div>
@@ -568,8 +594,23 @@ export default function Home() {
             </div>
           )}
           <AnswerSupport sources={sources} evidence={evidence} />
+          {hasEvidence && (
+            <div className="evidence-toolbar">
+              <div>
+                <div className="evidence-toolbar-title">证据视图</div>
+                <div className="evidence-toolbar-sub">
+                  {evidenceMode === "user" ? "默认只展示可读结论和可操作项" : "开发模式展示原始证据、校验和映射细节"}
+                </div>
+              </div>
+              <div className="segmented" aria-label="证据视图">
+                <button className={evidenceMode === "user" ? "active" : ""} onClick={() => setEvidenceMode("user")}>简洁</button>
+                <button className={evidenceMode === "dev" ? "active" : ""} onClick={() => setEvidenceMode("dev")}>开发</button>
+              </div>
+            </div>
+          )}
           <EvidencePanels
             evidence={evidence}
+            mode={evidenceMode}
             onCritique={(q) => send(q)}
             onConfirmAction={(id) => postAction("confirm", id)}
             onCancelAction={(id) => postAction("cancel", id)}
