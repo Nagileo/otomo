@@ -153,6 +153,11 @@ button:disabled { opacity: .5; cursor: default; }
 }
 .source-links a:hover { border-color: var(--accent); }
 .source-links a span { color: var(--accent); flex: 0 0 auto; }
+.source-primary {
+  display: inline-flex; max-width: 100%; margin: 2px 0 6px; color: var(--accent);
+  font-size: 13px; font-weight: 700; text-decoration: none; overflow-wrap: anywhere;
+}
+.source-primary:hover { text-decoration: underline; }
 .source-detail { color: var(--dim); font-size: 12px; }
 .source-detail summary { cursor: pointer; }
 
@@ -251,7 +256,11 @@ button:disabled { opacity: .5; cursor: default; }
 }
 .rating-score, .metric-value { font-size: 20px; font-weight: 800; margin: 4px 0; }
 .card-title, .shared-name { font-size: 13px; font-weight: 700; line-height: 1.35; overflow-wrap: anywhere; }
+a.card-title { color: var(--text); text-decoration: none; }
+a.card-title:hover { color: var(--accent); }
 .card-note { color: #cbd0dc; font-size: 12px; line-height: 1.5; margin: 5px 0 0; }
+.feedback-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.feedback-actions .inline-action { height: 24px; padding: 0 9px; margin-left: 0; font-size: 11px; }
 
 .aspect-list { display: grid; gap: 8px; }
 .aspect-row { background: #0c0e13; border: 1px solid var(--border); border-radius: 8px; padding: 8px; }

@@ -7,6 +7,7 @@ from .models import (
     ProgressItem,
     UserAspectProfile,
     UserMemory,
+    VisualFeedbackItem,
 )
 from .store import LongTermMemory
 
@@ -19,4 +20,5 @@ __all__ = [
     "AspectPreference",
     "UserAspectProfile",
     "UserMemory",
+    "VisualFeedbackItem",
 ]

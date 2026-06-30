@@ -6,7 +6,7 @@ from otomo.agent import _common as C
 from otomo.agent.contracts import AgentState
 from otomo.memory import LongTermMemory
 from otomo.memory.consolidate import consolidate_preference
-from otomo.memory.models import FeedbackItem, UserMemory, memory_summary
+from otomo.memory.models import FeedbackItem, UserMemory, VisualFeedbackItem, memory_summary
 from otomo.tools.memory.tool import (
     FeedbackArgs,
     ForgetMemoryArgs,
@@ -51,6 +51,7 @@ def test_memory_store_load_save_and_feedback_limit(tmp_path):
     consolidate_preference(mem, "like", "百合", confidence=0.8)
     mem.feedback.append(FeedbackItem(name="A", signal="like"))
     mem.feedback.append(FeedbackItem(name="B", signal="dislike"))
+    mem.visual_feedback.append(VisualFeedbackItem(id="vf1", predicted_title="A", signal="wrong"))
     ltm.save_user(mem)
 
     loaded = ltm.load_user("u")
@@ -58,7 +59,9 @@ def test_memory_store_load_save_and_feedback_limit(tmp_path):
     assert loaded.likes[0].value == "百合"
     assert loaded.updated_at
     assert [x.name for x in memory_summary(loaded, feedback_limit=1).recent_feedback] == ["B"]
+    assert [x.predicted_title for x in memory_summary(loaded, feedback_limit=1).recent_visual_feedback] == ["A"]
     assert memory_summary(loaded, feedback_limit=0).recent_feedback == []
+    assert memory_summary(loaded, feedback_limit=0).recent_visual_feedback == []
 
 
 def test_memory_tools_read_write_for_current_user(tmp_path):

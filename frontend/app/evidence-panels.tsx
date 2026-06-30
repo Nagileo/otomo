@@ -24,6 +24,7 @@ type MemoryState = {
   recommendation_lists?: AnyRecord[];
   weekly_digest_subscription?: AnyRecord;
   inbox?: AnyRecord[];
+  recent_visual_feedback?: AnyRecord[];
   updated_at?: string;
 };
 
@@ -588,10 +589,17 @@ function WeeklyDigestPanel({ data }: { data: AnyRecord }) {
   );
 }
 
-function ScreenshotIdentifyPanel({ data }: { data: AnyRecord }) {
+function ScreenshotIdentifyPanel({
+  data,
+  onVisualFeedback,
+}: {
+  data: AnyRecord;
+  onVisualFeedback?: (payload: AnyRecord) => void;
+}) {
   const candidates = list(data.candidates);
   const characters = list(data.character_candidates);
   const tags = list<string>(data.visual_tags);
+  const imageRefs = list<string>(data.image_refs);
   return (
     <Panel title="截图识别候选" subtitle={text(data.question, "")}>
       {tags.length > 0 && (
@@ -601,16 +609,20 @@ function ScreenshotIdentifyPanel({ data }: { data: AnyRecord }) {
       )}
       <div className="rec-grid">
         {candidates.map((item, i) => (
-          <a
+          <div
             className="rec-card"
-            href={item.bangumi_id ? `https://bgm.tv/subject/${item.bangumi_id}` : "#"}
-            target="_blank"
-            rel="noreferrer"
             key={`${item.title}-${i}`}
           >
             {item.image ? <img src={item.image} alt="" /> : <div className="rec-noimg" />}
             <div className="rec-body">
-              <div className="card-title">{text(item.bangumi_name || item.title)}</div>
+              <a
+                className="card-title"
+                href={item.bangumi_id ? `https://bgm.tv/subject/${item.bangumi_id}` : "#"}
+                target="_blank"
+                rel="noreferrer"
+              >
+                {text(item.bangumi_name || item.title)}
+              </a>
               <div className="card-meta">
                 {text(item.source, "image")} · 置信度 {pct(item.confidence)}
                 {item.bangumi_score ? ` · BGM ${item.bangumi_score}` : ""}
@@ -623,8 +635,44 @@ function ScreenshotIdentifyPanel({ data }: { data: AnyRecord }) {
               )}
               <p className="card-note">{text(item.reason || item.match_note, "")}</p>
               {item.match_note && <Badge tone={item.bangumi_id ? "good" : "warn"}>{text(item.match_note)}</Badge>}
+              {onVisualFeedback && (
+                <div className="feedback-actions">
+                  <button
+                    type="button"
+                    className="inline-action"
+                    onClick={() => onVisualFeedback({
+                      image_uri: imageRefs[item.image_index ?? 0] || "",
+                      tool_name: "identify_acgn_screenshot",
+                      predicted_subject_id: item.bangumi_id ?? null,
+                      predicted_subject_name: item.bangumi_name || "",
+                      predicted_title: item.title || item.bangumi_name || "",
+                      source: item.source || "",
+                      confidence: Number(item.confidence || 0),
+                      signal: "correct",
+                    })}
+                  >
+                    正确
+                  </button>
+                  <button
+                    type="button"
+                    className="inline-action"
+                    onClick={() => onVisualFeedback({
+                      image_uri: imageRefs[item.image_index ?? 0] || "",
+                      tool_name: "identify_acgn_screenshot",
+                      predicted_subject_id: item.bangumi_id ?? null,
+                      predicted_subject_name: item.bangumi_name || "",
+                      predicted_title: item.title || item.bangumi_name || "",
+                      source: item.source || "",
+                      confidence: Number(item.confidence || 0),
+                      signal: "wrong",
+                    })}
+                  >
+                    不对
+                  </button>
+                </div>
+              )}
             </div>
-          </a>
+          </div>
         ))}
       </div>
       {characters.length > 0 && (
@@ -809,6 +857,82 @@ function ImageSourcePanel({ data }: { data: AnyRecord }) {
               </a>
             ))}
           </div>
+        </>
+      )}
+      {list<string>(data.caveats).length > 0 && (
+        <div className="caveats">{list<string>(data.caveats).map((n, i) => <span key={i}>{n}</span>)}</div>
+      )}
+    </Panel>
+  );
+}
+
+function BiliVideoContentPanel({ data }: { data: AnyRecord }) {
+  const layers = list<string>(data.read_layers);
+  const content = list<string>(data.content_summary);
+  const audience = list<string>(data.audience_summary);
+  const metadata = list<string>(data.metadata_summary);
+  const subtitles = list(data.subtitle_segments);
+  const danmaku = list(data.danmaku_samples);
+  const comments = list<string>(data.comment_samples);
+  const href = text(data.source_url, "#");
+  return (
+    <Panel title="B站视频公开内容分析" subtitle={`${text(data.access_level, "unavailable")} · ${layers.join(" / ") || "未读到内容层"}`}>
+      <div className="evidence-row">
+        {layers.map((layer) => <Badge key={layer} tone={layer === "subtitle" ? "good" : layer === "metadata" ? "dim" : "warn"}>{layer}</Badge>)}
+        {data.bvid && <Badge tone="dim">{text(data.bvid)}</Badge>}
+        {data.aid && <Badge tone="dim">av{data.aid}</Badge>}
+      </div>
+      {data.title && (
+        <a className="source-primary" href={href} target="_blank" rel="noreferrer">
+          {text(data.title)}
+        </a>
+      )}
+      {metadata.length > 0 && (
+        <div className="compact-list inline">
+          {metadata.slice(0, 4).map((item, i) => <span key={i}>{item}</span>)}
+        </div>
+      )}
+      {content.length > 0 && (
+        <>
+          <div className="section-title">正文层摘要（字幕/ASR）</div>
+          <div className="compact-list">
+            {content.map((item, i) => <span key={i}>{item}</span>)}
+          </div>
+        </>
+      )}
+      {audience.length > 0 && (
+        <>
+          <div className="section-title">观众反应层（弹幕/评论）</div>
+          <div className="compact-list">
+            {audience.map((item, i) => <span key={i}>{item}</span>)}
+          </div>
+        </>
+      )}
+      {subtitles.length > 0 && (
+        <details className="quiet-detail">
+          <summary>查看字幕片段（{subtitles.length}）</summary>
+          <div className="compact-list">
+            {subtitles.map((seg, i) => (
+              <span key={i}>{seg.start != null ? `${Math.floor(Number(seg.start))}s · ` : ""}{text(seg.text)}</span>
+            ))}
+          </div>
+        </details>
+      )}
+      {(danmaku.length > 0 || comments.length > 0) && (
+        <details className="quiet-detail">
+          <summary>查看弹幕 / 评论样本（{danmaku.length + comments.length}）</summary>
+          <div className="compact-list">
+            {danmaku.slice(0, 8).map((item, i) => (
+              <span key={`d-${i}`}>弹幕{item.time != null ? ` ${Math.floor(Number(item.time))}s` : ""} · {text(item.text)}</span>
+            ))}
+            {comments.slice(0, 8).map((item, i) => <span key={`c-${i}`}>评论 · {item}</span>)}
+          </div>
+        </details>
+      )}
+      {list<string>(data.analysis_plan).length > 0 && (
+        <>
+          <div className="section-title">后续分析建议</div>
+          <div className="compact-list">{list<string>(data.analysis_plan).map((n, i) => <span key={i}>{n}</span>)}</div>
         </>
       )}
       {list<string>(data.caveats).length > 0 && (
@@ -1096,6 +1220,7 @@ export function MemoryBadge({ memory }: { memory: MemoryState | null }) {
   const likeCount = list(memory.likes).length;
   const dislikeCount = list(memory.dislikes).length;
   const feedbackCount = list(memory.recent_feedback).length;
+  const visualFeedbackCount = list(memory.recent_visual_feedback).length;
   const pendingCount = list(memory.pending_write_actions).length;
   const planCount = list(memory.watch_plan).length;
   const inboxCount = list(memory.inbox).filter((x) => x.unread).length;
@@ -1108,6 +1233,7 @@ export function MemoryBadge({ memory }: { memory: MemoryState | null }) {
       <Badge tone={likeCount ? "good" : "dim"}>喜欢 {likeCount}{likePreview ? ` · ${likePreview}` : ""}</Badge>
       <Badge tone={dislikeCount ? "warn" : "dim"}>避雷 {dislikeCount}{dislikePreview ? ` · ${dislikePreview}` : ""}</Badge>
       {feedbackCount > 0 && <Badge tone="dim">反馈 {feedbackCount}</Badge>}
+      {visualFeedbackCount > 0 && <Badge tone="dim">视觉纠错 {visualFeedbackCount}</Badge>}
       {pendingCount > 0 && <Badge tone="warn">待确认 {pendingCount}</Badge>}
       {planCount > 0 && <Badge tone="good">计划 {planCount}</Badge>}
       {weeklyEnabled && <Badge tone="good">周报已订阅</Badge>}
@@ -1133,6 +1259,7 @@ function MemoryPanel({
   const likes = list(data.likes);
   const dislikes = list(data.dislikes);
   const feedback = list(data.recent_feedback);
+  const visualFeedback = list(data.recent_visual_feedback);
   const pendingActions = list(data.pending_write_actions);
   const decisions = list(data.recent_decisions);
   const watchPlan = list(data.watch_plan);
@@ -1146,7 +1273,7 @@ function MemoryPanel({
   return (
     <Panel
       title={`长期记忆 · ${text(data.username, "unknown")}`}
-      subtitle={`喜欢 ${likes.length} · 避雷 ${dislikes.length} · 反馈 ${feedback.length}`}
+      subtitle={`喜欢 ${likes.length} · 避雷 ${dislikes.length} · 反馈 ${feedback.length} · 视觉纠错 ${visualFeedback.length}`}
     >
       <div className="evidence-row">
         <Badge tone="dim">spoiler_default: {text(data.spoiler_default, "none")}</Badge>
@@ -1221,6 +1348,20 @@ function MemoryPanel({
               <Badge key={subject} tone={sourceTone(item.source)}>
                 {subject}: 第 {item.episode ?? "-"} 集
               </Badge>
+            ))}
+          </div>
+        </>
+      )}
+
+      {visualFeedback.length > 0 && (
+        <>
+          <div className="section-title">视觉识别反馈</div>
+          <div className="compact-list">
+            {visualFeedback.slice(-8).map((item, i) => (
+              <span key={`${item.id}-${i}`}>
+                {text(item.predicted_subject_name || item.predicted_title, "候选")} · {text(item.signal)}
+                <small> · {pct(item.confidence)}{item.note ? ` · ${text(item.note)}` : ""}</small>
+              </span>
             ))}
           </div>
         </>
@@ -1523,6 +1664,7 @@ export function EvidencePanels({
   onConfirmAction,
   onCancelAction,
   onUndoAction,
+  onVisualFeedback,
 }: {
   evidence: EvidenceMap;
   mode?: EvidenceMode;
@@ -1530,6 +1672,7 @@ export function EvidencePanels({
   onConfirmAction?: (id: string) => void;
   onCancelAction?: (id: string) => void;
   onUndoAction?: (id: string) => void;
+  onVisualFeedback?: (payload: AnyRecord) => void;
 }) {
   const devMode = mode === "dev";
   const review = list(evidence.review_subject);
@@ -1547,6 +1690,7 @@ export function EvidencePanels({
   const visualText = list(evidence.extract_visual_text);
   const visualStyle = list(evidence.recommend_by_visual_style);
   const imageSource = list(evidence.search_image_source);
+  const biliVideo = list(evidence.summarize_bilibili_video_content);
   const videoFrames = list(evidence.analyze_video_frames);
   const claimChecks = devMode ? list(evidence.claim_check) : [];
   const memoryEvidence = [
@@ -1566,14 +1710,15 @@ export function EvidencePanels({
     !review.length && !taste.length && !season.length && !recommend.length && !memory.length
     && !aspect.length && !watchCopilot.length && !weeklyDigest.length && !tasteReport.length && !dashboard.length && !explorer.length
     && !episodeRadar.length && !screenshot.length && !visualText.length && !visualStyle.length && !imageSource.length
-    && !videoFrames.length && !claimChecks.length
+    && !biliVideo.length && !videoFrames.length && !claimChecks.length
   ) return null;
   return (
     <div className={`evidence-stack ${devMode ? "dev-mode" : "user-mode"}`}>
-      {screenshot.map((data, i) => <ScreenshotIdentifyPanel data={data} key={`screenshot-${i}`} />)}
+      {screenshot.map((data, i) => <ScreenshotIdentifyPanel data={data} onVisualFeedback={onVisualFeedback} key={`screenshot-${i}`} />)}
       {visualText.map((data, i) => <VisualTextPanel data={data} key={`visual-text-${i}`} />)}
       {visualStyle.map((data, i) => <VisualStylePanel data={data} key={`visual-style-${i}`} />)}
       {imageSource.map((data, i) => <ImageSourcePanel data={data} key={`image-source-${i}`} />)}
+      {biliVideo.map((data, i) => <BiliVideoContentPanel data={data} key={`bili-video-${i}`} />)}
       {videoFrames.map((data, i) => <VideoFramePanel data={data} key={`video-frames-${i}`} />)}
       {recommend.map((data, i) => <RecommendPanel data={data} onCritique={onCritique} key={`recommend-${i}`} />)}
       {season.map((data, i) => <SeasonGuidePanel data={data} key={`season-${i}`} />)}

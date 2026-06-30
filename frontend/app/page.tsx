@@ -63,6 +63,7 @@ type MemoryState = {
   recommendation_lists?: Record<string, any>[];
   weekly_digest_subscription?: Record<string, any>;
   inbox?: Record<string, any>[];
+  recent_visual_feedback?: Record<string, any>[];
   updated_at?: string;
 };
 type AuthState = {
@@ -100,6 +101,7 @@ function evidenceSummary(evidence: EvidenceMap) {
     ["recommend_by_visual_style", "视觉推荐"],
     ["search_image_source", "图片溯源"],
     ["analyze_video_frames", "视频帧分析"],
+    ["summarize_bilibili_video_content", "B站视频分析"],
     ["compare_user_taste", "同步率"],
     ["build_aspect_profile", "Aspect 画像"],
     ["build_collection_dashboard", "收藏仪表盘"],
@@ -169,6 +171,7 @@ function friendlyToolName(name: string) {
     recommend_by_visual_style: "分析视觉风格",
     search_image_source: "搜索图片来源",
     analyze_video_frames: "分析视频帧",
+    summarize_bilibili_video_content: "分析B站视频",
     compare_user_taste: "计算同步率",
     build_aspect_profile: "更新口味画像",
     build_collection_dashboard: "生成收藏仪表盘",
@@ -461,6 +464,34 @@ export default function Home() {
     }
   }
 
+  async function postVisualFeedback(payload: Record<string, any>) {
+    try {
+      const res = await fetch(`${BACKEND}/feedback/visual`, {
+        method: "POST",
+        credentials: "include",
+        headers: csrfHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) {
+        setTrace((t) => [...t, { kind: "obs", name: "visual_feedback", ok: false, summary: data.detail || data.error || `HTTP ${res.status}` }]);
+        return;
+      }
+      if (data.memory) setMemory(data.memory);
+      setTrace((t) => [
+        ...t,
+        {
+          kind: "obs",
+          name: "visual_feedback",
+          ok: true,
+          summary: payload.signal === "correct" ? "已记录：截图识别正确" : "已记录：截图识别不对",
+        },
+      ]);
+    } catch (e) {
+      setTrace((t) => [...t, { kind: "obs", name: "visual_feedback", ok: false, summary: String(e) }]);
+    }
+  }
+
   function handleEvent(ev: any) {
     switch (ev.type) {
       case "plan":
@@ -680,6 +711,7 @@ export default function Home() {
             onConfirmAction={(id) => postAction("confirm", id)}
             onCancelAction={(id) => postAction("cancel", id)}
             onUndoAction={(id) => postAction("undo", id)}
+            onVisualFeedback={postVisualFeedback}
           />
           {spoiler?.progress_episode != null && (
             <div className="filter-note">🔒 已按第 {spoiler.progress_episode} 集进度过滤分集剧情内容</div>

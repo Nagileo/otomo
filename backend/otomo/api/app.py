@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 import json
+import uuid
 from typing import Any, AsyncIterator, Literal
 from urllib.parse import urlencode
 
@@ -21,8 +22,9 @@ from ..agent.contracts import AgentState
 from ..auth import AuthStore, BangumiToken, build_authorization_url, exchange_oauth_code, token_for_session
 from ..config import settings
 from ..memory import LongTermMemory
-from ..memory.models import memory_summary
-from ..obs import traced_stream
+from ..memory.consolidate import now_iso
+from ..memory.models import VisualFeedbackItem, VisualFeedbackSignal, memory_summary
+from ..obs import append_visual_feedback, traced_stream
 from ..factory import build_registry
 from ..uploads import upload_store
 from ..weekly import WeeklyDigestService
@@ -110,6 +112,21 @@ class ActionRequest(BaseModel):
 class UndoActionRequest(BaseModel):
     action_id: str | None = None
     username: str | None = None
+    auth_session_id: str | None = None
+
+
+class VisualFeedbackRequest(BaseModel):
+    image_uri: str = ""
+    tool_name: str = "identify_acgn_screenshot"
+    predicted_subject_id: int | None = None
+    predicted_subject_name: str = ""
+    predicted_title: str = ""
+    source: str = ""
+    confidence: float = Field(0.0, ge=0.0, le=1.0)
+    signal: VisualFeedbackSignal
+    corrected_subject_id: int | None = None
+    corrected_subject_name: str = ""
+    note: str = ""
     auth_session_id: str | None = None
 
 
@@ -377,6 +394,52 @@ async def undo_action(req: UndoActionRequest, request: Request, response: Respon
         allow_write=True,
         auth_session_id=session.auth_session_id,
     )
+
+
+@app.post("/feedback/visual")
+async def visual_feedback(req: VisualFeedbackRequest, request: Request, response: Response) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response, req.auth_session_id)
+    _require_csrf(request, session.auth_session_id)
+    client = await _request_client(app, session.auth_session_id)
+    try:
+        try:
+            me = await client.get_me()
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=401, detail="需要先绑定 Bangumi 账号再记录视觉反馈") from e
+        username = str(me.get("username") or me.get("id") or "").strip()
+        if not username:
+            raise HTTPException(status_code=401, detail="无法识别当前 Bangumi 用户")
+        item = VisualFeedbackItem(
+            id=uuid.uuid4().hex,
+            image_uri=req.image_uri[:500],
+            tool_name=req.tool_name[:80] or "identify_acgn_screenshot",
+            predicted_subject_id=req.predicted_subject_id,
+            predicted_subject_name=req.predicted_subject_name[:160],
+            predicted_title=req.predicted_title[:160],
+            source=req.source[:80],
+            confidence=req.confidence,
+            signal=req.signal,
+            corrected_subject_id=req.corrected_subject_id,
+            corrected_subject_name=req.corrected_subject_name[:160],
+            note=req.note[:500],
+            ts=now_iso(),
+        )
+        mem = app.state.ltm.load_user(username)
+        mem.visual_feedback.append(item)
+        mem.visual_feedback = mem.visual_feedback[-200:]
+        app.state.ltm.save_user(mem)
+        append_visual_feedback({
+            "username": username,
+            "auth_session_id": session.auth_session_id,
+            "feedback": item.model_dump(mode="json", exclude_none=True),
+        })
+        return {
+            "ok": True,
+            "feedback": item.model_dump(mode="json", exclude_none=True),
+            "memory": memory_summary(mem).model_dump(mode="json", exclude_none=True),
+        }
+    finally:
+        await client.aclose()
 
 
 async def _attach_memory_state(app: FastAPI, state: AgentState | None, client: BangumiClient) -> None:

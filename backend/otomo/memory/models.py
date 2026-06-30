@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 MemSource = Literal["explicit_user", "bangumi_profile", "derived_from_feedback"]
 SpoilerDefault = Literal["none", "mild", "full"]
 FeedbackSignal = Literal["like", "dislike", "more", "less"]
+VisualFeedbackSignal = Literal["correct", "wrong", "ambiguous"]
 WriteActionStatus = Literal["pending", "executed", "cancelled", "failed", "undone"]
 WriteOperation = Literal["set_collection", "set_episode_collection"]
 DecisionKind = Literal["accept", "reject", "defer", "write", "undo", "plan", "note"]
@@ -42,6 +43,22 @@ class FeedbackItem(BaseModel):
     note: str = ""
     source: MemSource = "explicit_user"
     confidence: float = Field(0.8, ge=0.0, le=1.0)
+    ts: str = ""
+
+
+class VisualFeedbackItem(BaseModel):
+    id: str
+    image_uri: str = ""
+    tool_name: str = "identify_acgn_screenshot"
+    predicted_subject_id: int | None = None
+    predicted_subject_name: str = ""
+    predicted_title: str = ""
+    source: str = ""
+    confidence: float = Field(0.0, ge=0.0, le=1.0)
+    signal: VisualFeedbackSignal
+    corrected_subject_id: int | None = None
+    corrected_subject_name: str = ""
+    note: str = ""
     ts: str = ""
 
 
@@ -164,6 +181,7 @@ class UserMemory(BaseModel):
     recommendation_lists: list[RecommendationListItem] = Field(default_factory=list)
     weekly_digest_subscription: WeeklyDigestSubscription = Field(default_factory=WeeklyDigestSubscription)
     inbox: list[InboxItem] = Field(default_factory=list)
+    visual_feedback: list[VisualFeedbackItem] = Field(default_factory=list)
     updated_at: str = ""
 
 
@@ -182,11 +200,13 @@ class MemorySummary(BaseModel):
     recommendation_lists: list[RecommendationListItem] = Field(default_factory=list)
     weekly_digest_subscription: WeeklyDigestSubscription = Field(default_factory=WeeklyDigestSubscription)
     inbox: list[InboxItem] = Field(default_factory=list)
+    recent_visual_feedback: list[VisualFeedbackItem] = Field(default_factory=list)
     updated_at: str = ""
 
 
 def memory_summary(mem: UserMemory, feedback_limit: int = 8) -> MemorySummary:
     recent_feedback = mem.feedback[-feedback_limit:] if feedback_limit > 0 else []
+    recent_visual_feedback = mem.visual_feedback[-feedback_limit:] if feedback_limit > 0 else []
     pending = [x for x in mem.pending_write_actions if x.status == "pending"][-6:]
     return MemorySummary(
         username=mem.username,
@@ -203,5 +223,6 @@ def memory_summary(mem: UserMemory, feedback_limit: int = 8) -> MemorySummary:
         recommendation_lists=mem.recommendation_lists[-6:],
         weekly_digest_subscription=mem.weekly_digest_subscription,
         inbox=mem.inbox[-8:],
+        recent_visual_feedback=recent_visual_feedback,
         updated_at=mem.updated_at,
     )

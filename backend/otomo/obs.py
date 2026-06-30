@@ -65,6 +65,20 @@ def _append_named(filename: str, rec: dict) -> None:
         pass
 
 
+def append_visual_feedback(rec: dict) -> None:
+    """Append user-confirmed visual recognition feedback for later evaluation/RL.
+
+    This is deliberately separate from full agent traces: feedback can arrive
+    from UI actions after the original run has finished.
+    """
+    payload = {
+        "schema": "otomo.visual_feedback.v1",
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        **rec,
+    }
+    _append_named("visual_feedback.jsonl", _redact(payload))
+
+
 def _redact(value: Any, *, depth: int = 0) -> Any:
     if depth > 5:
         return "<truncated>"

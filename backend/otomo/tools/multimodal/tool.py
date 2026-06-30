@@ -73,6 +73,7 @@ class CharacterCandidate(BaseModel):
 
 class IdentifyScreenshotResult(BaseModel):
     question: str
+    image_refs: list[str] = Field(default_factory=list)
     raw_vlm_answer: str = ""
     candidates: list[VisualCandidate] = Field(default_factory=list)
     character_candidates: list[CharacterCandidate] = Field(default_factory=list)
@@ -457,6 +458,10 @@ class IdentifyScreenshotTool(Tool):
             ok=True,
             data=IdentifyScreenshotResult(
                 question=args.question,
+                image_refs=[
+                    url if (url.startswith("upload://") or url.startswith("http://") or url.startswith("https://")) else ""
+                    for url in images
+                ],
                 raw_vlm_answer="\n\n".join(raw_parts)[:1600],
                 candidates=candidates[: args.limit],
                 character_candidates=character_candidates,

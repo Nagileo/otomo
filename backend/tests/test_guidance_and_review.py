@@ -24,7 +24,20 @@ from otomo.tools.review.tool import (
 from otomo.tools.season.tool import GuideCommentDigest, SeasonGuideBriefResult, _fit_item
 from otomo.tools.spoiler.tool import assess_spoiler_policy
 from otomo.tools.user_analysis.tool import _build_affinity, _parse_friend_list, _sentiment
-from otomo.tools.videos.tool import _clean_bili_title, _guide_links, _summarize_aspect_opinions
+from otomo.tools.videos import tool as videos_tool
+from otomo.tools.videos.tool import (
+    BiliDanmakuItem,
+    BiliVideoCommentsResult,
+    BiliVideoContentArgs,
+    BiliVideoDanmakuResult,
+    BiliVideoSubtitleResult,
+    BiliSubtitleSegment,
+    SummarizeBiliVideoContentTool,
+    _clean_bili_title,
+    _guide_links,
+    _parse_bili_video_ref,
+    _summarize_aspect_opinions,
+)
 
 
 def test_find_guide_video_links_prefers_whitelist():
@@ -223,9 +236,85 @@ def test_episode_comments_blocks_future_episode():
 
 def test_bili_title_cleaner_friend_parser_and_sentiment():
     assert _clean_bili_title('<em class="keyword">新番</em>导视') == "新番导视"
+    assert _parse_bili_video_ref("https://www.bilibili.com/video/BV1abcDEF23x/")[1] == "BV1abcDEF23x"
+    assert _parse_bili_video_ref("https://www.bilibili.com/video/av123456")[0] == 123456
     assert _sentiment("节奏太拖，比较失望") < 0
     friends = _parse_friend_list(
         '<ul id="memberUserList"><li><a href="/user/alice" class="avatar">Alice</a></li></ul>',
         10,
     )
     assert friends[0].username == "alice"
+
+
+def test_bili_video_content_aggregates_public_layers(monkeypatch):
+    def fake_view(_aid, _bvid):
+        return {
+            "data": {
+                "aid": 123,
+                "bvid": "BV1abcDEF23x",
+                "cid": 456,
+                "title": "2026年7月新番导视",
+                "desc": "本期聊夏季番。",
+                "owner": {"name": "名作之壁吧"},
+                "stat": {"view": 1000, "danmaku": 30},
+            }
+        }
+
+    async def fake_subtitles(self, args):
+        return ToolResult(
+            ok=True,
+            data=BiliVideoSubtitleResult(
+                aid=123,
+                bvid="BV1abcDEF23x",
+                cid=456,
+                count=2,
+                segments=[
+                    BiliSubtitleSegment(start=1.0, end=3.0, text="第一部推荐摇曳露营"),
+                    BiliSubtitleSegment(start=4.0, end=6.0, text="第二部是百合日常"),
+                ],
+                rough_summary=["第一部推荐摇曳露营 第二部是百合日常"],
+                caveats=["字幕是公开 ASR"],
+            ),
+        )
+
+    async def fake_danmaku(self, args):
+        return ToolResult(
+            ok=True,
+            data=BiliVideoDanmakuResult(
+                aid=123,
+                bvid="BV1abcDEF23x",
+                cid=456,
+                count=2,
+                danmaku=[BiliDanmakuItem(time=2.0, text="期待"), BiliDanmakuItem(time=5.0, text="百合好")],
+                opinion_summary=["整体观感：正向 × 2"],
+                caveats=["弹幕是话语源"],
+            ),
+        )
+
+    async def fake_comments(self, args):
+        return ToolResult(
+            ok=True,
+            data=BiliVideoCommentsResult(
+                aid=123,
+                count=1,
+                comments=["这季度可以追"],
+                opinion_summary=["整体观感：正向 × 1"],
+                source_url="https://www.bilibili.com/video/av123",
+                caveats=["评论是话语源"],
+            ),
+        )
+
+    monkeypatch.setattr(videos_tool, "_sync_bili_view", fake_view)
+    monkeypatch.setattr(videos_tool.GetBiliVideoSubtitlesTool, "run", fake_subtitles)
+    monkeypatch.setattr(videos_tool.GetBiliVideoDanmakuTool, "run", fake_danmaku)
+    monkeypatch.setattr(videos_tool.GetBiliVideoCommentsTool, "run", fake_comments)
+
+    res = asyncio.run(SummarizeBiliVideoContentTool().run(BiliVideoContentArgs(url="https://www.bilibili.com/video/BV1abcDEF23x")))
+    assert res.ok and res.data
+    assert res.data.access_level == "multi"
+    assert "subtitle" in res.data.read_layers
+    assert "danmaku" in res.data.read_layers
+    assert "comments" in res.data.read_layers
+    assert "metadata" in res.data.read_layers
+    assert "摇曳露营" in res.data.content_summary[0]
+    assert res.data.audience_summary

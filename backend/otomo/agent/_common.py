@@ -110,6 +110,15 @@ def _memory_prompt_lines(memory: dict[str, Any]) -> list[str]:
             lines.append("- 已知观看进度：" + "、".join(parts) + "；涉及这些作品时按进度防剧透。")
     if recent:
         lines.append("- 近期推荐反馈：" + "；".join(recent) + "。")
+    visual_recent = []
+    for item in (memory.get("recent_visual_feedback") or [])[:6]:
+        if not isinstance(item, dict):
+            continue
+        title = item.get("predicted_subject_name") or item.get("predicted_title") or "视觉候选"
+        signal = item.get("signal") or "feedback"
+        visual_recent.append(f"{title}:{signal}")
+    if visual_recent:
+        lines.append("- 近期视觉识别反馈：" + "；".join(visual_recent) + "；视觉候选需优先回锚并让用户确认。")
     watch_plan = memory.get("watch_plan") or []
     if isinstance(watch_plan, list) and watch_plan:
         plan_bits = []
@@ -363,6 +372,10 @@ def summarize(result: ToolResult) -> str:
             total = x.get("total")
             parts.append(f"{label}:{sentiment}({total})")
         return "方面摘要：" + "；".join(parts)
+    if d.get("read_layers") and (d.get("content_summary") or d.get("audience_summary")):
+        layers = "/".join(d.get("read_layers") or [])
+        content = (d.get("content_summary") or d.get("audience_summary") or [""])[0]
+        return f"B站视频分析：{layers} · {content[:80]}"
     if d.get("aspect_opinions"):
         return f"{len(d['aspect_opinions'])} 条方面观点"
     for key in ("subjects", "characters", "persons"):
@@ -385,6 +398,7 @@ _PANEL_TOOLS = {
     "recommend_by_visual_style",
     "search_image_source",
     "analyze_video_frames",
+    "summarize_bilibili_video_content",
     "build_aspect_profile",
     "plan_watch_copilot",
     "build_taste_report",
@@ -661,6 +675,7 @@ def _safe_memory_payload(data: dict[str, Any]) -> dict[str, Any]:
         "spoiler_default": memory.get("spoiler_default"),
         "progress": dict(list(progress.items())[:20]),
         "recent_feedback": _trim_dicts(memory.get("recent_feedback"), limit=10),
+        "recent_visual_feedback": _trim_dicts(memory.get("recent_visual_feedback"), limit=10),
         "profile_snapshot": memory.get("profile_snapshot") if isinstance(memory.get("profile_snapshot"), dict) else {},
         "aspect_profiles": memory.get("aspect_profiles") if isinstance(memory.get("aspect_profiles"), dict) else {},
         "pending_write_actions": _trim_dicts(memory.get("pending_write_actions"), limit=8),
@@ -724,6 +739,7 @@ def _safe_multimodal_payload(data: dict[str, Any]) -> dict[str, Any]:
         characters.append(copied)
     return {
         "question": data.get("question"),
+        "image_refs": _trim_strings(data.get("image_refs"), limit=4, text_limit=500),
         "raw_vlm_answer": _trim_text(data.get("raw_vlm_answer"), 600),
         "candidates": candidates,
         "character_candidates": characters,
@@ -812,6 +828,29 @@ def _safe_video_frames_payload(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _safe_bili_video_content_payload(data: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "aid": data.get("aid"),
+        "bvid": data.get("bvid"),
+        "cid": data.get("cid"),
+        "title": _trim_text(data.get("title"), 180),
+        "source_url": data.get("source_url"),
+        "access_level": data.get("access_level"),
+        "read_layers": _trim_strings(data.get("read_layers"), limit=6, text_limit=40),
+        "content_summary": _trim_strings(data.get("content_summary"), limit=8, text_limit=220),
+        "audience_summary": _trim_strings(data.get("audience_summary"), limit=8, text_limit=180),
+        "subtitle_summary": _trim_strings(data.get("subtitle_summary"), limit=6, text_limit=220),
+        "danmaku_summary": _trim_strings(data.get("danmaku_summary"), limit=6, text_limit=160),
+        "comment_summary": _trim_strings(data.get("comment_summary"), limit=6, text_limit=160),
+        "metadata_summary": _trim_strings(data.get("metadata_summary"), limit=6, text_limit=220),
+        "subtitle_segments": _trim_dicts(data.get("subtitle_segments"), limit=10),
+        "danmaku_samples": _trim_dicts(data.get("danmaku_samples"), limit=12),
+        "comment_samples": _trim_strings(data.get("comment_samples"), limit=12, text_limit=180),
+        "analysis_plan": _trim_strings(data.get("analysis_plan"), limit=6, text_limit=180),
+        "caveats": _trim_strings(data.get("caveats"), limit=10, text_limit=180),
+    }
+
+
 def panel_data_from_payload(name: str, payload: dict[str, Any] | None) -> dict[str, Any] | None:
     """Return UI-safe structured payload for tools that have dedicated evidence panels."""
     if name not in _PANEL_TOOLS or not isinstance(payload, dict):
@@ -853,6 +892,8 @@ def panel_data_from_payload(name: str, payload: dict[str, Any] | None) -> dict[s
         return _safe_image_source_payload(data)
     if name == "analyze_video_frames":
         return _safe_video_frames_payload(data)
+    if name == "summarize_bilibili_video_content":
+        return _safe_bili_video_content_payload(data)
     if name in _MEMORY_TOOLS:
         return _safe_memory_payload(data)
     return None

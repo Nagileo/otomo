@@ -81,6 +81,7 @@ class BiliVideoDanmakuArgs(BaseModel):
 
 
 class BiliVideoContentArgs(BaseModel):
+    url: str | None = Field(None, description="B站视频 URL；可直接传 https://www.bilibili.com/video/BV... 或 av...")
     aid: int | None = Field(None, description="B站 av/aid；aid 或 bvid 至少传一个")
     bvid: str | None = Field(None, description="B站 BV 号；aid 或 bvid 至少传一个")
     query: str | None = Field(None, description="关注点，如『新番导视提到哪些作品』")
@@ -169,11 +170,18 @@ class BiliVideoContentResult(BaseModel):
     cid: int | None = None
     title: str = ""
     source_url: str = ""
-    access_level: Literal["subtitle", "danmaku", "comments", "metadata", "unavailable"] = "unavailable"
+    access_level: Literal["multi", "subtitle", "danmaku", "comments", "metadata", "unavailable"] = "unavailable"
+    read_layers: list[str] = Field(default_factory=list)
+    content_summary: list[str] = Field(default_factory=list)
+    audience_summary: list[str] = Field(default_factory=list)
     subtitle_summary: list[str] = Field(default_factory=list)
     danmaku_summary: list[str] = Field(default_factory=list)
     comment_summary: list[str] = Field(default_factory=list)
     metadata_summary: list[str] = Field(default_factory=list)
+    subtitle_segments: list[BiliSubtitleSegment] = Field(default_factory=list)
+    danmaku_samples: list[BiliDanmakuItem] = Field(default_factory=list)
+    comment_samples: list[str] = Field(default_factory=list)
+    analysis_plan: list[str] = Field(default_factory=list)
     caveats: list[str] = Field(default_factory=list)
 
 
@@ -511,6 +519,52 @@ def _video_url(aid: int | None, bvid: str | None) -> str:
     return "https://www.bilibili.com/"
 
 
+def _parse_bili_video_ref(value: str | None) -> tuple[int | None, str | None]:
+    text = str(value or "").strip()
+    if not text:
+        return None, None
+    bvid_match = re.search(r"\b(BV[0-9A-Za-z]{10,})\b", text)
+    if bvid_match:
+        return None, bvid_match.group(1)
+    av_match = re.search(r"(?:/video/)?av(\d+)\b", text, re.I)
+    if av_match:
+        return int(av_match.group(1)), None
+    aid_match = re.search(r"[?&]aid=(\d+)\b", text)
+    if aid_match:
+        return int(aid_match.group(1)), None
+    return None, None
+
+
+@scached()
+def _sync_resolve_bili_url(url: str) -> str:
+    """Resolve b23.tv/share links without downloading video content."""
+    r = httpx.get(
+        url,
+        headers={"User-Agent": _BROWSER_UA, "Referer": "https://www.bilibili.com/"},
+        timeout=settings.http_timeout,
+        follow_redirects=True,
+    )
+    r.raise_for_status()
+    return str(r.url)
+
+
+async def _resolve_video_ref(url: str | None, aid: int | None, bvid: str | None) -> tuple[int | None, str | None, list[str]]:
+    notes: list[str] = []
+    if url:
+        parsed_aid, parsed_bvid = _parse_bili_video_ref(url)
+        aid = aid or parsed_aid
+        bvid = bvid or parsed_bvid
+        if aid is None and not bvid and "b23.tv" in url:
+            try:
+                resolved = await asyncio.to_thread(_sync_resolve_bili_url, url)
+                parsed_aid, parsed_bvid = _parse_bili_video_ref(resolved)
+                aid = aid or parsed_aid
+                bvid = bvid or parsed_bvid
+            except Exception as e:  # noqa: BLE001
+                notes.append(f"B站短链解析失败：{type(e).__name__}")
+    return aid, bvid, notes
+
+
 class FindVideosTool(Tool):
     name = "find_related_videos"
     description = (
@@ -809,9 +863,12 @@ class SummarizeBiliVideoContentTool(Tool):
     result_model = BiliVideoContentResult
 
     async def run(self, args: BiliVideoContentArgs) -> ToolResult[BiliVideoContentResult]:
-        if args.aid is None and not args.bvid:
-            return ToolResult(ok=False, error="aid 或 bvid 至少传一个")
-        aid, bvid, title, cid = args.aid, args.bvid, "", None
+        aid, bvid, ref_notes = await _resolve_video_ref(args.url, args.aid, args.bvid)
+        if aid is None and not bvid:
+            return ToolResult(ok=False, error="需要 url、aid 或 bvid 至少一个")
+        title, cid = "", None
+        desc, owner, stat = "", "", {}
+        view_error = ""
         try:
             view = await asyncio.to_thread(_sync_bili_view, aid, bvid)
             data = view.get("data") or {}
@@ -822,70 +879,9 @@ class SummarizeBiliVideoContentTool(Tool):
             desc = str(data.get("desc") or "").strip()
             owner = ((data.get("owner") or {}).get("name") or "").strip()
             stat = data.get("stat") or {}
-        except Exception:  # noqa: BLE001
-            desc, owner, stat = "", "", {}
+        except Exception as e:  # noqa: BLE001
+            view_error = f"B站 view 元数据读取失败：{type(e).__name__}"
         source_url = _video_url(aid, bvid)
-
-        subtitles = await GetBiliVideoSubtitlesTool().run(
-            BiliVideoSubtitleArgs(aid=aid, bvid=bvid, max_segments=min(args.limit, 160))
-        )
-        if subtitles.ok and subtitles.data is not None and subtitles.data.rough_summary:
-            return ToolResult(
-                ok=True,
-                data=BiliVideoContentResult(
-                    aid=aid,
-                    bvid=bvid,
-                    cid=subtitles.data.cid,
-                    title=title,
-                    source_url=source_url,
-                    access_level="subtitle",
-                    subtitle_summary=subtitles.data.rough_summary,
-                    metadata_summary=[x for x in [title, f"UP：{owner}" if owner else "", desc[:180]] if x],
-                    caveats=subtitles.data.caveats + ["已读取公开字幕/ASR；仍不等同于完整视频画面理解。"],
-                ),
-                sources=[Citation(title=title or source_url, url=source_url, source="bilibili")],
-            )
-
-        danmaku = await GetBiliVideoDanmakuTool().run(
-            BiliVideoDanmakuArgs(aid=aid, bvid=bvid, limit=args.limit, query=args.query)
-        )
-        if danmaku.ok and danmaku.data is not None and danmaku.data.count:
-            return ToolResult(
-                ok=True,
-                data=BiliVideoContentResult(
-                    aid=aid,
-                    bvid=bvid,
-                    cid=danmaku.data.cid,
-                    title=title,
-                    source_url=source_url,
-                    access_level="danmaku",
-                    danmaku_summary=danmaku.data.opinion_summary or _rough_danmaku_summary(danmaku.data.danmaku),
-                    metadata_summary=[x for x in [title, f"UP：{owner}" if owner else "", desc[:180]] if x],
-                    caveats=danmaku.data.caveats + ["该视频没有可用公开字幕时，当前结果只代表弹幕反应，不代表视频 PPT/画面内容。"],
-                ),
-                sources=[Citation(title=title or source_url, url=source_url, source="bilibili")],
-            )
-
-        if aid:
-            comments = await GetBiliVideoCommentsTool().run(
-                BiliVideoCommentsArgs(aid=aid, query=args.query, limit=min(args.limit, 50))
-            )
-            if comments.ok and comments.data is not None and comments.data.count:
-                return ToolResult(
-                    ok=True,
-                    data=BiliVideoContentResult(
-                        aid=aid,
-                        bvid=bvid,
-                        cid=cid,
-                        title=title,
-                        source_url=source_url,
-                        access_level="comments",
-                        comment_summary=comments.data.opinion_summary or comments.data.comments[:6],
-                        metadata_summary=[x for x in [title, f"UP：{owner}" if owner else "", desc[:180]] if x],
-                        caveats=comments.data.caveats + ["未读到字幕/弹幕正文时，当前结果只代表评论区氛围。"],
-                    ),
-                    sources=[Citation(title=title or source_url, url=source_url, source="bilibili")],
-                )
 
         metadata = [
             title,
@@ -893,6 +889,81 @@ class SummarizeBiliVideoContentTool(Tool):
             f"播放 {stat.get('view')} · 弹幕 {stat.get('danmaku')}" if stat else "",
             desc[:240],
         ]
+        subtitles, danmaku, comments = await asyncio.gather(
+            GetBiliVideoSubtitlesTool().run(BiliVideoSubtitleArgs(aid=aid, bvid=bvid, max_segments=min(args.limit, 160))),
+            GetBiliVideoDanmakuTool().run(BiliVideoDanmakuArgs(aid=aid, bvid=bvid, limit=args.limit, query=args.query)),
+            GetBiliVideoCommentsTool().run(BiliVideoCommentsArgs(aid=aid, query=args.query, limit=min(args.limit, 50)))
+            if aid else asyncio.sleep(0, result=ToolResult(ok=False, error="缺少 aid，跳过评论读取")),
+        )
+
+        read_layers: list[str] = []
+        caveats: list[str] = []
+        subtitle_summary: list[str] = []
+        subtitle_segments: list[BiliSubtitleSegment] = []
+        danmaku_summary: list[str] = []
+        danmaku_samples: list[BiliDanmakuItem] = []
+        comment_summary: list[str] = []
+        comment_samples: list[str] = []
+
+        if subtitles.ok and subtitles.data is not None and subtitles.data.count:
+            read_layers.append("subtitle")
+            cid = subtitles.data.cid or cid
+            subtitle_summary = subtitles.data.rough_summary
+            subtitle_segments = subtitles.data.segments[:12]
+            caveats.extend(subtitles.data.caveats)
+        else:
+            caveats.append(subtitles.error or "该视频未暴露公开字幕/ASR。")
+
+        if danmaku.ok and danmaku.data is not None and danmaku.data.count:
+            read_layers.append("danmaku")
+            cid = danmaku.data.cid or cid
+            danmaku_summary = danmaku.data.opinion_summary or _rough_danmaku_summary(danmaku.data.danmaku)
+            danmaku_samples = danmaku.data.danmaku[:20]
+            caveats.extend(danmaku.data.caveats)
+        elif danmaku.error:
+            caveats.append(danmaku.error)
+
+        if comments.ok and comments.data is not None and comments.data.count:
+            read_layers.append("comments")
+            comment_summary = comments.data.opinion_summary or comments.data.comments[:6]
+            comment_samples = comments.data.comments[:20]
+            caveats.extend(comments.data.caveats)
+        elif comments.error:
+            caveats.append(comments.error)
+
+        metadata_summary = [x for x in metadata if x]
+        if metadata_summary:
+            read_layers.append("metadata")
+        content_summary = subtitle_summary or [
+            "未读到公开字幕/ASR；当前无法直接知道视频正文或 PPT 画面写了什么。"
+        ]
+        audience_summary = []
+        for item in [*danmaku_summary[:5], *comment_summary[:5]]:
+            if item and item not in audience_summary:
+                audience_summary.append(item)
+        access_level: Literal["multi", "subtitle", "danmaku", "comments", "metadata", "unavailable"]
+        if subtitle_summary and (danmaku_summary or comment_summary):
+            access_level = "multi"
+        elif subtitle_summary:
+            access_level = "subtitle"
+        elif danmaku_summary:
+            access_level = "danmaku"
+        elif comment_summary:
+            access_level = "comments"
+        elif metadata_summary:
+            access_level = "metadata"
+        else:
+            access_level = "unavailable"
+        analysis_plan = [
+            "如果用户要正文观点，以 subtitle_summary 为主；弹幕/评论只作观众反应。",
+            "如果该视频是无字幕 PPT/放歌导视，需要用户上传视频文件或关键帧，再调用 analyze_video_frames 做 OCR/VLM。",
+            "涉及作品事实、播出时间、制作阵容时必须回到 Bangumi/yuc 等事实源核验。",
+        ]
+        if view_error:
+            caveats.append(view_error)
+        caveats.extend(ref_notes)
+        # 去重并保留顺序，避免面板被重复 caveat 淹没。
+        caveats = list(dict.fromkeys([x for x in caveats if x]))[:10]
         return ToolResult(
             ok=True,
             data=BiliVideoContentResult(
@@ -901,12 +972,19 @@ class SummarizeBiliVideoContentTool(Tool):
                 cid=cid,
                 title=title,
                 source_url=source_url,
-                access_level="metadata",
-                metadata_summary=[x for x in metadata if x],
-                caveats=[
-                    "未读取到公开字幕、弹幕或评论；只能返回视频元数据。",
-                    "对于无字幕 PPT/放歌类视频，需要后续接入抽帧+OCR/VLM 才能理解画面文字。",
-                ],
+                access_level=access_level,
+                read_layers=read_layers,
+                content_summary=content_summary[:8],
+                audience_summary=audience_summary[:8],
+                subtitle_summary=subtitle_summary[:8],
+                danmaku_summary=danmaku_summary[:8],
+                comment_summary=comment_summary[:8],
+                metadata_summary=metadata_summary,
+                subtitle_segments=subtitle_segments,
+                danmaku_samples=danmaku_samples,
+                comment_samples=comment_samples,
+                analysis_plan=analysis_plan,
+                caveats=caveats,
             ),
             sources=[Citation(title=title or source_url, url=source_url, source="bilibili")],
         )
