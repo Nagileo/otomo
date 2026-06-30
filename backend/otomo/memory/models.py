@@ -13,6 +13,7 @@ WriteOperation = Literal["set_collection", "set_episode_collection"]
 DecisionKind = Literal["accept", "reject", "defer", "write", "undo", "plan", "note"]
 PlanStatus = Literal["wishlist", "watching", "backlog", "on_hold", "revive", "completed", "rejected"]
 InboxKind = Literal["weekly_digest", "system"]
+WeeklyChannel = Literal["inbox", "webhook", "email"]
 AspectKey = Literal[
     "story", "character", "pacing", "visual", "music",
     "direction", "text", "system", "voice", "general",
@@ -109,6 +110,10 @@ class WeeklyDigestSubscription(BaseModel):
     timezone: str = "Asia/Shanghai"
     limit: int = Field(8, ge=3, le=20)
     include_on_hold: bool = True
+    channels: list[WeeklyChannel] = Field(default_factory=lambda: ["inbox"])
+    email: str = ""
+    webhook_url: str = ""
+    last_delivery: list[dict] = Field(default_factory=list)
     last_run_key: str = ""
     updated_at: str = ""
 

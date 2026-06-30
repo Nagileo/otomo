@@ -27,6 +27,8 @@ def _summarize_event(ev: Any) -> dict:
     d: dict[str, Any] = {"type": t}
     if t == "tool_call":
         d["name"], d["args"] = ev.name, ev.args
+    elif t == "progress":
+        d["stage"], d["tool"], d["summary"] = ev.stage, ev.tool, ev.summary
     elif t == "observation":
         d["name"], d["ok"], d["entities"] = ev.name, ev.ok, len(ev.entities)
     elif t == "claim_check":

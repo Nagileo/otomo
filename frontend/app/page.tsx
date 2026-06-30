@@ -102,6 +102,7 @@ function evidenceSummary(evidence: EvidenceMap) {
     ["analyze_video_frames", "视频帧分析"],
     ["compare_user_taste", "同步率"],
     ["build_aspect_profile", "Aspect 画像"],
+    ["build_collection_dashboard", "收藏仪表盘"],
     ["episode_buzz_radar", "分集口碑"],
     ["explore_voice_network", "角色/声优网络"],
     ["claim_check", "事实校验"],
@@ -170,6 +171,7 @@ function friendlyToolName(name: string) {
     analyze_video_frames: "分析视频帧",
     compare_user_taste: "计算同步率",
     build_aspect_profile: "更新口味画像",
+    build_collection_dashboard: "生成收藏仪表盘",
     claim_check: "核对事实声明",
     get_user_memory: "读取记忆",
     remember_user_preference: "写入偏好记忆",
@@ -469,6 +471,9 @@ export default function Home() {
         break;
       case "tool_call":
         setTrace((t) => [...t, { kind: "call", name: ev.name, args: ev.args }]);
+        break;
+      case "progress":
+        setTrace((t) => [...t, { kind: "note", text: `⏱ ${ev.summary}` }]);
         break;
       case "observation":
         setTrace((t) => [...t, { kind: "obs", name: ev.name, ok: ev.ok, summary: ev.summary }]);

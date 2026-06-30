@@ -19,6 +19,7 @@ ClaimKind = Literal[
     "spoiler_sensitive",
     "unknown",
 ]
+ClaimSeverity = Literal["info", "warn", "block"]
 
 
 class ClaimEvidence(BaseModel):
@@ -34,8 +35,10 @@ class VerifiedClaim(BaseModel):
     kind: ClaimKind
     supported: bool
     confidence: float = Field(0.0, ge=0.0, le=1.0)
+    severity: ClaimSeverity = "info"
     evidence: list[ClaimEvidence] = Field(default_factory=list)
     note: str = ""
+    suggestion: str = ""
 
 
 class ClaimCheckResult(BaseModel):
@@ -44,6 +47,8 @@ class ClaimCheckResult(BaseModel):
     supported_count: int = 0
     unsupported_count: int = 0
     unverifiable_count: int = 0
+    needs_revision: bool = False
+    revision_hints: list[str] = Field(default_factory=list)
     caveats: list[str] = Field(default_factory=list)
 
 
@@ -288,28 +293,49 @@ def verify_answer_claims(answer: str, observations: list[dict[str, Any]]) -> Cla
             else:
                 note = "未在本轮 observation 中找到直接证据。"
         confidence = max([x.confidence for x in evidence], default=0.0)
+        if supported:
+            severity: ClaimSeverity = "info"
+            suggestion = ""
+        elif kind in {"canonical_fact", "spoiler_sensitive"}:
+            severity = "block"
+            suggestion = "删除该断言，或改写为“本轮证据未确认”，并补 canonical 工具后再回答。"
+        elif kind in {"discourse_summary", "preference_inference"}:
+            severity = "warn"
+            suggestion = "降级为带来源限制的表述，例如“从本轮少量评论/画像看”。"
+        else:
+            severity = "info"
+            suggestion = "可保留为一般性表达，但不要当作事实证据。"
         claims.append(
             VerifiedClaim(
                 text=text,
                 kind=kind,
                 supported=supported,
                 confidence=confidence,
+                severity=severity,
                 evidence=evidence,
                 note=note,
+                suggestion=suggestion,
             )
         )
     supported_count = sum(1 for x in claims if x.supported)
     unsupported_count = sum(1 for x in claims if not x.supported and x.kind != "unknown")
     unverifiable_count = sum(1 for x in claims if not x.supported and x.kind == "unknown")
     denom = max(len([x for x in claims if x.kind != "unknown"]), 1)
+    revision_hints = [
+        f"{x.severity}: {x.text} -> {x.suggestion or x.note}"
+        for x in claims
+        if not x.supported and x.severity in {"block", "warn"}
+    ][:8]
     return ClaimCheckResult(
         claims=claims,
         support_rate=round(supported_count / denom, 4),
         supported_count=supported_count,
         unsupported_count=unsupported_count,
         unverifiable_count=unverifiable_count,
+        needs_revision=any(x.severity == "block" for x in claims),
+        revision_hints=revision_hints,
         caveats=[
-            "claim verifier v2 只对齐本轮已有 observation evidence graph，不额外查证。",
+            "claim verifier v3 只对齐本轮已有 observation evidence graph，不额外查证。",
             "canonical fact 需要 canonical 工具证据；口碑/偏好是弱验证；未命中时应降级或补工具。",
         ],
     )

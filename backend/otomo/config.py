@@ -83,6 +83,13 @@ class Settings(BaseSettings):
     trajectory_store_observations: bool = True
     weekly_scheduler_enabled: bool = True
     weekly_scheduler_interval_seconds: int = 900
+    weekly_webhook_timeout: float = 8.0
+    notification_email_enabled: bool = False
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from: str = ""
 
     # ---- Agent / HTTP ----
     agent_max_iters: int = 8

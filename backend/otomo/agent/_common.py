@@ -19,6 +19,7 @@ from .contracts import (
     EntityRef,
     ObservationEvent,
     StateEvent,
+    ProgressEvent,
     ToolCallEvent,
     ToolResult,
 )
@@ -387,6 +388,7 @@ _PANEL_TOOLS = {
     "build_aspect_profile",
     "plan_watch_copilot",
     "build_taste_report",
+    "build_collection_dashboard",
     "build_weekly_digest",
     "configure_weekly_digest",
     "generate_weekly_digest_now",
@@ -417,7 +419,7 @@ _MEMORY_TOOLS = {
     "generate_weekly_digest_now",
     "list_weekly_digest_inbox",
 }
-_MEMORY_STATE_TOOLS = _MEMORY_TOOLS | {"build_aspect_profile", "build_taste_report"}
+_MEMORY_STATE_TOOLS = _MEMORY_TOOLS | {"build_aspect_profile", "build_taste_report", "build_collection_dashboard"}
 
 
 def _trim_text(value: Any, limit: int = 220) -> str:
@@ -622,6 +624,31 @@ def _safe_taste_report_payload(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _safe_collection_dashboard_payload(data: dict[str, Any]) -> dict[str, Any]:
+    media = []
+    for item in _trim_dicts(data.get("media"), limit=8):
+        copied = dict(item)
+        copied["top_tags"] = _trim_dicts(copied.get("top_tags"), limit=12)
+        copied["high_rated"] = _trim_dicts(copied.get("high_rated"), limit=8)
+        copied["backlog"] = _trim_dicts(copied.get("backlog"), limit=8)
+        copied["on_hold_or_abandoned"] = _trim_dicts(copied.get("on_hold_or_abandoned"), limit=8)
+        copied["notes"] = _trim_strings(copied.get("notes"), limit=5, text_limit=180)
+        media.append(copied)
+    return {
+        "username": data.get("username"),
+        "generated_at": data.get("generated_at"),
+        "totals": data.get("totals") or {},
+        "media": media,
+        "global_top_tags": _trim_dicts(data.get("global_top_tags"), limit=18),
+        "rating_strictness": _trim_text(data.get("rating_strictness"), 240),
+        "plan_summary": data.get("plan_summary") or {},
+        "weekly_subscription": data.get("weekly_subscription") or {},
+        "memory_signals": data.get("memory_signals") or {},
+        "recommendations_for_next_step": _trim_strings(data.get("recommendations_for_next_step"), limit=6, text_limit=180),
+        "caveats": _trim_strings(data.get("caveats"), limit=6, text_limit=180),
+    }
+
+
 def _safe_memory_payload(data: dict[str, Any]) -> dict[str, Any]:
     memory = data.get("memory") if isinstance(data.get("memory"), dict) else data
     if not isinstance(memory, dict):
@@ -810,6 +837,8 @@ def panel_data_from_payload(name: str, payload: dict[str, Any] | None) -> dict[s
         return _safe_weekly_inbox_payload(data)
     if name == "build_taste_report":
         return _safe_taste_report_payload(data)
+    if name == "build_collection_dashboard":
+        return _safe_collection_dashboard_payload(data)
     if name == "explore_voice_network":
         return _safe_explorer_payload(data)
     if name == "episode_buzz_radar":
@@ -959,6 +988,7 @@ async def step_tools(
     for tc in msg.tool_calls:
         call_args = safe_json(tc.function.arguments)
         yield ToolCallEvent(name=tc.function.name, args=call_args)
+        yield ProgressEvent(stage="tool_start", tool=tc.function.name, summary=f"开始执行 {tc.function.name}")
         result = await registry.dispatch(tc.function.name, tc.function.arguments)
         for c in result.sources:
             if c.url not in seen_urls:
@@ -968,6 +998,11 @@ async def step_tools(
             name=tc.function.name, ok=result.ok, summary=summarize(result),
             sources=result.sources, entities=extract_entities(result),
             data=panel_data(tc.function.name, result),
+        )
+        yield ProgressEvent(
+            stage="tool_done" if result.ok else "tool_error",
+            tool=tc.function.name,
+            summary=f"{'完成' if result.ok else '失败'} {tc.function.name}: {summarize(result)}",
         )
         if memory_state := memory_state_from_result(tc.function.name, result):
             yield StateEvent(scope="memory", snapshot=memory_state)

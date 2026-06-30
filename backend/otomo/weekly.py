@@ -10,6 +10,7 @@ from .auth import AuthStore
 from .config import settings
 from .memory import LongTermMemory
 from .memory.consolidate import now_iso
+from .notifications import dispatch_weekly_digest_notifications
 from .tools.bangumi.client import BangumiClient
 from .tools.watchorder.tool import WeeklyDigestArgs, WeeklyDigestTool, _digest_inbox_item
 
@@ -70,8 +71,12 @@ class WeeklyDigestService:
             if not res.ok or res.data is None:
                 continue
             mem = self.ltm.load_user(username)
-            mem.inbox.append(_digest_inbox_item(res.data, unread=True))
+            item = _digest_inbox_item(res.data, unread="inbox" in (sub.channels or ["inbox"]))
+            deliveries = await dispatch_weekly_digest_notifications(username, sub, item)
+            item.payload["deliveries"] = deliveries
+            mem.inbox.append(item)
             mem.inbox = mem.inbox[-30:]
+            mem.weekly_digest_subscription.last_delivery = deliveries[-8:]
             mem.weekly_digest_subscription.last_run_key = run_key
             mem.weekly_digest_subscription.updated_at = now_iso()
             self.ltm.save_user(mem)

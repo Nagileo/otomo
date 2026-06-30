@@ -299,6 +299,18 @@ button:disabled { opacity: .5; cursor: default; }
 .taste-group { min-width: 0; }
 .shared-item { display: grid; grid-template-columns: 34px 1fr; gap: 7px; align-items: center; margin: 6px 0; min-width: 0; }
 .shared-item img, .shared-noimg { width: 34px; height: 46px; object-fit: cover; border-radius: 6px; background: #20242e; }
+.compact-subject-grid { display: grid; gap: 6px; }
+.compact-subject {
+  display: grid; grid-template-columns: 34px 1fr; gap: 7px; align-items: center; min-width: 0;
+  padding: 5px; border: 1px solid var(--border); border-radius: 8px; background: #0c0e13;
+  color: var(--text); text-decoration: none;
+}
+.compact-subject:hover { border-color: var(--accent); }
+.compact-subject img { width: 34px; height: 46px; object-fit: cover; border-radius: 6px; background: #20242e; }
+.compact-subject strong {
+  display: block; font-size: 12px; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.compact-subject small { display: block; color: var(--dim); font-size: 11px; margin-top: 2px; }
 
 .season-card, .rec-card { display: grid; grid-template-columns: 62px 1fr; gap: 9px; min-width: 0; }
 .season-card img, .season-noimg, .rec-card img, .rec-noimg {

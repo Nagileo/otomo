@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ...agent.contracts import Citation, Tool, ToolResult
 from ...memory import LongTermMemory
 from ...memory.consolidate import now_iso
-from ...memory.models import InboxItem, MemorySummary, WeeklyDigestSubscription, memory_summary
+from ...memory.models import InboxItem, MemorySummary, WeeklyChannel, WeeklyDigestSubscription, memory_summary
 from ...profile import compute_taste_profile
 from ..bangumi.client import SUBJECT_TYPE, BangumiClient
 
@@ -104,6 +104,12 @@ class ConfigureWeeklyDigestArgs(BaseModel):
     timezone: str = "Asia/Shanghai"
     limit: int = Field(8, ge=3, le=20)
     include_on_hold: bool = True
+    channels: list[WeeklyChannel] = Field(
+        default_factory=lambda: ["inbox"],
+        description="通知渠道：inbox/webhook/email；webhook/email 需要对应地址和服务端配置",
+    )
+    email: str = Field("", description="email 渠道收件地址")
+    webhook_url: str = Field("", description="webhook 渠道 URL")
 
 
 class WeeklyDigestMemoryResult(BaseModel):
@@ -468,6 +474,10 @@ class ConfigureWeeklyDigestTool(Tool):
             timezone=args.timezone,
             limit=args.limit,
             include_on_hold=args.include_on_hold,
+            channels=list(dict.fromkeys(args.channels or ["inbox"])),
+            email=args.email.strip() or mem.weekly_digest_subscription.email,
+            webhook_url=args.webhook_url.strip() or mem.weekly_digest_subscription.webhook_url,
+            last_delivery=mem.weekly_digest_subscription.last_delivery,
             last_run_key=mem.weekly_digest_subscription.last_run_key,
             updated_at=now_iso(),
         )

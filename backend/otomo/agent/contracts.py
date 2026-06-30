@@ -120,6 +120,13 @@ class ToolCallEvent(BaseModel):
     args: dict[str, Any]
 
 
+class ProgressEvent(BaseModel):
+    type: Literal["progress"] = "progress"
+    stage: Literal["tool_start", "tool_done", "tool_error", "synthesis"] = "tool_start"
+    summary: str
+    tool: str = ""
+
+
 class ObservationEvent(BaseModel):
     type: Literal["observation"] = "observation"
     name: str
@@ -162,6 +169,8 @@ class ClaimCheckEvent(BaseModel):
     supported_count: int = 0
     unsupported_count: int = 0
     unverifiable_count: int = 0
+    needs_revision: bool = False
+    revision_hints: list[str] = Field(default_factory=list)
     claims: list[dict[str, Any]] = Field(default_factory=list)
     caveats: list[str] = Field(default_factory=list)
 
@@ -179,6 +188,7 @@ class ErrorEvent(BaseModel):
 AgentEvent = (
     PlanEvent
     | ToolCallEvent
+    | ProgressEvent
     | ObservationEvent
     | StateEvent
     | ReflectEvent

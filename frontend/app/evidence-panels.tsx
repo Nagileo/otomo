@@ -976,6 +976,106 @@ function TasteReportPanel({ data }: { data: AnyRecord }) {
   );
 }
 
+function DistributionBadges({ data }: { data: AnyRecord }) {
+  const entries = Object.entries(data || {}).slice(0, 10);
+  if (!entries.length) return <span className="card-meta">暂无</span>;
+  return (
+    <div className="evidence-row tight">
+      {entries.map(([key, value]) => <Badge key={key} tone="dim">{key}: {String(value)}</Badge>)}
+    </div>
+  );
+}
+
+function SubjectMiniList({ title, items }: { title: string; items: AnyRecord[] }) {
+  if (!items.length) return null;
+  return (
+    <div>
+      <div className="section-title">{title}</div>
+      <div className="compact-subject-grid">
+        {items.slice(0, 8).map((item, i) => (
+          <a
+            key={`${item.id || item.name}-${i}`}
+            className="compact-subject"
+            href={item.id ? `https://bgm.tv/subject/${item.id}` : undefined}
+            target="_blank"
+            rel="noreferrer"
+          >
+            {item.image ? <img src={item.image} alt="" loading="lazy" /> : <span className="shared-noimg" />}
+            <span>
+              <strong>{text(item.name)}</strong>
+              <small>{item.rate ? `评分 ${item.rate}` : text(item.status, "")}{item.ep_status ? ` · ep ${item.ep_status}` : ""}</small>
+            </span>
+          </a>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function CollectionDashboardPanel({ data }: { data: AnyRecord }) {
+  const totals = data.totals || {};
+  const media = list(data.media);
+  const weekly = data.weekly_subscription || {};
+  return (
+    <Panel title={`收藏仪表盘 · ${text(data.username)}`} subtitle={`生成于 ${text(data.generated_at, "-")}`}>
+      <div className="metric-grid">
+        <div className="metric-card"><div className="metric-label">总收藏</div><div className="metric-value">{totals.items ?? 0}</div></div>
+        <div className="metric-card"><div className="metric-label">已评分</div><div className="metric-value">{totals.rated ?? 0}</div></div>
+        <div className="metric-card"><div className="metric-label">计划板</div><div className="metric-value">{totals.watch_plan ?? 0}</div></div>
+        <div className="metric-card"><div className="metric-label">未读周报</div><div className="metric-value">{totals.unread_inbox ?? 0}</div></div>
+      </div>
+      {data.rating_strictness && <p className="evidence-copy">{text(data.rating_strictness)}</p>}
+      <div className="evidence-row">
+        {list(data.global_top_tags).slice(0, 14).map((tag) => <Badge key={tag.tag} tone="good">{text(tag.tag)} · {tag.weight}</Badge>)}
+      </div>
+      <div className="rating-grid">
+        {media.map((m, i) => (
+          <div className="rating-card" key={`${m.subject_type}-${i}`}>
+            <div className="rating-source">{text(m.subject_type)}</div>
+            <div className="rating-score">{m.total ?? 0}</div>
+            <div className="card-meta">评分 {m.rated ?? 0} · 均分 {m.avg_rating ?? "暂无"}</div>
+            <div className="section-title">收藏状态</div>
+            <DistributionBadges data={m.status_counts} />
+            <div className="section-title">评分分布</div>
+            <DistributionBadges data={m.rating_distribution} />
+            <div className="section-title">年代趋势</div>
+            <DistributionBadges data={m.decade_distribution} />
+            <div className="evidence-row tight">
+              {list(m.top_tags).slice(0, 7).map((tag) => <Badge key={tag.tag} tone="dim">{text(tag.tag)}</Badge>)}
+            </div>
+            {list<string>(m.notes).length > 0 && (
+              <div className="caveats">{list<string>(m.notes).map((n, j) => <span key={j}>{n}</span>)}</div>
+            )}
+            <SubjectMiniList title="高分代表" items={list(m.high_rated)} />
+            <SubjectMiniList title="待看/在看" items={list(m.backlog)} />
+            <SubjectMiniList title="搁置/抛弃" items={list(m.on_hold_or_abandoned)} />
+          </div>
+        ))}
+      </div>
+      <div className="memory-grid">
+        <div className="rating-card">
+          <div className="rating-source">计划板状态</div>
+          <DistributionBadges data={data.plan_summary || {}} />
+        </div>
+        <div className="rating-card">
+          <div className="rating-source">主动周报</div>
+          <div className="evidence-row tight">
+            <Badge tone={weekly.enabled ? "good" : "dim"}>{weekly.enabled ? "已开启" : "未开启"}</Badge>
+            <Badge tone="dim">weekday {weekly.weekday ?? "-"}</Badge>
+            <Badge tone="dim">hour {weekly.hour ?? "-"}</Badge>
+          </div>
+        </div>
+      </div>
+      <div className="compact-list">
+        {list<string>(data.recommendations_for_next_step).map((x, i) => <span key={i}>{x}</span>)}
+      </div>
+      {list<string>(data.caveats).length > 0 && (
+        <div className="caveats">{list<string>(data.caveats).map((n, i) => <span key={i}>{n}</span>)}</div>
+      )}
+    </Panel>
+  );
+}
+
 export function SpoilerBadge({ spoiler }: { spoiler: SpoilerState | null }) {
   if (!spoiler) return null;
   const mode = spoiler.mode || "none";
@@ -1218,7 +1318,19 @@ function MemoryPanel({
               <p className="card-note">
                 weekday {weeklySub.weekday ?? "-"} · hour {weeklySub.hour ?? "-"} · {text(weeklySub.timezone, "Asia/Shanghai")}
               </p>
+              <div className="evidence-row tight">
+                {list<string>(weeklySub.channels).map((ch) => <Badge key={ch} tone="dim">{ch}</Badge>)}
+                {weeklySub.email && <Badge tone="dim">email</Badge>}
+                {weeklySub.webhook_url && <Badge tone="dim">webhook</Badge>}
+              </div>
               {weeklySub.last_run_key && <Badge tone="dim">last {weeklySub.last_run_key}</Badge>}
+              {list(weeklySub.last_delivery).length > 0 && (
+                <div className="compact-list">
+                  {list(weeklySub.last_delivery).slice(-4).map((d, j) => (
+                    <span key={j}>{text(d.channel)} · {d.ok ? "ok" : text(d.error, "failed")}</span>
+                  ))}
+                </div>
+              )}
             </div>
             {inbox.slice().reverse().slice(0, 5).map((item, i) => {
               const payload = item.payload || {};
@@ -1354,16 +1466,29 @@ function ClaimCheckPanel({ data }: { data: AnyRecord }) {
           <div className="metric-label">不可验证</div>
           <div className="metric-value">{data.unverifiable_count ?? 0}</div>
         </div>
+        <div className="metric-card">
+          <div className="metric-label">需修正</div>
+          <div className="metric-value">{data.needs_revision ? "是" : "否"}</div>
+        </div>
       </div>
+      {list<string>(data.revision_hints).length > 0 && (
+        <>
+          <div className="section-title">修正建议</div>
+          <div className="compact-list">
+            {list<string>(data.revision_hints).map((hint, i) => <span key={i}>{hint}</span>)}
+          </div>
+        </>
+      )}
       {claims.length ? (
         <div className="claim-list">
           {claims.slice(0, 12).map((claim, i) => {
-            const tone = claim.supported ? "good" : claim.kind === "unknown" ? "dim" : "bad";
+            const tone = claim.supported ? "good" : claim.severity === "block" ? "bad" : claim.severity === "warn" ? "warn" : "dim";
             return (
               <div className="claim-card" key={`${claim.text}-${i}`}>
                 <div className="claim-top">
                   <Badge tone={tone}>{claim.supported ? "supported" : "unsupported"}</Badge>
                   <Badge tone="dim">{text(claim.kind)}</Badge>
+                  {claim.severity && <Badge tone={tone}>{text(claim.severity)}</Badge>}
                   <Badge tone="dim">conf {pct(claim.confidence)}</Badge>
                 </div>
                 <p className="card-note">{text(claim.text)}</p>
@@ -1376,6 +1501,7 @@ function ClaimCheckPanel({ data }: { data: AnyRecord }) {
                 ) : (
                   <div className="card-meta">{text(claim.note, "没有命中本轮证据")}</div>
                 )}
+                {claim.suggestion && <div className="card-meta">建议：{text(claim.suggestion)}</div>}
               </div>
             );
           })}
@@ -1414,6 +1540,7 @@ export function EvidencePanels({
   const watchCopilot = list(evidence.plan_watch_copilot);
   const weeklyDigest = list(evidence.build_weekly_digest);
   const tasteReport = list(evidence.build_taste_report);
+  const dashboard = list(evidence.build_collection_dashboard);
   const explorer = list(evidence.explore_voice_network);
   const episodeRadar = list(evidence.episode_buzz_radar);
   const screenshot = list(evidence.identify_acgn_screenshot);
@@ -1437,7 +1564,7 @@ export function EvidencePanels({
   const memory = devMode ? memoryEvidence : memoryEvidence.filter(hasActionableMemory);
   if (
     !review.length && !taste.length && !season.length && !recommend.length && !memory.length
-    && !aspect.length && !watchCopilot.length && !weeklyDigest.length && !tasteReport.length && !explorer.length
+    && !aspect.length && !watchCopilot.length && !weeklyDigest.length && !tasteReport.length && !dashboard.length && !explorer.length
     && !episodeRadar.length && !screenshot.length && !visualText.length && !visualStyle.length && !imageSource.length
     && !videoFrames.length && !claimChecks.length
   ) return null;
@@ -1456,6 +1583,7 @@ export function EvidencePanels({
       {episodeRadar.map((data, i) => <EpisodeRadarPanel data={data} key={`ep-radar-${i}`} />)}
       {watchCopilot.map((data, i) => <WatchCopilotPanel data={data} key={`watch-copilot-${i}`} />)}
       {weeklyDigest.map((data, i) => <WeeklyDigestPanel data={data} key={`weekly-${i}`} />)}
+      {dashboard.map((data, i) => <CollectionDashboardPanel data={data} key={`dashboard-${i}`} />)}
       {tasteReport.map((data, i) => <TasteReportPanel data={data} key={`taste-report-${i}`} />)}
       {aspect.map((data, i) => <AspectProfilePanel data={data} key={`aspect-${i}`} />)}
       {claimChecks.map((data, i) => <ClaimCheckPanel data={data} key={`claim-${i}`} />)}
