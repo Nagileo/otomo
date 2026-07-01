@@ -49,7 +49,7 @@ class FeedbackItem(BaseModel):
 class VisualFeedbackItem(BaseModel):
     id: str
     image_uri: str = ""
-    tool_name: str = "identify_acgn_screenshot"
+    tool_name: str = "route_image_source"
     predicted_subject_id: int | None = None
     predicted_subject_name: str = ""
     predicted_title: str = ""

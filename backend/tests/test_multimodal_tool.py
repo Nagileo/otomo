@@ -12,8 +12,7 @@ from otomo.tools.multimodal.tool import (
     ExtractVisualTextTool,
     ImageSourceSearchArgs,
     ImageSourceSearchTool,
-    IdentifyScreenshotArgs,
-    IdentifyScreenshotTool,
+    ImageInputArgs,
     RouteImageSourceArgs,
     RouteImageSourceTool,
     VisualStyleRecommendArgs,
@@ -73,28 +72,32 @@ def test_extract_titles_from_vlm_text():
     assert "向山进发" in titles
 
 
-def test_identify_screenshot_requires_vlm_config(monkeypatch):
+def test_route_image_source_reports_missing_vlm_without_failing(monkeypatch):
     from otomo import config
 
     monkeypatch.setattr(config.settings, "vlm_model", "")
-    tool = IdentifyScreenshotTool(FakeBangumiClient())
-    res = asyncio.run(tool.run(IdentifyScreenshotArgs(image_url="https://example.com/a.png", use_trace_moe=False)))
-    assert not res.ok
-    assert "视觉候选" in (res.error or "")
+    monkeypatch.setattr(config.settings, "saucenao_api_key", "")
+    tool = RouteImageSourceTool(FakeBangumiClient())
+    res = asyncio.run(tool.run(RouteImageSourceArgs(image_url="data:image/png;base64,iVBORw0KGgo=", routes=["unknown"])))
+    assert res.ok
+    assert res.data
+    assert res.data.candidates == []
+    assert any("VLM_MODEL" in x for x in res.data.caveats)
 
 
 def test_image_inputs_support_multiple_and_dedupe():
-    args = IdentifyScreenshotArgs(
+    args = ImageInputArgs(
         image_url="upload://a",
         image_urls=["upload://b", "upload://a", "upload://c", "upload://d", "upload://e"],
     )
     assert _image_inputs(args) == ["upload://a", "upload://b", "upload://c", "upload://d"]
 
 
-def test_trace_moe_candidate_anchors_to_bangumi(monkeypatch):
+def test_route_trace_moe_candidate_anchors_to_bangumi(monkeypatch):
     from otomo import config
 
     monkeypatch.setattr(config.settings, "vlm_model", "")
+    monkeypatch.setattr(config.settings, "saucenao_api_key", "")
 
     async def fake_trace(_image_url: str):
         return [
@@ -109,8 +112,8 @@ def test_trace_moe_candidate_anchors_to_bangumi(monkeypatch):
         ]
 
     monkeypatch.setattr(multimodal_tool, "_trace_moe_search", fake_trace)
-    tool = IdentifyScreenshotTool(FakeBangumiClient())
-    res = asyncio.run(tool.run(IdentifyScreenshotArgs(image_url="https://example.com/shot.jpg")))
+    tool = RouteImageSourceTool(FakeBangumiClient())
+    res = asyncio.run(tool.run(RouteImageSourceArgs(image_url="https://example.com/shot.jpg", routes=["anime"])))
     assert res.ok
     assert res.data
     assert res.data.candidates[0].bangumi_id == 207195
@@ -118,17 +121,22 @@ def test_trace_moe_candidate_anchors_to_bangumi(monkeypatch):
     assert res.data.candidates[0].timestamp == "01:23"
 
 
-def test_vlm_character_candidate_anchors_to_bangumi(monkeypatch):
+def test_route_vlm_character_candidate_anchors_to_bangumi(monkeypatch):
     from otomo import config
 
     monkeypatch.setattr(config.settings, "vlm_model", "fake-vlm")
+    monkeypatch.setattr(config.settings, "saucenao_api_key", "")
 
     async def fake_vlm(_image_url: str, _question: str):
         return '{"candidates":[{"title":"摇曳露营△","reason":"露营画面","confidence":0.6}],"characters":[{"name":"各务原抚子","reason":"粉发角色","confidence":0.55}],"visual_tags":["日常","户外"],"ocr_text":"欢迎来到露营地"}'
 
+    async def fake_ocr(_image_url: str, _system_prompt: str, _question: str):
+        return '{"markdown_text":"","structured_items":[],"entities":[],"visual_tags":[],"confidence":0.0}'
+
     monkeypatch.setattr(multimodal_tool, "_call_vlm", fake_vlm)
-    tool = IdentifyScreenshotTool(FakeBangumiClient())
-    res = asyncio.run(tool.run(IdentifyScreenshotArgs(image_url="data:image/png;base64,iVBORw0KGgo=", use_trace_moe=False)))
+    monkeypatch.setattr(multimodal_tool, "_call_vlm_with_prompt", fake_ocr)
+    tool = RouteImageSourceTool(FakeBangumiClient())
+    res = asyncio.run(tool.run(RouteImageSourceArgs(image_url="data:image/png;base64,iVBORw0KGgo=", routes=["anime"])))
     assert res.ok
     assert res.data
     assert res.data.candidates[0].bangumi_id == 207195
@@ -267,6 +275,9 @@ def test_route_image_source_aggregates_trace_saucenao_ocr_and_book_sources(monke
     async def fake_vlm(_image_url: str, _system_prompt: str, _question: str):
         return '{"markdown_text":"封面标题：《摇曳露营△》","structured_items":[],"entities":["摇曳露营△"],"visual_tags":["封面","漫画"],"confidence":0.8}'
 
+    async def fake_semantic_vlm(_image_url: str, _question: str):
+        return '{"candidates":[{"title":"摇曳露营△","reason":"露营封面","confidence":0.55}],"characters":[{"name":"各务原抚子","reason":"粉发角色","confidence":0.5}],"visual_tags":["日常"],"ocr_text":"摇曳露营△"}'
+
     async def fake_google_books(_query: str, _limit: int):
         return [{"source": "google_books", "title": "摇曳露营△", "url": "https://books.example/yuru", "external_id": "gb1"}]
 
@@ -278,6 +289,7 @@ def test_route_image_source_aggregates_trace_saucenao_ocr_and_book_sources(monke
 
     monkeypatch.setattr(multimodal_tool, "_trace_moe_search", fake_trace)
     monkeypatch.setattr(multimodal_tool, "_saucenao_search", fake_saucenao)
+    monkeypatch.setattr(multimodal_tool, "_call_vlm", fake_semantic_vlm)
     monkeypatch.setattr(multimodal_tool, "_call_vlm_with_prompt", fake_vlm)
     monkeypatch.setattr(multimodal_tool, "_google_books_search", fake_google_books)
     monkeypatch.setattr(multimodal_tool, "_open_library_search", fake_open_library)
@@ -300,6 +312,7 @@ def test_route_image_source_aggregates_trace_saucenao_ocr_and_book_sources(monke
     assert {"anime", "galgame", "comic"}.issubset(routes)
     assert any(c.bangumi_id == 207195 for c in res.data.candidates)
     assert any(c.bangumi_id == 500001 for c in res.data.candidates)
+    assert res.data.character_candidates[0].bangumi_id == 123
     assert "get_subject" in res.data.next_tools
     assert res.data.navigation_links
 
@@ -357,4 +370,4 @@ def test_runtime_state_mentions_uploaded_images():
     state = AgentState(short_term={"attachments": [{"uri": "upload://abc", "filename": "shot.png", "mime_type": "image/png"}]})
     prompt = runtime_state_prompt(state)
     assert "upload://abc" in prompt
-    assert "identify_acgn_screenshot" in prompt
+    assert "route_image_source" in prompt

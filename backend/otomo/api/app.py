@@ -117,7 +117,7 @@ class UndoActionRequest(BaseModel):
 
 class VisualFeedbackRequest(BaseModel):
     image_uri: str = ""
-    tool_name: str = "identify_acgn_screenshot"
+    tool_name: str = "route_image_source"
     predicted_subject_id: int | None = None
     predicted_subject_name: str = ""
     predicted_title: str = ""
@@ -419,7 +419,7 @@ async def visual_feedback(req: VisualFeedbackRequest, request: Request, response
         item = VisualFeedbackItem(
             id=uuid.uuid4().hex,
             image_uri=req.image_uri[:500],
-            tool_name=req.tool_name[:80] or "identify_acgn_screenshot",
+            tool_name=req.tool_name[:80] or "route_image_source",
             predicted_subject_id=req.predicted_subject_id,
             predicted_subject_name=req.predicted_subject_name[:160],
             predicted_title=req.predicted_title[:160],

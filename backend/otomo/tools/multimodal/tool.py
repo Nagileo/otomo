@@ -1,4 +1,4 @@
-"""Multimodal ACGN screenshot entrypoint.
+"""Multimodal ACGN image source routing.
 
 The tool uses an external VLM API only when configured, then anchors candidates
 back to Bangumi subjects. Identification is treated as a weak entry signal;
@@ -40,10 +40,10 @@ _saucenao_cache = TTLCache(settings.cache_ttl * 6)
 _external_image_cache = TTLCache(settings.cache_ttl * 6)
 
 
-class IdentifyScreenshotArgs(BaseModel):
-    image_url: str = Field("", description="单张截图 URL / data URL / upload://...；兼容旧调用")
-    image_urls: list[str] = Field(default_factory=list, description="多张截图 URL / data URL / upload://...；最多处理 4 张")
-    question: str = Field("识别这张 ACGN 截图可能来自哪部作品/哪个角色/哪一集。", description="可选关注点")
+class ImageInputArgs(BaseModel):
+    image_url: str = Field("", description="单张图片 URL / data URL / upload://...")
+    image_urls: list[str] = Field(default_factory=list, description="多张图片 URL / data URL / upload://...；最多处理 4 张")
+    question: str = Field("识别这张 ACGN 图片可能来自哪部作品/哪个角色/哪一集。", description="可选关注点")
     subject_type: Literal["anime", "book", "music", "game", "real"] = "anime"
     limit: int = Field(5, ge=1, le=10)
     use_trace_moe: bool = Field(True, description="动画截图优先调用 trace.moe 反查集数/时间戳；非动画图会自动低置信降级")
@@ -75,18 +75,6 @@ class CharacterCandidate(BaseModel):
     bangumi_id: int | None = None
     bangumi_name: str = ""
     match_note: str = ""
-
-
-class IdentifyScreenshotResult(BaseModel):
-    question: str
-    subject_type: Literal["anime", "book", "music", "game", "real"] = "anime"
-    image_refs: list[str] = Field(default_factory=list)
-    raw_vlm_answer: str = ""
-    candidates: list[VisualCandidate] = Field(default_factory=list)
-    character_candidates: list[CharacterCandidate] = Field(default_factory=list)
-    visual_tags: list[str] = Field(default_factory=list)
-    ocr_text: str = ""
-    caveats: list[str] = Field(default_factory=list)
 
 
 _PROMPT = """你是 ACGN 截图识别助手。请根据图片识别可能的作品、角色或集数线索。
@@ -140,7 +128,7 @@ def _format_seconds(value: float | None) -> str:
     return f"{total // 60:02d}:{total % 60:02d}"
 
 
-def _image_inputs(args: IdentifyScreenshotArgs) -> list[str]:
+def _image_inputs(args: ImageInputArgs) -> list[str]:
     items = [x.strip() for x in args.image_urls if str(x).strip()]
     if args.image_url.strip():
         items.insert(0, args.image_url.strip())
@@ -252,251 +240,6 @@ async def _safe_call_vlm(image_url: str, question: str) -> str:
         return json.dumps({"candidates": [], "characters": [], "notes": [f"VLM unavailable: {type(e).__name__}: {e}"]}, ensure_ascii=False)
 
 
-class IdentifyScreenshotTool(Tool):
-    name = "identify_acgn_screenshot"
-    description = (
-        "旧版兼容/开发调试入口：识别 ACGN 动画截图可能来自哪部作品/角色/集数线索，并回锚 Bangumi 候选。"
-        "普通用户问图片来源时优先用 route_image_source；本工具结果只是弱入口，不是 canonical 事实。"
-    )
-    args_model = IdentifyScreenshotArgs
-    result_model = IdentifyScreenshotResult
-
-    def __init__(self, client: BangumiClient) -> None:
-        self.client = client
-
-    async def _anchor_subject(self, cand: VisualCandidate, subject_type: str) -> None:
-        stype = SUBJECT_TYPE.get(subject_type, 2)
-        titles = [cand.title]
-        for title in titles:
-            try:
-                res = await self.client.search_subjects(title, stype, limit=3)
-            except Exception:  # noqa: BLE001
-                continue
-            rows = res.get("data") or []
-            if not rows:
-                continue
-            row = rows[0]
-            cand.bangumi_id = row.get("id")
-            cand.bangumi_name = row.get("name_cn") or row.get("name") or ""
-            cand.bangumi_score = row.get("score") or ((row.get("rating") or {}).get("score"))
-            img = row.get("images") or {}
-            cand.image = img.get("common") or img.get("medium") or img.get("grid") or cand.image
-            if cand.source == "trace.moe":
-                cand.confidence = max(cand.confidence, min(0.98, cand.confidence + 0.06))
-                cand.match_note = "trace.moe 命中后已回锚 Bangumi；集数/时间戳仍以 trace.moe 相似度为准。"
-            else:
-                cand.confidence = max(cand.confidence, min(0.82, cand.confidence + 0.12))
-                cand.match_note = "VLM 候选已用 Bangumi search 回锚，仍需用户确认截图是否匹配。"
-            return
-        cand.match_note = "Bangumi 未对齐"
-
-    async def _anchor_character(self, cand: CharacterCandidate) -> None:
-        try:
-            res = await self.client.search_characters(cand.name, limit=3)
-        except Exception:  # noqa: BLE001
-            return
-        rows = res.get("data") or []
-        if not rows:
-            cand.match_note = "Bangumi 角色未对齐"
-            return
-        row = rows[0]
-        cand.bangumi_id = row.get("id")
-        cand.bangumi_name = row.get("name") or cand.name
-        cand.confidence = max(cand.confidence, min(0.8, cand.confidence + 0.1))
-        cand.match_note = "已用 Bangumi character search 回锚，可继续接 explore_voice_network。"
-
-    async def _trace_candidates(self, image_url: str, image_index: int, limit: int) -> list[VisualCandidate]:
-        try:
-            rows = await _trace_moe_search(image_url)
-        except Exception:  # noqa: BLE001
-            return []
-        out: list[VisualCandidate] = []
-        for row in rows[:limit]:
-            similarity = float(row.get("similarity") or 0.0)
-            if similarity < 0.72:
-                continue
-            anilist = row.get("anilist")
-            anilist_id = anilist.get("id") if isinstance(anilist, dict) else anilist
-            titles = _anilist_titles(row)
-            if not titles:
-                continue
-            start = row.get("from")
-            end = row.get("to")
-            timestamp = _format_seconds(float(start)) if isinstance(start, (int, float)) else ""
-            episode = row.get("episode")
-            out.append(
-                VisualCandidate(
-                    title=titles[0],
-                    reason=(
-                        "trace.moe 动画截图反查"
-                        + (f" · 第 {episode} 集" if episode is not None else "")
-                        + (f" · {timestamp}" if timestamp else "")
-                    ),
-                    confidence=min(max(similarity, 0.0), 0.99),
-                    source="trace.moe",
-                    image_index=image_index,
-                    image=row.get("image"),
-                    anilist_id=int(anilist_id) if isinstance(anilist_id, int) else None,
-                    episode=episode,
-                    from_seconds=float(start) if isinstance(start, (int, float)) else None,
-                    to_seconds=float(end) if isinstance(end, (int, float)) else None,
-                    timestamp=timestamp,
-                )
-            )
-        return out
-
-    def _vlm_parse(self, raw: str, image_index: int, limit: int) -> tuple[list[VisualCandidate], list[CharacterCandidate], list[str], str]:
-        payload = _extract_json(raw)
-        candidates: list[VisualCandidate] = []
-        characters: list[CharacterCandidate] = []
-        tags: list[str] = []
-        ocr_text = ""
-        raw_candidates = payload.get("candidates") if isinstance(payload, dict) else None
-        if isinstance(raw_candidates, list):
-            for item in raw_candidates[:limit]:
-                if not isinstance(item, dict):
-                    continue
-                title = str(item.get("title") or "").strip()
-                if title:
-                    candidates.append(
-                        VisualCandidate(
-                            title=title,
-                            reason=str(item.get("reason") or "")[:180],
-                            confidence=max(0.0, min(float(item.get("confidence") or 0.0), 1.0)),
-                            source="image",
-                            image_index=image_index,
-                        )
-                    )
-        if not candidates:
-            candidates = [
-                VisualCandidate(title=t, confidence=0.35, reason="从 VLM 自然语言回答中抽取", image_index=image_index)
-                for t in _extract_titles(raw)
-            ]
-        raw_characters = payload.get("characters") if isinstance(payload, dict) else None
-        if isinstance(raw_characters, list):
-            for item in raw_characters[:limit]:
-                if not isinstance(item, dict):
-                    continue
-                name = str(item.get("name") or "").strip()
-                if name:
-                    characters.append(
-                        CharacterCandidate(
-                            name=name,
-                            reason=str(item.get("reason") or "")[:180],
-                            confidence=max(0.0, min(float(item.get("confidence") or 0.0), 1.0)),
-                            image_index=image_index,
-                        )
-                    )
-        if isinstance(payload, dict):
-            tags = [str(x).strip() for x in (payload.get("visual_tags") or []) if str(x).strip()][:10]
-            ocr_text = str(payload.get("ocr_text") or "").strip()[:2000]
-        return candidates, characters, tags, ocr_text
-
-    async def run(self, args: IdentifyScreenshotArgs) -> ToolResult[IdentifyScreenshotResult]:
-        images = _image_inputs(args)
-        if not images:
-            return ToolResult(ok=False, error="需要 image_url 或 image_urls")
-
-        candidates: list[VisualCandidate] = []
-        character_candidates: list[CharacterCandidate] = []
-        visual_tags: list[str] = []
-        ocr_chunks: list[str] = []
-        raw_parts: list[str] = []
-        caveats: list[str] = [
-            "视觉识别是弱入口；作品事实、staff、评分仍必须回到 Bangumi canonical 工具。",
-            "trace.moe 仅适合动画截图；galgame CG、漫画页、同人图会自动依赖 VLM/其它溯源工具。",
-        ]
-
-        if args.use_trace_moe and args.subject_type == "anime":
-            trace_batches = await asyncio.gather(
-                *[self._trace_candidates(url, idx, args.limit) for idx, url in enumerate(images)],
-                return_exceptions=True,
-            )
-            for batch in trace_batches:
-                if isinstance(batch, list):
-                    candidates.extend(batch)
-
-        if settings.vlm_model:
-            vlm_raws = await asyncio.gather(
-                *[_safe_call_vlm(url, args.question) for url in images],
-                return_exceptions=True,
-            )
-            for idx, raw_item in enumerate(vlm_raws):
-                raw = "" if isinstance(raw_item, Exception) else str(raw_item)
-                raw_parts.append(f"[image {idx + 1}]\n{raw}")
-                vlm_candidates, chars, tags, ocr_text = self._vlm_parse(raw, idx, args.limit)
-                candidates.extend(vlm_candidates)
-                character_candidates.extend(chars)
-                visual_tags.extend([x for x in tags if x not in visual_tags])
-                if ocr_text:
-                    ocr_chunks.append(ocr_text)
-        else:
-            caveats.append("未配置 VLM_MODEL，本轮只使用 trace.moe / Bangumi 可用链路；无法读取角色、OCR 或画风语义。")
-
-        if not candidates and not character_candidates:
-            return ToolResult(ok=False, error="没有得到可回锚的视觉候选；可配置 VLM_MODEL 或换更清晰截图重试。")
-
-        # 先锚定高置信 trace，再锚定 VLM 候选；重复 Bangumi 条目合并到高置信来源。
-        await asyncio.gather(*[self._anchor_subject(c, args.subject_type) for c in candidates])
-        merged: dict[str, VisualCandidate] = {}
-        for cand in sorted(candidates, key=lambda x: x.confidence, reverse=True):
-            key = str(cand.bangumi_id or "").strip() or cand.title.lower()
-            if key in merged:
-                old = merged[key]
-                old.confidence = max(old.confidence, cand.confidence)
-                if cand.reason and cand.reason not in old.reason:
-                    old.reason = (old.reason + "；" + cand.reason).strip("；")
-                if old.source != "trace.moe" and cand.source == "trace.moe":
-                    merged[key] = cand
-                continue
-            merged[key] = cand
-        candidates = list(merged.values())[: args.limit]
-        await asyncio.gather(*[self._anchor_character(c) for c in character_candidates])
-        dedup_chars: dict[str, CharacterCandidate] = {}
-        for cand in sorted(character_candidates, key=lambda x: x.confidence, reverse=True):
-            key = str(cand.bangumi_id or "").strip() or cand.name.lower()
-            dedup_chars.setdefault(key, cand)
-        character_candidates = list(dedup_chars.values())[: args.limit]
-
-        if not any(c.source == "trace.moe" for c in candidates) and args.subject_type == "anime":
-            caveats.append("trace.moe 未返回高相似结果；这可能是非动画图、裁切过重、字幕遮挡或库内未覆盖。")
-
-        return ToolResult(
-            ok=True,
-            data=IdentifyScreenshotResult(
-                question=args.question,
-                subject_type=args.subject_type,
-                image_refs=[
-                    url if (url.startswith("upload://") or url.startswith("http://") or url.startswith("https://")) else ""
-                    for url in images
-                ],
-                raw_vlm_answer="\n\n".join(raw_parts)[:1600],
-                candidates=candidates[: args.limit],
-                character_candidates=character_candidates,
-                visual_tags=visual_tags[:12],
-                ocr_text="\n".join(ocr_chunks)[:2000],
-                caveats=caveats,
-            ),
-            sources=[
-                Citation(
-                    title=c.bangumi_name or c.title,
-                    url=f"https://bgm.tv/subject/{c.bangumi_id}" if c.bangumi_id else images[min(c.image_index, len(images) - 1)],
-                    source="bangumi" if c.bangumi_id else c.source,
-                    image=c.image,
-                )
-                for c in candidates[:5]
-            ]
-            + [
-                Citation(
-                    title=c.bangumi_name or c.name,
-                    url=f"https://bgm.tv/character/{c.bangumi_id}" if c.bangumi_id else images[min(c.image_index, len(images) - 1)],
-                    source="bangumi" if c.bangumi_id else "image",
-                )
-                for c in character_candidates[:3]
-            ],
-        )
-
-
 class VisualTextItem(BaseModel):
     type: str = "other"
     name: str = ""
@@ -594,7 +337,7 @@ class ExtractVisualTextTool(Tool):
         return markdown, items, entities, tags, confidence, notes
 
     async def run(self, args: ExtractVisualTextArgs) -> ToolResult[ExtractVisualTextResult]:
-        images = _image_inputs(IdentifyScreenshotArgs(image_url=args.image_url, image_urls=args.image_urls))
+        images = _image_inputs(ImageInputArgs(image_url=args.image_url, image_urls=args.image_urls))
         if not images:
             return ToolResult(ok=False, error="需要 image_url 或 image_urls")
         if not settings.vlm_model:
@@ -749,7 +492,7 @@ class VisualStyleRecommendTool(Tool):
         return desc[:800], tags[:16], confidence
 
     async def run(self, args: VisualStyleRecommendArgs) -> ToolResult[VisualStyleRecommendResult]:
-        images = _image_inputs(IdentifyScreenshotArgs(image_url=args.image_url, image_urls=args.image_urls))
+        images = _image_inputs(ImageInputArgs(image_url=args.image_url, image_urls=args.image_urls))
         if not images:
             return ToolResult(ok=False, error="需要 image_url 或 image_urls")
         if not settings.vlm_model:
@@ -993,7 +736,7 @@ class ImageSourceSearchTool(Tool):
     result_model = ImageSourceSearchResult
 
     async def run(self, args: ImageSourceSearchArgs) -> ToolResult[ImageSourceSearchResult]:
-        images = _image_inputs(IdentifyScreenshotArgs(image_url=args.image_url, image_urls=args.image_urls))
+        images = _image_inputs(ImageInputArgs(image_url=args.image_url, image_urls=args.image_urls))
         if not images:
             return ToolResult(ok=False, error="需要 image_url 或 image_urls")
         matches: list[ImageSourceMatch] = []
@@ -1085,6 +828,7 @@ ImageRoute = Literal["auto", "anime", "galgame", "comic", "novel", "fanart", "un
 class RoutedImageCandidate(BaseModel):
     route: str = "unknown"
     title: str = ""
+    reason: str = ""
     confidence: float = Field(0.0, ge=0.0, le=1.0)
     source: str = ""
     source_site: str = ""
@@ -1097,8 +841,12 @@ class RoutedImageCandidate(BaseModel):
     bangumi_score: float | None = None
     external_id: str = ""
     author: str = ""
+    anilist_id: int | None = None
     episode: str | int | None = None
+    from_seconds: float | None = None
+    to_seconds: float | None = None
     timestamp: str = ""
+    match_note: str = ""
     evidence: list[str] = Field(default_factory=list)
     note: str = ""
 
@@ -1124,8 +872,10 @@ class RouteImageSourceResult(BaseModel):
     needs_user_confirmation: bool = True
     confidence: float = Field(0.0, ge=0.0, le=1.0)
     candidates: list[RoutedImageCandidate] = Field(default_factory=list)
+    character_candidates: list[CharacterCandidate] = Field(default_factory=list)
     ocr_text: str = ""
     visual_tags: list[str] = Field(default_factory=list)
+    raw_vlm_answer: str = ""
     navigation_links: list[dict[str, str]] = Field(default_factory=list)
     next_tools: list[str] = Field(default_factory=list)
     caveats: list[str] = Field(default_factory=list)
@@ -1176,6 +926,18 @@ def _merge_route_candidates(items: list[RoutedImageCandidate], limit: int) -> li
             old.bangumi_type = cand.bangumi_type
             old.bangumi_name = cand.bangumi_name
             old.bangumi_score = cand.bangumi_score
+        if cand.reason and cand.reason not in old.reason:
+            old.reason = (old.reason + "；" + cand.reason).strip("；")
+        if cand.match_note and cand.match_note not in old.match_note:
+            old.match_note = (old.match_note + "；" + cand.match_note).strip("；")
+        if cand.episode is not None and old.episode is None:
+            old.episode = cand.episode
+        if cand.timestamp and not old.timestamp:
+            old.timestamp = cand.timestamp
+        if cand.from_seconds is not None and old.from_seconds is None:
+            old.from_seconds = cand.from_seconds
+        if cand.to_seconds is not None and old.to_seconds is None:
+            old.to_seconds = cand.to_seconds
         for ev in cand.evidence:
             if ev and ev not in old.evidence:
                 old.evidence.append(ev)
@@ -1198,7 +960,11 @@ async def _anchor_route_candidate(
     author: str = "",
     evidence: list[str] | None = None,
     note: str = "",
+    reason: str = "",
     episode: str | int | None = None,
+    anilist_id: int | None = None,
+    from_seconds: float | None = None,
+    to_seconds: float | None = None,
     timestamp: str = "",
 ) -> RoutedImageCandidate:
     bangumi_type = _bangumi_type_for_route(route)
@@ -1213,9 +979,13 @@ async def _anchor_route_candidate(
         image_index=image_index,
         bangumi_type=bangumi_type,
         author=author,
+        anilist_id=anilist_id,
         evidence=evidence or [],
         note=note,
+        reason=reason,
         episode=episode,
+        from_seconds=from_seconds,
+        to_seconds=to_seconds,
         timestamp=timestamp,
     )
     if not title or not bangumi_type:
@@ -1228,6 +998,7 @@ async def _anchor_route_candidate(
     rows = res.get("data") or []
     if not rows:
         cand.evidence.append(f"Bangumi {bangumi_type} 未命中")
+        cand.match_note = f"Bangumi {bangumi_type} 未对齐"
         return cand
     row = rows[0]
     cand.bangumi_id = row.get("id")
@@ -1238,7 +1009,28 @@ async def _anchor_route_candidate(
     cand.url = cand.url or (f"https://bgm.tv/subject/{cand.bangumi_id}" if cand.bangumi_id else "")
     cand.confidence = min(0.98, max(cand.confidence, cand.confidence + 0.08))
     cand.evidence.append(f"已回锚 Bangumi {bangumi_type}")
+    cand.match_note = f"已回锚 Bangumi {bangumi_type}"
     return cand
+
+
+async def _anchor_visual_candidate(client: BangumiClient, cand: VisualCandidate, subject_type: str) -> None:
+    stype = SUBJECT_TYPE.get(subject_type, 2)
+    try:
+        res = await client.search_subjects(cand.title, stype, limit=3)
+    except Exception:  # noqa: BLE001
+        return
+    rows = res.get("data") or []
+    if not rows:
+        cand.match_note = "Bangumi 未对齐"
+        return
+    row = rows[0]
+    cand.bangumi_id = row.get("id")
+    cand.bangumi_name = row.get("name_cn") or row.get("name") or ""
+    cand.bangumi_score = row.get("score") or ((row.get("rating") or {}).get("score"))
+    img = row.get("images") or {}
+    cand.image = img.get("common") or img.get("medium") or img.get("grid") or cand.image
+    cand.confidence = min(0.98, max(cand.confidence, cand.confidence + (0.06 if cand.source == "trace.moe" else 0.12)))
+    cand.match_note = "已回锚 Bangumi；截图/画面来源仍需结合候选置信度确认。"
 
 
 async def _google_books_search(query: str, limit: int) -> list[dict[str, Any]]:
@@ -1388,6 +1180,21 @@ class RouteImageSourceTool(Tool):
     def __init__(self, client: BangumiClient) -> None:
         self.client = client
 
+    async def _anchor_character(self, cand: CharacterCandidate) -> None:
+        try:
+            res = await self.client.search_characters(cand.name, limit=3)
+        except Exception:  # noqa: BLE001
+            return
+        rows = res.get("data") or []
+        if not rows:
+            cand.match_note = "Bangumi 角色未对齐"
+            return
+        row = rows[0]
+        cand.bangumi_id = row.get("id")
+        cand.bangumi_name = row.get("name") or cand.name
+        cand.confidence = max(cand.confidence, min(0.8, cand.confidence + 0.1))
+        cand.match_note = "已用 Bangumi character search 回锚。"
+
     async def _trace_candidates(self, image: str, idx: int, limit: int) -> list[RoutedImageCandidate]:
         out: list[RoutedImageCandidate] = []
         try:
@@ -1411,7 +1218,10 @@ class RouteImageSourceTool(Tool):
             if not titles:
                 continue
             start = row.get("from")
+            end = row.get("to")
             timestamp = _format_seconds(float(start)) if isinstance(start, (int, float)) else ""
+            anilist = row.get("anilist")
+            anilist_id = anilist.get("id") if isinstance(anilist, dict) else anilist
             cand = await _anchor_route_candidate(
                 self.client,
                 title=titles[0],
@@ -1424,11 +1234,137 @@ class RouteImageSourceTool(Tool):
                 thumbnail=row.get("image"),
                 evidence=[f"trace.moe similarity={sim:.2f}"],
                 note="动画截图反查；相似度不是 canonical 事实",
+                reason=(
+                    "trace.moe 动画截图反查"
+                    + (f" · 第 {row.get('episode')} 集" if row.get("episode") is not None else "")
+                    + (f" · {timestamp}" if timestamp else "")
+                ),
                 episode=row.get("episode"),
+                anilist_id=int(anilist_id) if isinstance(anilist_id, int) else None,
+                from_seconds=float(start) if isinstance(start, (int, float)) else None,
+                to_seconds=float(end) if isinstance(end, (int, float)) else None,
                 timestamp=timestamp,
             )
             out.append(cand)
         return out
+
+    def _parse_semantic_payload(
+        self,
+        raw: str,
+        image_index: int,
+        limit: int,
+    ) -> tuple[list[tuple[str, str, float]], list[CharacterCandidate], list[str], str]:
+        payload = _extract_json(raw)
+        titles: list[tuple[str, str, float]] = []
+        characters: list[CharacterCandidate] = []
+        tags: list[str] = []
+        ocr_text = ""
+        raw_candidates = payload.get("candidates") if isinstance(payload, dict) else None
+        if isinstance(raw_candidates, list):
+            for item in raw_candidates[:limit]:
+                if not isinstance(item, dict):
+                    continue
+                title = str(item.get("title") or "").strip()
+                if title:
+                    titles.append(
+                        (
+                            title,
+                            str(item.get("reason") or "")[:180],
+                            max(0.0, min(float(item.get("confidence") or 0.0), 1.0)),
+                        )
+                    )
+        if not titles:
+            titles = [(title, "从 VLM 自然语言回答中抽取", 0.35) for title in _extract_titles(raw)]
+        raw_characters = payload.get("characters") if isinstance(payload, dict) else None
+        if isinstance(raw_characters, list):
+            for item in raw_characters[:limit]:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or "").strip()
+                if name:
+                    characters.append(
+                        CharacterCandidate(
+                            name=name,
+                            reason=str(item.get("reason") or "")[:180],
+                            confidence=max(0.0, min(float(item.get("confidence") or 0.0), 1.0)),
+                            image_index=image_index,
+                        )
+                    )
+        if isinstance(payload, dict):
+            tags = [str(x).strip() for x in (payload.get("visual_tags") or []) if str(x).strip()][:10]
+            ocr_text = str(payload.get("ocr_text") or "").strip()[:2000]
+        return titles, characters, tags, ocr_text
+
+    async def _vlm_semantic_candidates(
+        self,
+        images: list[str],
+        routes: set[str],
+        limit: int,
+        question_hint: str,
+    ) -> tuple[list[RoutedImageCandidate], list[CharacterCandidate], list[str], str, str, list[str]]:
+        if not settings.vlm_model:
+            return [], [], [], "", "", ["未配置 VLM_MODEL，无法读取角色、画面语义或 VLM 作品候选。"]
+        raws = await asyncio.gather(
+            *[_safe_call_vlm(url, question_hint) for url in images],
+            return_exceptions=True,
+        )
+        subject_routes: list[str] = []
+        if _route_wants(routes, "anime"):
+            subject_routes.append("anime")
+        if _route_wants(routes, "galgame"):
+            subject_routes.append("galgame")
+        if _route_wants(routes, "comic"):
+            subject_routes.append("comic")
+        if _route_wants(routes, "novel"):
+            subject_routes.append("novel")
+        if "auto" in routes and not subject_routes:
+            subject_routes = ["anime", "galgame", "comic", "novel"]
+        candidates: list[RoutedImageCandidate] = []
+        characters: list[CharacterCandidate] = []
+        tags: list[str] = []
+        ocr_parts: list[str] = []
+        raw_parts: list[str] = []
+        caveats: list[str] = []
+        tasks: list[Any] = []
+        for idx, raw_item in enumerate(raws):
+            if isinstance(raw_item, Exception):
+                caveats.append(f"image {idx + 1} VLM 识别失败：{type(raw_item).__name__}")
+                continue
+            raw = str(raw_item)
+            raw_parts.append(f"[semantic image {idx + 1}]\n{raw}")
+            titles, chars, parsed_tags, ocr_text = self._parse_semantic_payload(raw, idx, limit)
+            characters.extend(chars)
+            for tag in parsed_tags:
+                if tag not in tags:
+                    tags.append(tag)
+            if ocr_text:
+                ocr_parts.append(f"[image {idx + 1}] {ocr_text}")
+            for title, reason, confidence in titles[:limit]:
+                for route in subject_routes:
+                    tasks.append(
+                        _anchor_route_candidate(
+                            self.client,
+                            title=title,
+                            route=route,
+                            image_index=idx,
+                            source="vlm",
+                            source_site="VLM",
+                            confidence=confidence or 0.35,
+                            reason=reason,
+                            evidence=["VLM 视觉语义候选"],
+                            note="VLM 候选已尝试回锚；仍需用户确认截图是否匹配。",
+                        )
+                    )
+        if tasks:
+            candidates = await asyncio.gather(*tasks)
+        if characters:
+            await asyncio.gather(*[self._anchor_character(c) for c in characters])
+            dedup: dict[str, CharacterCandidate] = {}
+            for cand in sorted(characters, key=lambda x: x.confidence, reverse=True):
+                key = str(cand.bangumi_id or "").strip() or cand.name.lower()
+                dedup.setdefault(key, cand)
+            characters = list(dedup.values())[:limit]
+        return candidates, characters, tags[:16], "\n".join(ocr_parts)[:2000], "\n\n".join(raw_parts)[:1600], caveats
 
     async def _saucenao_candidates(self, image: str, idx: int, routes: set[str], limit: int) -> list[RoutedImageCandidate]:
         if not settings.saucenao_api_key:
@@ -1581,7 +1517,7 @@ class RouteImageSourceTool(Tool):
         return out, caveats
 
     async def run(self, args: RouteImageSourceArgs) -> ToolResult[RouteImageSourceResult]:
-        images = _image_inputs(IdentifyScreenshotArgs(image_url=args.image_url, image_urls=args.image_urls))
+        images = _image_inputs(ImageInputArgs(image_url=args.image_url, image_urls=args.image_urls))
         if not images:
             return ToolResult(ok=False, error="需要 image_url 或 image_urls")
         routes = _route_set(args.routes)
@@ -1608,10 +1544,32 @@ class RouteImageSourceTool(Tool):
                     candidates.extend(batch)
 
         ocr_text = ""
+        raw_vlm_answer = ""
+        character_candidates: list[CharacterCandidate] = []
         tags: list[str] = []
+        semantic_ocr_text = ""
+        semantic_tags: list[str] = []
+        if args.use_ocr and _route_wants(routes, "anime", "galgame", "comic", "novel", "unknown", "fanart"):
+            semantic_candidates, characters, semantic_tags, semantic_ocr_text, semantic_raw, semantic_caveats = await self._vlm_semantic_candidates(
+                images, routes, args.limit, args.question
+            )
+            candidates.extend(semantic_candidates)
+            character_candidates.extend(characters)
+            raw_vlm_answer = semantic_raw
+            if semantic_ocr_text:
+                ocr_text = semantic_ocr_text
+            for tag in semantic_tags:
+                if tag not in tags:
+                    tags.append(tag)
+            caveats.extend(semantic_caveats)
         if args.use_ocr and _route_wants(routes, "anime", "galgame", "comic", "novel", "unknown"):
-            ocr_candidates, ocr_text, tags, ocr_caveats = await self._ocr_candidates(images, routes, args.limit, args.question)
+            ocr_candidates, ocr_text_result, ocr_tags, ocr_caveats = await self._ocr_candidates(images, routes, args.limit, args.question)
             candidates.extend(ocr_candidates)
+            if ocr_text_result:
+                ocr_text = f"{semantic_ocr_text}\n\n{ocr_text_result}".strip()[:3000] if semantic_ocr_text else ocr_text_result
+            for tag in ocr_tags:
+                if tag not in tags:
+                    tags.append(tag)
             caveats.extend(ocr_caveats)
 
         ocr_names = [c.title for c in candidates if c.source == "vlm_ocr" and c.title]
@@ -1686,8 +1644,10 @@ class RouteImageSourceTool(Tool):
             needs_user_confirmation=needs_confirmation,
             confidence=top,
             candidates=candidates[: args.limit],
+            character_candidates=character_candidates[: args.limit],
             ocr_text=ocr_text,
             visual_tags=tags[:16],
+            raw_vlm_answer=raw_vlm_answer,
             navigation_links=nav[:10],
             next_tools=seen_tools[:8],
             caveats=caveats[:10],
@@ -1802,7 +1762,7 @@ class AnalyzeVideoFramesTool(Tool):
                 episode=row.get("episode"),
                 timestamp=timestamp,
             )
-            await IdentifyScreenshotTool(self.client)._anchor_subject(cand, args.subject_type)
+            await _anchor_visual_candidate(self.client, cand, args.subject_type)
             out.append(cand)
         return out
 
@@ -1879,7 +1839,6 @@ class AnalyzeVideoFramesTool(Tool):
 
 def build_multimodal_tools(client: BangumiClient) -> list[Tool]:
     return [
-        IdentifyScreenshotTool(client),
         ExtractVisualTextTool(client),
         VisualStyleRecommendTool(client),
         ImageSourceSearchTool(),

@@ -256,7 +256,7 @@ def runtime_state_prompt(state: Any | None) -> str:
                 image_bits.append(f"{filename}({mime_type})={uri}")
         if image_bits:
             parts.append("- 本轮用户上传图片：" + "；".join(image_bits) + "。")
-            parts.append("- 若用户问“这是什么图/出处/哪部动画/第几集/galgame CG/漫画页/轻小说封面”，统一优先调用 route_image_source 做多源路由；读图中文字用 extract_visual_text。identify_acgn_screenshot 只作旧版兼容/开发调试入口。单图传 image_url，多图传 image_urls=[upload://...]；不要把 upload:// 当普通网页链接。")
+            parts.append("- 若用户问“这是什么图/出处/哪部动画/第几集/galgame CG/漫画页/轻小说封面”，统一调用 route_image_source 做多源路由；读图中文字用 extract_visual_text。单图传 image_url，多图传 image_urls=[upload://...]；不要把 upload:// 当普通网页链接。")
     return "\n".join(parts)
 
 
@@ -414,7 +414,6 @@ _PANEL_TOOLS = {
     "recommend_subjects",
     "explore_voice_network",
     "episode_buzz_radar",
-    "identify_acgn_screenshot",
     "extract_visual_text",
     "recommend_by_visual_style",
     "search_image_source",
@@ -843,11 +842,21 @@ def _safe_route_image_payload(data: dict[str, Any]) -> dict[str, Any]:
     for item in _trim_dicts(data.get("candidates"), limit=14):
         copied = dict(item)
         copied["title"] = _trim_text(copied.get("title"), 140)
+        copied["reason"] = _trim_text(copied.get("reason"), 180)
         copied["bangumi_name"] = _trim_text(copied.get("bangumi_name"), 120)
         copied["author"] = _trim_text(copied.get("author"), 80)
         copied["note"] = _trim_text(copied.get("note"), 180)
+        copied["match_note"] = _trim_text(copied.get("match_note"), 160)
         copied["evidence"] = _trim_strings(copied.get("evidence"), limit=5, text_limit=120)
         candidates.append(copied)
+    characters = []
+    for item in _trim_dicts(data.get("character_candidates"), limit=10):
+        copied = dict(item)
+        copied["name"] = _trim_text(copied.get("name"), 100)
+        copied["bangumi_name"] = _trim_text(copied.get("bangumi_name"), 100)
+        copied["reason"] = _trim_text(copied.get("reason"), 160)
+        copied["match_note"] = _trim_text(copied.get("match_note"), 140)
+        characters.append(copied)
     return {
         "image_refs": _trim_strings(data.get("image_refs"), limit=4, text_limit=500),
         "routes_considered": _trim_strings(data.get("routes_considered"), limit=8, text_limit=40),
@@ -855,8 +864,10 @@ def _safe_route_image_payload(data: dict[str, Any]) -> dict[str, Any]:
         "needs_user_confirmation": bool(data.get("needs_user_confirmation")),
         "confidence": data.get("confidence"),
         "candidates": candidates,
+        "character_candidates": characters,
         "ocr_text": _trim_text(data.get("ocr_text"), 1600),
         "visual_tags": _trim_strings(data.get("visual_tags"), limit=16, text_limit=40),
+        "raw_vlm_answer": _trim_text(data.get("raw_vlm_answer"), 700),
         "navigation_links": _trim_dicts(data.get("navigation_links"), limit=10),
         "next_tools": _trim_strings(data.get("next_tools"), limit=8, text_limit=60),
         "caveats": _trim_strings(data.get("caveats"), limit=8, text_limit=180),
@@ -936,8 +947,6 @@ def panel_data_from_payload(name: str, payload: dict[str, Any] | None) -> dict[s
         return _safe_explorer_payload(data)
     if name == "episode_buzz_radar":
         return _safe_episode_radar_payload(data)
-    if name == "identify_acgn_screenshot":
-        return _safe_multimodal_payload(data)
     if name == "extract_visual_text":
         return _safe_visual_text_payload(data)
     if name == "recommend_by_visual_style":

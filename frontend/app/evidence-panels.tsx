@@ -593,135 +593,6 @@ function WeeklyDigestPanel({ data }: { data: AnyRecord }) {
   );
 }
 
-function ScreenshotIdentifyPanel({
-  data,
-  onVisualFeedback,
-  onVisualCorrectionSearch,
-}: {
-  data: AnyRecord;
-  onVisualFeedback?: (payload: AnyRecord) => void;
-  onVisualCorrectionSearch?: (query: string, subjectType?: string) => Promise<AnyRecord[]>;
-}) {
-  const candidates = list(data.candidates);
-  const characters = list(data.character_candidates);
-  const tags = list<string>(data.visual_tags);
-  const imageRefs = list<string>(data.image_refs);
-  return (
-    <Panel title="截图识别候选" subtitle={text(data.question, "")}>
-      {tags.length > 0 && (
-        <div className="evidence-row">
-          {tags.map((tag) => <Badge key={tag} tone="dim">{tag}</Badge>)}
-        </div>
-      )}
-      <div className="rec-grid">
-        {candidates.map((item, i) => (
-          <div
-            className="rec-card"
-            key={`${item.title}-${i}`}
-          >
-            {item.image ? <img src={item.image} alt="" /> : <div className="rec-noimg" />}
-            <div className="rec-body">
-              <a
-                className="card-title"
-                href={item.bangumi_id ? `https://bgm.tv/subject/${item.bangumi_id}` : "#"}
-                target="_blank"
-                rel="noreferrer"
-              >
-                {text(item.bangumi_name || item.title)}
-              </a>
-              <div className="card-meta">
-                {text(item.source, "image")} · 置信度 {pct(item.confidence)}
-                {item.bangumi_score ? ` · BGM ${item.bangumi_score}` : ""}
-              </div>
-              {(item.episode != null || item.timestamp) && (
-                <div className="evidence-row tight">
-                  {item.episode != null && <Badge tone="good">第 {text(item.episode)} 集</Badge>}
-                  {item.timestamp && <Badge tone="good">{text(item.timestamp)}</Badge>}
-                </div>
-              )}
-              <p className="card-note">{text(item.reason || item.match_note, "")}</p>
-              {item.match_note && <Badge tone={item.bangumi_id ? "good" : "warn"}>{text(item.match_note)}</Badge>}
-              {onVisualFeedback && (
-                <div className="feedback-actions">
-                  <button
-                    type="button"
-                    className="inline-action"
-                    onClick={() => onVisualFeedback({
-                      image_uri: imageRefs[item.image_index ?? 0] || "",
-                      tool_name: "identify_acgn_screenshot",
-                      predicted_subject_id: item.bangumi_id ?? null,
-                      predicted_subject_name: item.bangumi_name || "",
-                      predicted_title: item.title || item.bangumi_name || "",
-                      source: item.source || "",
-                      confidence: Number(item.confidence || 0),
-                      signal: "correct",
-                    })}
-                  >
-                    正确
-                  </button>
-                  <button
-                    type="button"
-                    className="inline-action"
-                    onClick={() => onVisualFeedback({
-                      image_uri: imageRefs[item.image_index ?? 0] || "",
-                      tool_name: "identify_acgn_screenshot",
-                      predicted_subject_id: item.bangumi_id ?? null,
-                      predicted_subject_name: item.bangumi_name || "",
-                      predicted_title: item.title || item.bangumi_name || "",
-                      source: item.source || "",
-                      confidence: Number(item.confidence || 0),
-                      signal: "wrong",
-                    })}
-                  >
-                    不对
-                  </button>
-                  {onVisualCorrectionSearch && (
-                    <VisualCorrectionButton
-                      item={item}
-                      imageUri={imageRefs[item.image_index ?? 0] || ""}
-                      subjectType={text(data.subject_type, "anime")}
-                      onSearch={onVisualCorrectionSearch}
-                      onSubmit={onVisualFeedback}
-                    />
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
-        ))}
-      </div>
-      {characters.length > 0 && (
-        <>
-          <div className="section-title">角色候选</div>
-          <div className="compact-list inline">
-            {characters.map((item, i) => (
-              <span key={`${item.name}-${i}`}>
-                {text(item.bangumi_name || item.name)} · 置信度 {pct(item.confidence)}
-                {item.match_note ? ` · ${text(item.match_note)}` : ""}
-              </span>
-            ))}
-          </div>
-        </>
-      )}
-      {data.ocr_text && (
-        <>
-          <div className="section-title">OCR / 画面文字</div>
-          <p className="evidence-copy">{text(data.ocr_text)}</p>
-        </>
-      )}
-      {data.raw_vlm_answer && (
-        <details className="quiet-detail">
-          <summary>查看视觉模型摘要</summary>
-          <p className="evidence-copy">{text(data.raw_vlm_answer)}</p>
-        </details>
-      )}
-      {list<string>(data.caveats).length > 0 && (
-        <div className="caveats">{list<string>(data.caveats).map((n, i) => <span key={i}>{n}</span>)}</div>
-      )}
-    </Panel>
-  );
-}
-
 function VisualCorrectionButton({
   item,
   imageUri,
@@ -755,7 +626,7 @@ function VisualCorrectionButton({
   function basePayload(signal: string) {
     return {
       image_uri: imageUri,
-      tool_name: "identify_acgn_screenshot",
+      tool_name: "route_image_source",
       predicted_subject_id: item.bangumi_id ?? null,
       predicted_subject_name: item.bangumi_name || "",
       predicted_title: item.title || item.bangumi_name || "",
@@ -989,11 +860,21 @@ function ImageSourcePanel({ data }: { data: AnyRecord }) {
   );
 }
 
-function RouteImageSourcePanel({ data }: { data: AnyRecord }) {
+function RouteImageSourcePanel({
+  data,
+  onVisualFeedback,
+  onVisualCorrectionSearch,
+}: {
+  data: AnyRecord;
+  onVisualFeedback?: (payload: AnyRecord) => void;
+  onVisualCorrectionSearch?: (query: string, subjectType?: string) => Promise<AnyRecord[]>;
+}) {
   const candidates = list(data.candidates);
+  const characters = list(data.character_candidates);
   const links = list(data.navigation_links);
   const nextTools = list<string>(data.next_tools);
   const tags = list<string>(data.visual_tags);
+  const imageRefs = list<string>(data.image_refs);
   const confirm = Boolean(data.needs_user_confirmation);
   return (
     <Panel
@@ -1015,34 +896,113 @@ function RouteImageSourcePanel({ data }: { data: AnyRecord }) {
           {candidates.map((item, i) => {
             const href = item.bangumi_id ? `https://bgm.tv/subject/${item.bangumi_id}` : item.url || "#";
             return (
-              <a className="rec-card" href={href} target="_blank" rel="noreferrer" key={`${item.route}-${item.source}-${i}`}>
+              <div className="rec-card" key={`${item.route}-${item.source}-${i}`}>
                 {item.thumbnail ? <img src={item.thumbnail} alt="" /> : <div className="rec-noimg" />}
                 <div className="rec-body">
-                  <div className="card-title">{text(item.bangumi_name || item.title || item.source_site || item.source)}</div>
+                  <a className="card-title" href={href} target="_blank" rel="noreferrer">
+                    {text(item.bangumi_name || item.title || item.source_site || item.source)}
+                  </a>
                   <div className="card-meta">
                     {text(item.route, "unknown")} · {text(item.source, "source")} · conf {pct(item.confidence)}
                     {item.timestamp ? ` · ${item.timestamp}` : ""}
+                    {item.bangumi_score ? ` · BGM ${item.bangumi_score}` : ""}
                   </div>
                   {item.author && <div className="card-meta">作者：{text(item.author)}</div>}
-                  {item.episode != null && <Badge tone="good">第 {text(item.episode)} 集</Badge>}
+                  {(item.episode != null || item.timestamp) && (
+                    <div className="evidence-row tight">
+                      {item.episode != null && <Badge tone="good">第 {text(item.episode)} 集</Badge>}
+                      {item.timestamp && <Badge tone="good">{text(item.timestamp)}</Badge>}
+                    </div>
+                  )}
                   {list<string>(item.evidence).length > 0 && (
                     <div className="evidence-row tight">
                       {list<string>(item.evidence).slice(0, 3).map((ev) => <Badge key={ev} tone="dim">{ev}</Badge>)}
                     </div>
                   )}
-                  {item.note && <p className="card-note">{text(item.note)}</p>}
+                  {(item.reason || item.note || item.match_note) && (
+                    <p className="card-note">{text(item.reason || item.note || item.match_note)}</p>
+                  )}
+                  {item.match_note && <Badge tone={item.bangumi_id ? "good" : "warn"}>{text(item.match_note)}</Badge>}
+                  {onVisualFeedback && (
+                    <div className="feedback-actions">
+                      <button
+                        type="button"
+                        className="inline-action"
+                        onClick={(e) => {
+                          onVisualFeedback({
+                            image_uri: imageRefs[item.image_index ?? 0] || "",
+                            tool_name: "route_image_source",
+                            predicted_subject_id: item.bangumi_id ?? null,
+                            predicted_subject_name: item.bangumi_name || "",
+                            predicted_title: item.title || item.bangumi_name || "",
+                            source: item.source || "",
+                            confidence: Number(item.confidence || 0),
+                            signal: "correct",
+                          });
+                        }}
+                      >
+                        正确
+                      </button>
+                      <button
+                        type="button"
+                        className="inline-action"
+                        onClick={(e) => {
+                          onVisualFeedback({
+                            image_uri: imageRefs[item.image_index ?? 0] || "",
+                            tool_name: "route_image_source",
+                            predicted_subject_id: item.bangumi_id ?? null,
+                            predicted_subject_name: item.bangumi_name || "",
+                            predicted_title: item.title || item.bangumi_name || "",
+                            source: item.source || "",
+                            confidence: Number(item.confidence || 0),
+                            signal: "wrong",
+                          });
+                        }}
+                      >
+                        不对
+                      </button>
+                      {onVisualCorrectionSearch && (
+                        <VisualCorrectionButton
+                          item={item}
+                          imageUri={imageRefs[item.image_index ?? 0] || ""}
+                          subjectType={text(item.bangumi_type, "anime")}
+                          onSearch={onVisualCorrectionSearch}
+                          onSubmit={onVisualFeedback}
+                        />
+                      )}
+                    </div>
+                  )}
                 </div>
-              </a>
+              </div>
             );
           })}
         </div>
       ) : (
         <EmptyHint text="没有足够候选；可以换更清晰原图，或补充作品/角色/来源类型线索" />
       )}
+      {characters.length > 0 && (
+        <>
+          <div className="section-title">角色候选</div>
+          <div className="compact-list inline">
+            {characters.map((item, i) => (
+              <span key={`${item.name}-${i}`}>
+                {text(item.bangumi_name || item.name)} · 置信度 {pct(item.confidence)}
+                {item.match_note ? ` · ${text(item.match_note)}` : ""}
+              </span>
+            ))}
+          </div>
+        </>
+      )}
       {data.ocr_text && (
         <details className="quiet-detail">
           <summary>查看 OCR / 图片文字</summary>
           <pre className="ocr-block">{text(data.ocr_text)}</pre>
+        </details>
+      )}
+      {data.raw_vlm_answer && (
+        <details className="quiet-detail">
+          <summary>查看视觉模型摘要</summary>
+          <p className="evidence-copy">{text(data.raw_vlm_answer)}</p>
         </details>
       )}
       {nextTools.length > 0 && (
@@ -2085,7 +2045,6 @@ export function EvidencePanels({
   const explorer = list(evidence.explore_voice_network);
   const episodeRadar = list(evidence.episode_buzz_radar);
   const routeImage = list(evidence.route_image_source);
-  const screenshot = devMode || !routeImage.length ? list(evidence.identify_acgn_screenshot) : [];
   const visualText = list(evidence.extract_visual_text);
   const visualStyle = list(evidence.recommend_by_visual_style);
   const imageSource = list(evidence.search_image_source);
@@ -2108,18 +2067,17 @@ export function EvidencePanels({
   if (
     !review.length && !taste.length && !season.length && !recommend.length && !memory.length
     && !aspect.length && !watchCopilot.length && !weeklyDigest.length && !tasteReport.length && !dashboard.length && !explorer.length
-    && !episodeRadar.length && !screenshot.length && !visualText.length && !visualStyle.length && !imageSource.length
-    && !routeImage.length && !biliVideo.length && !videoFrames.length && !claimChecks.length
+    && !episodeRadar.length && !routeImage.length && !visualText.length && !visualStyle.length && !imageSource.length
+    && !biliVideo.length && !videoFrames.length && !claimChecks.length
   ) return null;
   return (
     <div className={`evidence-stack ${devMode ? "dev-mode" : "user-mode"}`}>
-      {routeImage.map((data, i) => <RouteImageSourcePanel data={data} key={`route-image-${i}`} />)}
-      {screenshot.map((data, i) => (
-        <ScreenshotIdentifyPanel
+      {routeImage.map((data, i) => (
+        <RouteImageSourcePanel
           data={data}
           onVisualFeedback={onVisualFeedback}
           onVisualCorrectionSearch={onVisualCorrectionSearch}
-          key={`screenshot-${i}`}
+          key={`route-image-${i}`}
         />
       ))}
       {visualText.map((data, i) => <VisualTextPanel data={data} key={`visual-text-${i}`} />)}

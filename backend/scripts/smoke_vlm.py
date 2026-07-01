@@ -28,8 +28,8 @@ from otomo.tools.bangumi.client import BangumiClient  # noqa: E402
 from otomo.tools.multimodal.tool import (  # noqa: E402
     ExtractVisualTextArgs,
     ExtractVisualTextTool,
-    IdentifyScreenshotArgs,
-    IdentifyScreenshotTool,
+    RouteImageSourceArgs,
+    RouteImageSourceTool,
     VisualStyleRecommendArgs,
     VisualStyleRecommendTool,
 )
@@ -99,14 +99,14 @@ async def _run(args: argparse.Namespace) -> int:
                 )
             )
         else:
-            tool = IdentifyScreenshotTool(client)
+            tool = RouteImageSourceTool(client)
             result = await tool.run(
-                IdentifyScreenshotArgs(
+                RouteImageSourceArgs(
                     image_url=image,
                     question=args.question,
-                    subject_type=args.subject_type,
+                    routes=[args.route],
                     limit=args.limit,
-                    use_trace_moe=not args.no_trace_moe,
+                    use_ocr=True,
                 )
             )
     payload = _compact_payload(result)
@@ -118,11 +118,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Smoke-test configured VLM tools with a real image.")
     parser.add_argument("image", help="local image path, http(s) URL, data URL, or upload:// id")
     parser.add_argument("--mode", choices=["screenshot", "ocr", "style"], default="screenshot")
+    parser.add_argument("--route", choices=["auto", "anime", "galgame", "comic", "novel", "fanart", "unknown"], default="auto")
     parser.add_argument("--ocr-mode", choices=["auto", "subtitle", "ranking", "magazine", "ppt", "table"], default="auto")
     parser.add_argument("--subject-type", choices=["anime", "book", "music", "game", "real"], default="anime")
     parser.add_argument("--question", default="请识别图片中的 ACGN 信息，并给出可回锚的候选。")
     parser.add_argument("--limit", type=int, default=5)
-    parser.add_argument("--no-trace-moe", action="store_true", help="screenshot mode: skip trace.moe and use VLM only")
     raise SystemExit(asyncio.run(_run(parser.parse_args())))
 
 
