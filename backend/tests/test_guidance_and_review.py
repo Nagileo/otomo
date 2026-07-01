@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
 from otomo.agent._common import summarize
 from otomo.agent.contracts import AgentState, ToolResult
+from otomo.memory.models import UserMemory
 from otomo.tools.comments.tool import EpisodeCommentsArgs, GetEpisodeCommentsTool
 from otomo.tools.recommend.tool import RecEvidence, _egs_mapping_confidence, _quality_badges, _review_bonus
 from otomo.tools.review.tool import (
@@ -70,6 +72,24 @@ def test_runtime_state_is_updated_from_natural_language():
     assert state.short_term["spoiler"]["mode"] == "none"
     assert state.short_term["spoiler"]["progress_episode"] == 5
     assert "progress_episode=5" in messages[0]["content"]
+
+
+def test_memory_spoiler_default_does_not_auto_escalate_turn():
+    from otomo.api.app import _attach_memory_state
+
+    class FakeClient:
+        async def get_me(self):
+            return {"username": "spoiler-user"}
+
+    class FakeLtm:
+        def load_user(self, username: str):
+            return UserMemory(username=username, spoiler_default="full")
+
+    state = AgentState()
+    app = SimpleNamespace(state=SimpleNamespace(ltm=FakeLtm()))
+    asyncio.run(_attach_memory_state(app, state, FakeClient()))
+    assert state.short_term["spoiler"]["mode"] == "none"
+    assert state.short_term["spoiler"]["memory_default"] == "full"
 
 
 def test_review_rating_signals_and_consensus():

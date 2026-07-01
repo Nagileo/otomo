@@ -16,6 +16,7 @@ import tempfile
 from typing import Any
 from typing import Literal
 from pathlib import Path
+from urllib.parse import quote_plus
 
 import httpx
 from openai import AsyncOpenAI
@@ -30,8 +31,13 @@ from ..bangumi.client import SUBJECT_TYPE, BangumiClient
 
 _TRACE_MOE_API = "https://api.trace.moe/search"
 _SAUCENAO_API = "https://saucenao.com/search.php"
+_GOOGLE_BOOKS_API = "https://www.googleapis.com/books/v1/volumes"
+_OPEN_LIBRARY_SEARCH_API = "https://openlibrary.org/search.json"
+_MANGADEX_MANGA_API = "https://api.mangadex.org/manga"
+_SERPAPI_SEARCH_API = "https://serpapi.com/search.json"
 _trace_cache = TTLCache(settings.cache_ttl * 6)
 _saucenao_cache = TTLCache(settings.cache_ttl * 6)
+_external_image_cache = TTLCache(settings.cache_ttl * 6)
 
 
 class IdentifyScreenshotArgs(BaseModel):
@@ -842,6 +848,7 @@ class ImageSourceMatch(BaseModel):
     title: str = ""
     url: str = ""
     source_site: str = ""
+    source_type: str = "unknown"
     author: str = ""
     similarity: float = 0.0
     confidence: float = Field(0.0, ge=0.0, le=1.0)
@@ -850,6 +857,38 @@ class ImageSourceMatch(BaseModel):
     episode: str | int | None = None
     timestamp: str = ""
     note: str = ""
+
+
+def _saucenao_source_type(header: dict[str, Any], data: dict[str, Any]) -> str:
+    hay = " ".join(
+        str(x or "")
+        for x in (
+            header.get("index_name"),
+            data.get("source"),
+            data.get("material"),
+            data.get("title"),
+            data.get("jp_name"),
+            data.get("eng_name"),
+            *(data.get("ext_urls") or [])[:3],
+        )
+    ).lower()
+    if any(k in hay for k in ("h-game", "h game", "visual novel", "vndb", "erogame", "dlsite", "getchu")):
+        return "galgame"
+    if any(k in hay for k in ("manga", "comic", "mangadex", "bookwalker")):
+        return "comic"
+    if any(k in hay for k in ("anime", "anidb", "anilist", "nyaa")):
+        return "anime"
+    if any(k in hay for k in ("pixiv", "danbooru", "gelbooru", "yande.re", "konachan", "twitter", "x.com", "deviantart")):
+        return "fanart"
+    return "unknown"
+
+
+def _best_saucenao_title(data: dict[str, Any]) -> str:
+    for key in ("title", "jp_name", "eng_name", "material", "source"):
+        value = str(data.get(key) or "").strip()
+        if value:
+            return value
+    return ""
 
 
 class ImageSourceSearchArgs(BaseModel):
@@ -1002,17 +1041,19 @@ class ImageSourceSearchTool(Tool):
                             data = row.get("data") or {}
                             ext_urls = data.get("ext_urls") or []
                             sim = float(header.get("similarity") or 0.0)
+                            source_type = _saucenao_source_type(header, data)
                             matches.append(
                                 ImageSourceMatch(
                                     engine="saucenao",
-                                    title=str(data.get("title") or data.get("eng_name") or data.get("jp_name") or ""),
+                                    title=_best_saucenao_title(data),
                                     url=str(ext_urls[0] if ext_urls else ""),
                                     source_site=str(header.get("index_name") or "SauceNAO"),
+                                    source_type=source_type,
                                     author=str(data.get("member_name") or data.get("author_name") or data.get("creator") or ""),
                                     similarity=sim,
                                     confidence=min(max(sim / 100.0, 0.0), 0.99),
                                     thumbnail=header.get("thumbnail"),
-                                    note=f"image {idx + 1} SauceNAO 候选",
+                                    note=f"image {idx + 1} SauceNAO 候选 · {source_type}",
                                 )
                             )
                     except Exception as e:  # noqa: BLE001
@@ -1034,6 +1075,635 @@ class ImageSourceSearchTool(Tool):
                 Citation(title=m.title or m.engine, url=m.url or images[0], source=m.engine, image=m.thumbnail)
                 for m in data.matches[:5]
                 if m.url or m.thumbnail
+            ],
+        )
+
+
+ImageRoute = Literal["auto", "anime", "galgame", "comic", "novel", "fanart", "unknown"]
+
+
+class RoutedImageCandidate(BaseModel):
+    route: str = "unknown"
+    title: str = ""
+    confidence: float = Field(0.0, ge=0.0, le=1.0)
+    source: str = ""
+    source_site: str = ""
+    url: str = ""
+    thumbnail: str | None = None
+    image_index: int = 0
+    bangumi_type: Literal["anime", "book", "music", "game", "real"] | None = None
+    bangumi_id: int | None = None
+    bangumi_name: str = ""
+    bangumi_score: float | None = None
+    external_id: str = ""
+    author: str = ""
+    episode: str | int | None = None
+    timestamp: str = ""
+    evidence: list[str] = Field(default_factory=list)
+    note: str = ""
+
+
+class RouteImageSourceArgs(BaseModel):
+    image_url: str = Field("", description="单张图片 URL / data URL / upload://...")
+    image_urls: list[str] = Field(default_factory=list, description="多张图片 URL / data URL / upload://...；最多处理 4 张")
+    routes: list[ImageRoute] = Field(
+        default_factory=lambda: ["auto"],
+        description="期望路由：auto/anime/galgame/comic/novel/fanart/unknown；auto 会多源并行。",
+    )
+    question: str = Field("判断这张 ACGN 图片可能是什么来源，并给出候选。")
+    use_ocr: bool = Field(True, description="配置 VLM 后，用 OCR/视觉模型抽文字与作品名。")
+    include_book_sources: bool = Field(True, description="对漫画/小说/书封候选补 Google Books/Open Library/MangaDex。")
+    include_paid_reverse: bool = Field(False, description="配置 SERPAPI_API_KEY 且图片是公网 URL 时，才调用 SerpApi 付费反搜。")
+    limit: int = Field(10, ge=1, le=20)
+
+
+class RouteImageSourceResult(BaseModel):
+    image_refs: list[str] = Field(default_factory=list)
+    routes_considered: list[str] = Field(default_factory=list)
+    decision: str = "low_confidence"
+    needs_user_confirmation: bool = True
+    confidence: float = Field(0.0, ge=0.0, le=1.0)
+    candidates: list[RoutedImageCandidate] = Field(default_factory=list)
+    ocr_text: str = ""
+    visual_tags: list[str] = Field(default_factory=list)
+    navigation_links: list[dict[str, str]] = Field(default_factory=list)
+    next_tools: list[str] = Field(default_factory=list)
+    caveats: list[str] = Field(default_factory=list)
+
+
+def _route_set(routes: list[ImageRoute]) -> set[str]:
+    values = {str(r) for r in routes if str(r).strip()}
+    return values or {"auto"}
+
+
+def _route_wants(routes: set[str], *names: str) -> bool:
+    return "auto" in routes or any(name in routes for name in names)
+
+
+def _bangumi_type_for_route(route: str) -> Literal["anime", "book", "music", "game", "real"] | None:
+    if route == "anime":
+        return "anime"
+    if route == "galgame":
+        return "game"
+    if route in {"comic", "novel"}:
+        return "book"
+    return None
+
+
+def _candidate_key(c: RoutedImageCandidate) -> str:
+    if c.bangumi_id and c.bangumi_type:
+        return f"bangumi:{c.bangumi_type}:{c.bangumi_id}"
+    if c.url:
+        return f"url:{c.url.lower()}"
+    return f"{c.route}:{c.source}:{c.title.lower()}"
+
+
+def _merge_route_candidates(items: list[RoutedImageCandidate], limit: int) -> list[RoutedImageCandidate]:
+    merged: dict[str, RoutedImageCandidate] = {}
+    for cand in sorted(items, key=lambda x: x.confidence, reverse=True):
+        key = _candidate_key(cand)
+        if key not in merged:
+            merged[key] = cand
+            continue
+        old = merged[key]
+        old.confidence = max(old.confidence, cand.confidence)
+        if cand.thumbnail and not old.thumbnail:
+            old.thumbnail = cand.thumbnail
+        if cand.url and not old.url:
+            old.url = cand.url
+        if cand.bangumi_id and not old.bangumi_id:
+            old.bangumi_id = cand.bangumi_id
+            old.bangumi_type = cand.bangumi_type
+            old.bangumi_name = cand.bangumi_name
+            old.bangumi_score = cand.bangumi_score
+        for ev in cand.evidence:
+            if ev and ev not in old.evidence:
+                old.evidence.append(ev)
+        if cand.note and cand.note not in old.note:
+            old.note = (old.note + "；" + cand.note).strip("；")
+    return list(merged.values())[:limit]
+
+
+async def _anchor_route_candidate(
+    client: BangumiClient,
+    *,
+    title: str,
+    route: str,
+    image_index: int,
+    source: str,
+    confidence: float,
+    url: str = "",
+    source_site: str = "",
+    thumbnail: str | None = None,
+    author: str = "",
+    evidence: list[str] | None = None,
+    note: str = "",
+    episode: str | int | None = None,
+    timestamp: str = "",
+) -> RoutedImageCandidate:
+    bangumi_type = _bangumi_type_for_route(route)
+    cand = RoutedImageCandidate(
+        route=route,
+        title=title,
+        confidence=max(0.0, min(confidence, 0.99)),
+        source=source,
+        source_site=source_site,
+        url=url,
+        thumbnail=thumbnail,
+        image_index=image_index,
+        bangumi_type=bangumi_type,
+        author=author,
+        evidence=evidence or [],
+        note=note,
+        episode=episode,
+        timestamp=timestamp,
+    )
+    if not title or not bangumi_type:
+        return cand
+    try:
+        res = await client.search_subjects(title, SUBJECT_TYPE.get(bangumi_type), limit=3)
+    except Exception:  # noqa: BLE001
+        cand.evidence.append("Bangumi 回锚失败")
+        return cand
+    rows = res.get("data") or []
+    if not rows:
+        cand.evidence.append(f"Bangumi {bangumi_type} 未命中")
+        return cand
+    row = rows[0]
+    cand.bangumi_id = row.get("id")
+    cand.bangumi_name = row.get("name_cn") or row.get("name") or ""
+    cand.bangumi_score = row.get("score") or ((row.get("rating") or {}).get("score"))
+    images = row.get("images") or {}
+    cand.thumbnail = cand.thumbnail or images.get("common") or images.get("medium") or images.get("grid")
+    cand.url = cand.url or (f"https://bgm.tv/subject/{cand.bangumi_id}" if cand.bangumi_id else "")
+    cand.confidence = min(0.98, max(cand.confidence, cand.confidence + 0.08))
+    cand.evidence.append(f"已回锚 Bangumi {bangumi_type}")
+    return cand
+
+
+async def _google_books_search(query: str, limit: int) -> list[dict[str, Any]]:
+    key = _cache_key("google_books", query)
+    if (hit := _external_image_cache.get(key)) is not None:
+        return hit
+    params = {"q": query, "maxResults": min(limit, 10), "printType": "books"}
+    async with httpx.AsyncClient(timeout=settings.http_timeout) as client:
+        resp = await client.get(_GOOGLE_BOOKS_API, params=params)
+        resp.raise_for_status()
+        payload = resp.json() or {}
+    items: list[dict[str, Any]] = []
+    for row in payload.get("items") or []:
+        info = row.get("volumeInfo") or {}
+        ids = info.get("industryIdentifiers") or []
+        isbn = next((str(x.get("identifier") or "") for x in ids if x.get("identifier")), "")
+        images = info.get("imageLinks") or {}
+        items.append(
+            {
+                "source": "google_books",
+                "title": info.get("title") or "",
+                "author": " / ".join(info.get("authors") or []),
+                "published": info.get("publishedDate") or "",
+                "url": info.get("infoLink") or info.get("canonicalVolumeLink") or "",
+                "thumbnail": images.get("thumbnail") or images.get("smallThumbnail"),
+                "external_id": row.get("id") or isbn,
+                "note": f"Google Books {info.get('publishedDate') or ''}".strip(),
+            }
+        )
+    _external_image_cache.set(key, items)
+    return items
+
+
+async def _open_library_search(query: str, limit: int) -> list[dict[str, Any]]:
+    key = _cache_key("open_library", query)
+    if (hit := _external_image_cache.get(key)) is not None:
+        return hit
+    params = {"q": query, "limit": min(limit, 10)}
+    async with httpx.AsyncClient(timeout=settings.http_timeout) as client:
+        resp = await client.get(_OPEN_LIBRARY_SEARCH_API, params=params)
+        resp.raise_for_status()
+        payload = resp.json() or {}
+    items: list[dict[str, Any]] = []
+    for row in payload.get("docs") or []:
+        cover_i = row.get("cover_i")
+        key_path = row.get("key") or ""
+        items.append(
+            {
+                "source": "open_library",
+                "title": row.get("title") or "",
+                "author": " / ".join(row.get("author_name") or []),
+                "published": str(row.get("first_publish_year") or ""),
+                "url": f"https://openlibrary.org{key_path}" if key_path else "",
+                "thumbnail": f"https://covers.openlibrary.org/b/id/{cover_i}-M.jpg" if cover_i else None,
+                "external_id": key_path,
+                "note": f"Open Library {row.get('first_publish_year') or ''}".strip(),
+            }
+        )
+    _external_image_cache.set(key, items)
+    return items
+
+
+async def _mangadex_search(query: str, limit: int) -> list[dict[str, Any]]:
+    key = _cache_key("mangadex", query)
+    if (hit := _external_image_cache.get(key)) is not None:
+        return hit
+    params = {"title": query, "limit": min(limit, 10), "order[relevance]": "desc"}
+    async with httpx.AsyncClient(timeout=settings.http_timeout) as client:
+        resp = await client.get(_MANGADEX_MANGA_API, params=params)
+        resp.raise_for_status()
+        payload = resp.json() or {}
+    items: list[dict[str, Any]] = []
+    for row in payload.get("data") or []:
+        attrs = row.get("attributes") or {}
+        titles = attrs.get("title") or {}
+        alt_titles = attrs.get("altTitles") or []
+        title = titles.get("zh") or titles.get("ja-ro") or titles.get("ja") or titles.get("en") or next(iter(titles.values()), "")
+        if not title:
+            for item in alt_titles:
+                if isinstance(item, dict) and item:
+                    title = next(iter(item.values()))
+                    break
+        tags = []
+        for tag in attrs.get("tags") or []:
+            name = ((tag.get("attributes") or {}).get("name") or {}).get("en")
+            if name:
+                tags.append(name)
+        mid = row.get("id") or ""
+        items.append(
+            {
+                "source": "mangadex",
+                "title": title,
+                "author": "",
+                "published": str(attrs.get("year") or ""),
+                "url": f"https://mangadex.org/title/{mid}" if mid else "",
+                "thumbnail": None,
+                "external_id": mid,
+                "note": " / ".join([attrs.get("status") or "", *tags[:3]]).strip(" /"),
+            }
+        )
+    _external_image_cache.set(key, items)
+    return items
+
+
+async def _serpapi_reverse_image(image_url: str, limit: int) -> list[dict[str, Any]]:
+    if not settings.serpapi_api_key or not image_url.startswith(("http://", "https://")):
+        return []
+    key = _cache_key("serpapi_reverse", image_url)
+    if (hit := _external_image_cache.get(key)) is not None:
+        return hit
+    params = {
+        "engine": "google_reverse_image",
+        "image_url": image_url,
+        "api_key": settings.serpapi_api_key,
+    }
+    async with httpx.AsyncClient(timeout=settings.http_timeout) as client:
+        resp = await client.get(_SERPAPI_SEARCH_API, params=params)
+        resp.raise_for_status()
+        payload = resp.json() or {}
+    rows = payload.get("image_results") or payload.get("inline_images") or payload.get("visual_matches") or []
+    items: list[dict[str, Any]] = []
+    for row in rows[:limit]:
+        items.append(
+            {
+                "source": "serpapi_google_reverse",
+                "title": row.get("title") or row.get("snippet") or "",
+                "url": row.get("link") or row.get("source") or row.get("original") or "",
+                "thumbnail": row.get("thumbnail") or row.get("image") or row.get("original"),
+                "source_site": row.get("source") or "Google Reverse Image",
+                "note": "SerpApi Google Reverse Image 付费兜底",
+            }
+        )
+    _external_image_cache.set(key, items)
+    return items
+
+
+class RouteImageSourceTool(Tool):
+    name = "route_image_source"
+    description = (
+        "多源图片来源路由：动画截图用 trace.moe+Bangumi，galgame CG/同人图用 SauceNAO，"
+        "漫画/小说/书封走 OCR+Bangumi book+Google Books/Open Library/MangaDex，"
+        "fanart/未知图给 Pixiv/ascii2d/IQDB 等外链候选；低置信时要求用户确认。"
+    )
+    args_model = RouteImageSourceArgs
+    result_model = RouteImageSourceResult
+
+    def __init__(self, client: BangumiClient) -> None:
+        self.client = client
+
+    async def _trace_candidates(self, image: str, idx: int, limit: int) -> list[RoutedImageCandidate]:
+        out: list[RoutedImageCandidate] = []
+        try:
+            rows = await _trace_moe_search(image)
+        except Exception as e:  # noqa: BLE001
+            return [
+                RoutedImageCandidate(
+                    route="anime",
+                    source="trace.moe",
+                    title="",
+                    confidence=0.0,
+                    image_index=idx,
+                    note=f"trace.moe 查询失败：{type(e).__name__}",
+                )
+            ]
+        for row in rows[:limit]:
+            sim = float(row.get("similarity") or 0.0)
+            if sim < 0.5:
+                continue
+            titles = _anilist_titles(row)
+            if not titles:
+                continue
+            start = row.get("from")
+            timestamp = _format_seconds(float(start)) if isinstance(start, (int, float)) else ""
+            cand = await _anchor_route_candidate(
+                self.client,
+                title=titles[0],
+                route="anime",
+                image_index=idx,
+                source="trace.moe",
+                confidence=min(sim, 0.99),
+                url=row.get("video") or row.get("image") or "",
+                source_site="trace.moe",
+                thumbnail=row.get("image"),
+                evidence=[f"trace.moe similarity={sim:.2f}"],
+                note="动画截图反查；相似度不是 canonical 事实",
+                episode=row.get("episode"),
+                timestamp=timestamp,
+            )
+            out.append(cand)
+        return out
+
+    async def _saucenao_candidates(self, image: str, idx: int, routes: set[str], limit: int) -> list[RoutedImageCandidate]:
+        if not settings.saucenao_api_key:
+            return []
+        out: list[RoutedImageCandidate] = []
+        rows = await _saucenao_search(image, limit)
+        for row in rows[:limit]:
+            header = row.get("header") or {}
+            data = row.get("data") or {}
+            sim = float(header.get("similarity") or 0.0)
+            source_type = _saucenao_source_type(header, data)
+            if source_type == "unknown":
+                source_type = "fanart" if _route_wants(routes, "fanart") else "unknown"
+            if not _route_wants(routes, source_type, "unknown", "fanart"):
+                continue
+            title = _best_saucenao_title(data)
+            ext_urls = [str(x) for x in (data.get("ext_urls") or []) if str(x).strip()]
+            cand = await _anchor_route_candidate(
+                self.client,
+                title=title,
+                route=source_type,
+                image_index=idx,
+                source="saucenao",
+                confidence=min(max(sim / 100.0, 0.0), 0.99),
+                url=ext_urls[0] if ext_urls else "",
+                source_site=str(header.get("index_name") or "SauceNAO"),
+                thumbnail=header.get("thumbnail"),
+                author=str(data.get("member_name") or data.get("author_name") or data.get("creator") or ""),
+                evidence=[f"SauceNAO {header.get('index_name') or ''} similarity={sim:.1f}".strip()],
+                note=f"SauceNAO 分类为 {source_type}；同人/CG 来源不等于作品事实",
+            )
+            out.append(cand)
+        return out
+
+    async def _ocr_candidates(
+        self,
+        images: list[str],
+        routes: set[str],
+        limit: int,
+        question_hint: str,
+    ) -> tuple[list[RoutedImageCandidate], str, list[str], list[str]]:
+        if not settings.vlm_model:
+            return [], "", [], ["未配置 VLM_MODEL，无法做 OCR-first 漫画/小说/书封识别。"]
+        question = (
+            "识别图片中的标题、作品名、角色名、ISBN、出版社、卷数、榜单文字或台词。"
+            "如果像漫画页/轻小说封面/游戏CG，请优先抽取可检索的日文/中文/英文标题。"
+        )
+        raws = await asyncio.gather(
+            *[_call_vlm_with_prompt(url, _OCR_PROMPT, f"{question}\n用户问题：{question_hint}") for url in images],
+            return_exceptions=True,
+        )
+        ocr_parts: list[str] = []
+        tags: list[str] = []
+        entity_names: list[tuple[str, int]] = []
+        caveats: list[str] = []
+        for idx, raw_item in enumerate(raws):
+            if isinstance(raw_item, Exception):
+                caveats.append(f"image {idx + 1} OCR 失败：{type(raw_item).__name__}")
+                continue
+            raw = str(raw_item)
+            payload = _extract_json(raw)
+            markdown = str(payload.get("markdown_text") or payload.get("text") or "").strip() if payload else raw[:1200]
+            if markdown:
+                ocr_parts.append(f"[image {idx + 1}] {markdown}")
+            for tag in (payload.get("visual_tags") or []) if isinstance(payload, dict) else []:
+                value = str(tag).strip()
+                if value and value not in tags:
+                    tags.append(value)
+            names = [str(x).strip() for x in (payload.get("entities") or []) if str(x).strip()] if isinstance(payload, dict) else []
+            if not names:
+                names = _extract_titles(markdown or raw)
+            for name in names[:limit]:
+                entity_names.append((name, idx))
+        subject_routes: list[str] = []
+        if _route_wants(routes, "anime"):
+            subject_routes.append("anime")
+        if _route_wants(routes, "galgame"):
+            subject_routes.append("galgame")
+        if _route_wants(routes, "comic"):
+            subject_routes.append("comic")
+        if _route_wants(routes, "novel"):
+            subject_routes.append("novel")
+        if "auto" in routes and not subject_routes:
+            subject_routes = ["anime", "comic", "novel", "galgame"]
+        out: list[RoutedImageCandidate] = []
+        tasks = []
+        for name, idx in entity_names[:limit]:
+            for route in subject_routes:
+                tasks.append(
+                    _anchor_route_candidate(
+                        self.client,
+                        title=name,
+                        route=route,
+                        image_index=idx,
+                        source="vlm_ocr",
+                        confidence=0.5,
+                        source_site="VLM OCR",
+                        evidence=["OCR/VLM 抽取实体"],
+                        note="OCR-first 候选，需要结合封面/标题确认",
+                    )
+                )
+        if tasks:
+            out = await asyncio.gather(*tasks)
+        return out, "\n\n".join(ocr_parts)[:3000], tags[:16], caveats
+
+    async def _book_source_candidates(self, names: list[str], routes: set[str], limit: int) -> tuple[list[RoutedImageCandidate], list[str]]:
+        if not names or not _route_wants(routes, "comic", "novel"):
+            return [], []
+        out: list[RoutedImageCandidate] = []
+        caveats: list[str] = []
+        queries = []
+        for name in names:
+            clean = name.strip()
+            if clean and clean not in queries:
+                queries.append(clean)
+        for query in queries[:4]:
+            sources: list[dict[str, Any]] = []
+            jobs = [_google_books_search(query, 4), _open_library_search(query, 4)]
+            if _route_wants(routes, "comic"):
+                jobs.append(_mangadex_search(query, 4))
+            results = await asyncio.gather(*jobs, return_exceptions=True)
+            for result in results:
+                if isinstance(result, Exception):
+                    caveats.append(f"{query} 外部书籍源查询失败：{type(result).__name__}")
+                else:
+                    sources.extend(result)
+            for item in sources[:limit]:
+                source = str(item.get("source") or "book_source")
+                if source == "mangadex":
+                    route = "comic"
+                elif "novel" in routes or "auto" in routes:
+                    route = "novel"
+                else:
+                    route = "comic"
+                out.append(
+                    RoutedImageCandidate(
+                        route=route,
+                        title=str(item.get("title") or query),
+                        confidence=0.58 if source != "mangadex" else 0.62,
+                        source=source,
+                        source_site=source,
+                        url=str(item.get("url") or ""),
+                        thumbnail=item.get("thumbnail"),
+                        external_id=str(item.get("external_id") or ""),
+                        author=str(item.get("author") or ""),
+                        evidence=[f"{source} metadata"],
+                        note=str(item.get("note") or "外部书籍/漫画元数据源"),
+                    )
+                )
+        return out, caveats
+
+    async def run(self, args: RouteImageSourceArgs) -> ToolResult[RouteImageSourceResult]:
+        images = _image_inputs(IdentifyScreenshotArgs(image_url=args.image_url, image_urls=args.image_urls))
+        if not images:
+            return ToolResult(ok=False, error="需要 image_url 或 image_urls")
+        routes = _route_set(args.routes)
+        candidates: list[RoutedImageCandidate] = []
+        caveats = [
+            "图片来源识别是多源弱证据聚合；低置信或多候选接近时必须让用户确认。",
+            "trace.moe/SauceNAO/OCR 结果都不是 canonical 事实，最终作品事实仍需回 Bangumi/VNDB/EGS 等工具核验。",
+        ]
+        nav: list[dict[str, str]] = []
+
+        jobs: list[Any] = []
+        if _route_wants(routes, "anime"):
+            jobs.extend(self._trace_candidates(image, idx, args.limit) for idx, image in enumerate(images))
+        if _route_wants(routes, "galgame", "fanart", "comic", "unknown", "anime"):
+            if settings.saucenao_api_key:
+                jobs.extend(self._saucenao_candidates(image, idx, routes, args.limit) for idx, image in enumerate(images))
+            else:
+                caveats.append("未配置 SAUCENAO_API_KEY，galgame CG / fanart / booru / Pixiv 溯源会明显变弱。")
+        if jobs:
+            for batch in await asyncio.gather(*jobs, return_exceptions=True):
+                if isinstance(batch, Exception):
+                    caveats.append(f"图片源查询失败：{type(batch).__name__}")
+                else:
+                    candidates.extend(batch)
+
+        ocr_text = ""
+        tags: list[str] = []
+        if args.use_ocr and _route_wants(routes, "anime", "galgame", "comic", "novel", "unknown"):
+            ocr_candidates, ocr_text, tags, ocr_caveats = await self._ocr_candidates(images, routes, args.limit, args.question)
+            candidates.extend(ocr_candidates)
+            caveats.extend(ocr_caveats)
+
+        ocr_names = [c.title for c in candidates if c.source == "vlm_ocr" and c.title]
+        if args.include_book_sources:
+            book_candidates, book_caveats = await self._book_source_candidates(ocr_names, routes, args.limit)
+            candidates.extend(book_candidates)
+            caveats.extend(book_caveats)
+
+        if args.include_paid_reverse:
+            if settings.serpapi_api_key:
+                for idx, image in enumerate(images):
+                    try:
+                        for item in await _serpapi_reverse_image(image, args.limit):
+                            candidates.append(
+                                RoutedImageCandidate(
+                                    route="unknown",
+                                    title=str(item.get("title") or ""),
+                                    confidence=0.52,
+                                    source="serpapi_google_reverse",
+                                    source_site=str(item.get("source_site") or "Google Reverse Image"),
+                                    url=str(item.get("url") or ""),
+                                    thumbnail=item.get("thumbnail"),
+                                    image_index=idx,
+                                    evidence=["Google Reverse Image 付费兜底"],
+                                    note=str(item.get("note") or ""),
+                                )
+                            )
+                    except Exception as e:  # noqa: BLE001
+                        caveats.append(f"SerpApi 反搜失败：{type(e).__name__}")
+            else:
+                caveats.append("include_paid_reverse=true 但未配置 SERPAPI_API_KEY，已跳过 SerpApi。")
+
+        for idx, image in enumerate(images):
+            if image.startswith(("http://", "https://")):
+                nav.append({"title": f"ascii2d 搜索 image {idx + 1}", "url": f"https://ascii2d.net/search/url/{image}", "source": "ascii2d"})
+                nav.append({"title": f"IQDB 搜索 image {idx + 1}", "url": f"https://iqdb.org/?url={quote_plus(image)}", "source": "iqdb"})
+                nav.append({"title": f"Google Lens image {idx + 1}", "url": f"https://lens.google.com/uploadbyurl?url={quote_plus(image)}", "source": "google_lens"})
+            else:
+                nav.append({"title": f"ascii2d 上传入口 image {idx + 1}", "url": "https://ascii2d.net/", "source": "ascii2d"})
+                nav.append({"title": f"IQDB 上传入口 image {idx + 1}", "url": "https://iqdb.org/", "source": "iqdb"})
+
+        candidates = [c for c in candidates if c.title or c.url or c.note]
+        candidates = _merge_route_candidates(candidates, args.limit)
+        candidates.sort(key=lambda x: x.confidence, reverse=True)
+        top = candidates[0].confidence if candidates else 0.0
+        second = candidates[1].confidence if len(candidates) > 1 else 0.0
+        top_route = candidates[0].route if candidates else "unknown"
+        needs_confirmation = top < 0.75 or (second > 0 and top - second < 0.08 and candidates[1].route != top_route)
+        decision = "no_candidate"
+        if candidates:
+            decision = "needs_user_confirmation" if needs_confirmation else f"likely_{top_route}"
+        next_tools = []
+        if any(c.route == "anime" for c in candidates):
+            next_tools.extend(["get_subject", "get_subject_episodes"])
+        if any(c.route == "galgame" for c in candidates):
+            next_tools.extend(["search_visual_novels", "search_erogamescape", "review_subject"])
+        if any(c.route in {"comic", "novel"} for c in candidates):
+            next_tools.extend(["search_subjects(type=book)", "review_subject"])
+        if any(c.route in {"fanart", "unknown"} for c in candidates):
+            next_tools.extend(["search_image_source", "extract_visual_text"])
+        seen_tools: list[str] = []
+        for tool in next_tools:
+            if tool not in seen_tools:
+                seen_tools.append(tool)
+        data = RouteImageSourceResult(
+            image_refs=[
+                url if (url.startswith("upload://") or url.startswith("http://") or url.startswith("https://")) else ""
+                for url in images
+            ],
+            routes_considered=sorted(routes),
+            decision=decision,
+            needs_user_confirmation=needs_confirmation,
+            confidence=top,
+            candidates=candidates[: args.limit],
+            ocr_text=ocr_text,
+            visual_tags=tags[:16],
+            navigation_links=nav[:10],
+            next_tools=seen_tools[:8],
+            caveats=caveats[:10],
+        )
+        return ToolResult(
+            ok=True,
+            data=data,
+            sources=[
+                Citation(
+                    title=c.bangumi_name or c.title or c.source,
+                    url=f"https://bgm.tv/subject/{c.bangumi_id}" if c.bangumi_id else (c.url or images[min(c.image_index, len(images) - 1)]),
+                    source=c.source or c.route,
+                    image=c.thumbnail,
+                )
+                for c in data.candidates[:5]
+                if c.title or c.url or c.bangumi_id
             ],
         )
 
@@ -1213,5 +1883,6 @@ def build_multimodal_tools(client: BangumiClient) -> list[Tool]:
         ExtractVisualTextTool(client),
         VisualStyleRecommendTool(client),
         ImageSourceSearchTool(),
+        RouteImageSourceTool(client),
         AnalyzeVideoFramesTool(client),
     ]

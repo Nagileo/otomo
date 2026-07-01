@@ -987,6 +987,90 @@ function ImageSourcePanel({ data }: { data: AnyRecord }) {
   );
 }
 
+function RouteImageSourcePanel({ data }: { data: AnyRecord }) {
+  const candidates = list(data.candidates);
+  const links = list(data.navigation_links);
+  const nextTools = list<string>(data.next_tools);
+  const tags = list<string>(data.visual_tags);
+  const confirm = Boolean(data.needs_user_confirmation);
+  return (
+    <Panel
+      title="图片来源路由"
+      subtitle={`${text(data.decision, "low_confidence")} · 置信度 ${pct(data.confidence)}${confirm ? " · 需要确认" : ""}`}
+    >
+      <div className="evidence-row">
+        {list<string>(data.routes_considered).map((route) => <Badge key={route} tone="dim">{route}</Badge>)}
+        {confirm && <Badge tone="warn">候选待确认</Badge>}
+        {!confirm && <Badge tone="good">可作为入口</Badge>}
+      </div>
+      {tags.length > 0 && (
+        <div className="evidence-row tight">
+          {tags.map((tag) => <Badge key={tag} tone="dim">{tag}</Badge>)}
+        </div>
+      )}
+      {candidates.length > 0 ? (
+        <div className="rec-grid">
+          {candidates.map((item, i) => {
+            const href = item.bangumi_id ? `https://bgm.tv/subject/${item.bangumi_id}` : item.url || "#";
+            return (
+              <a className="rec-card" href={href} target="_blank" rel="noreferrer" key={`${item.route}-${item.source}-${i}`}>
+                {item.thumbnail ? <img src={item.thumbnail} alt="" /> : <div className="rec-noimg" />}
+                <div className="rec-body">
+                  <div className="card-title">{text(item.bangumi_name || item.title || item.source_site || item.source)}</div>
+                  <div className="card-meta">
+                    {text(item.route, "unknown")} · {text(item.source, "source")} · conf {pct(item.confidence)}
+                    {item.timestamp ? ` · ${item.timestamp}` : ""}
+                  </div>
+                  {item.author && <div className="card-meta">作者：{text(item.author)}</div>}
+                  {item.episode != null && <Badge tone="good">第 {text(item.episode)} 集</Badge>}
+                  {list<string>(item.evidence).length > 0 && (
+                    <div className="evidence-row tight">
+                      {list<string>(item.evidence).slice(0, 3).map((ev) => <Badge key={ev} tone="dim">{ev}</Badge>)}
+                    </div>
+                  )}
+                  {item.note && <p className="card-note">{text(item.note)}</p>}
+                </div>
+              </a>
+            );
+          })}
+        </div>
+      ) : (
+        <EmptyHint text="没有足够候选；可以换更清晰原图，或补充作品/角色/来源类型线索" />
+      )}
+      {data.ocr_text && (
+        <details className="quiet-detail">
+          <summary>查看 OCR / 图片文字</summary>
+          <pre className="ocr-block">{text(data.ocr_text)}</pre>
+        </details>
+      )}
+      {nextTools.length > 0 && (
+        <>
+          <div className="section-title">建议后续工具</div>
+          <div className="evidence-row tight">
+            {nextTools.map((tool) => <Badge key={tool} tone="dim">{tool}</Badge>)}
+          </div>
+        </>
+      )}
+      {links.length > 0 && (
+        <>
+          <div className="section-title">反搜 / 导航入口</div>
+          <div className="source-links">
+            {links.map((link, i) => (
+              <a key={`${link.url}-${i}`} href={link.url} target="_blank" rel="noreferrer">
+                <span>{text(link.source, "source")}</span>
+                {text(link.title)}
+              </a>
+            ))}
+          </div>
+        </>
+      )}
+      {list<string>(data.caveats).length > 0 && (
+        <div className="caveats">{list<string>(data.caveats).map((n, i) => <span key={i}>{n}</span>)}</div>
+      )}
+    </Panel>
+  );
+}
+
 function BiliVideoContentPanel({ data }: { data: AnyRecord }) {
   const layers = list<string>(data.read_layers);
   const content = list<string>(data.content_summary);
@@ -1998,6 +2082,7 @@ export function EvidencePanels({
   const visualText = list(evidence.extract_visual_text);
   const visualStyle = list(evidence.recommend_by_visual_style);
   const imageSource = list(evidence.search_image_source);
+  const routeImage = list(evidence.route_image_source);
   const biliVideo = list(evidence.summarize_bilibili_video_content);
   const videoFrames = list(evidence.analyze_video_frames);
   const claimChecks = devMode ? list(evidence.claim_check) : [];
@@ -2018,7 +2103,7 @@ export function EvidencePanels({
     !review.length && !taste.length && !season.length && !recommend.length && !memory.length
     && !aspect.length && !watchCopilot.length && !weeklyDigest.length && !tasteReport.length && !dashboard.length && !explorer.length
     && !episodeRadar.length && !screenshot.length && !visualText.length && !visualStyle.length && !imageSource.length
-    && !biliVideo.length && !videoFrames.length && !claimChecks.length
+    && !routeImage.length && !biliVideo.length && !videoFrames.length && !claimChecks.length
   ) return null;
   return (
     <div className={`evidence-stack ${devMode ? "dev-mode" : "user-mode"}`}>
@@ -2032,6 +2117,7 @@ export function EvidencePanels({
       ))}
       {visualText.map((data, i) => <VisualTextPanel data={data} key={`visual-text-${i}`} />)}
       {visualStyle.map((data, i) => <VisualStylePanel data={data} key={`visual-style-${i}`} />)}
+      {routeImage.map((data, i) => <RouteImageSourcePanel data={data} key={`route-image-${i}`} />)}
       {imageSource.map((data, i) => <ImageSourcePanel data={data} key={`image-source-${i}`} />)}
       {biliVideo.map((data, i) => <BiliVideoContentPanel data={data} key={`bili-video-${i}`} />)}
       {videoFrames.map((data, i) => <VideoFramePanel data={data} key={`video-frames-${i}`} />)}

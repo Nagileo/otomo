@@ -48,6 +48,8 @@ def _legacy_runtime_state_prompt(state: Any | None) -> str:
         "运行时用户偏好：",
         f"- spoiler_mode={mode}（none=无剧透，mild=轻微剧透，full=允许完整剧透）。",
     ]
+    if spoiler.get("memory_default") and spoiler.get("memory_default") != mode:
+        parts.append(f"- spoiler_memory_default={spoiler.get('memory_default')}（仅作长期偏好提示；本轮仍按 spoiler_mode={mode} 执行）。")
     if progress is not None:
         parts.append(f"- progress_episode={progress}；分集讨论/剧情回答不得越过该集。")
     if spoiler.get("pending_followup"):
@@ -216,6 +218,8 @@ def runtime_state_prompt(state: Any | None) -> str:
         mode = spoiler.get("mode") or "none"
         progress = spoiler.get("progress_episode")
         parts.append(f"- spoiler_mode={mode}（none=无剧透，mild=轻微剧透，full=允许完整剧透）。")
+        if spoiler.get("memory_default") and spoiler.get("memory_default") != mode:
+            parts.append(f"- spoiler_memory_default={spoiler.get('memory_default')}（仅作长期偏好提示；本轮仍按 spoiler_mode={mode} 执行）。")
         if progress is not None:
             parts.append(f"- progress_episode={progress}；分集讨论和剧情回答不得越过该集。")
         if spoiler.get("pending_followup"):
@@ -237,7 +241,7 @@ def runtime_state_prompt(state: Any | None) -> str:
                 image_bits.append(f"{filename}({mime_type})={uri}")
         if image_bits:
             parts.append("- 本轮用户上传图片：" + "；".join(image_bits) + "。")
-            parts.append("- 若用户要求识别截图/角色/作品/画面线索，调用 identify_acgn_screenshot；单图可传 image_url，多图传 image_urls=[upload://...]；不要把 upload:// 当普通网页链接。")
+            parts.append("- 若用户泛问“这是什么图/出处/哪里来的/可能是哪部作品”，优先调用 route_image_source 做多源路由；若明确是动画截图识番/第几集，再调用 identify_acgn_screenshot；读图中文字用 extract_visual_text。单图传 image_url，多图传 image_urls=[upload://...]；不要把 upload:// 当普通网页链接。")
     return "\n".join(parts)
 
 
@@ -397,6 +401,7 @@ _PANEL_TOOLS = {
     "extract_visual_text",
     "recommend_by_visual_style",
     "search_image_source",
+    "route_image_source",
     "analyze_video_frames",
     "summarize_bilibili_video_content",
     "build_aspect_profile",
@@ -816,6 +821,31 @@ def _safe_image_source_payload(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _safe_route_image_payload(data: dict[str, Any]) -> dict[str, Any]:
+    candidates = []
+    for item in _trim_dicts(data.get("candidates"), limit=14):
+        copied = dict(item)
+        copied["title"] = _trim_text(copied.get("title"), 140)
+        copied["bangumi_name"] = _trim_text(copied.get("bangumi_name"), 120)
+        copied["author"] = _trim_text(copied.get("author"), 80)
+        copied["note"] = _trim_text(copied.get("note"), 180)
+        copied["evidence"] = _trim_strings(copied.get("evidence"), limit=5, text_limit=120)
+        candidates.append(copied)
+    return {
+        "image_refs": _trim_strings(data.get("image_refs"), limit=4, text_limit=500),
+        "routes_considered": _trim_strings(data.get("routes_considered"), limit=8, text_limit=40),
+        "decision": _trim_text(data.get("decision"), 80),
+        "needs_user_confirmation": bool(data.get("needs_user_confirmation")),
+        "confidence": data.get("confidence"),
+        "candidates": candidates,
+        "ocr_text": _trim_text(data.get("ocr_text"), 1600),
+        "visual_tags": _trim_strings(data.get("visual_tags"), limit=16, text_limit=40),
+        "navigation_links": _trim_dicts(data.get("navigation_links"), limit=10),
+        "next_tools": _trim_strings(data.get("next_tools"), limit=8, text_limit=60),
+        "caveats": _trim_strings(data.get("caveats"), limit=8, text_limit=180),
+    }
+
+
 def _safe_video_frames_payload(data: dict[str, Any]) -> dict[str, Any]:
     frames = []
     for item in _trim_dicts(data.get("frames"), limit=12):
@@ -897,6 +927,8 @@ def panel_data_from_payload(name: str, payload: dict[str, Any] | None) -> dict[s
         return _safe_visual_style_payload(data)
     if name == "search_image_source":
         return _safe_image_source_payload(data)
+    if name == "route_image_source":
+        return _safe_route_image_payload(data)
     if name == "analyze_video_frames":
         return _safe_video_frames_payload(data)
     if name == "summarize_bilibili_video_content":

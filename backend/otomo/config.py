@@ -103,6 +103,7 @@ class Settings(BaseSettings):
 
     # ---- 多模态溯源（可选；不配置则仅返回 trace.moe / 导航链接）----
     saucenao_api_key: str = ""
+    serpapi_api_key: str = ""  # 可选付费兜底：Google Reverse Image（只处理可公开访问图片 URL）
 
 
 settings = Settings()

@@ -492,7 +492,9 @@ async def _attach_memory_state(app: FastAPI, state: AgentState | None, client: B
     mem = app.state.ltm.load_user(username)
     state.short_term["memory"] = memory_summary(mem).model_dump(mode="json", exclude_none=True)
     if mem.spoiler_default and "spoiler" not in state.short_term:
-        state.short_term["spoiler"] = {"mode": mem.spoiler_default}
+        # Long-term spoiler preference is a hint, not permission to reveal spoilers.
+        # A turn enters mild/full only through explicit natural language or req.spoiler_mode.
+        state.short_term["spoiler"] = {"mode": "none", "memory_default": mem.spoiler_default}
 
 
 @app.post("/chat")

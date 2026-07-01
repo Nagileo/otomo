@@ -14,6 +14,8 @@ from otomo.tools.multimodal.tool import (
     ImageSourceSearchTool,
     IdentifyScreenshotArgs,
     IdentifyScreenshotTool,
+    RouteImageSourceArgs,
+    RouteImageSourceTool,
     VisualStyleRecommendArgs,
     VisualStyleRecommendTool,
     _extract_titles,
@@ -42,6 +44,18 @@ class FakeBangumiClient:
                         "name_cn": "摇曳露营△",
                         "rating": {"score": 8.1},
                         "images": {"common": "https://img.example/yuru.jpg"},
+                    }
+                ]
+            }
+        if keyword in {"サクラノ刻", "樱之刻"} and subject_type == 4:
+            return {
+                "data": [
+                    {
+                        "id": 500001,
+                        "name": "サクラノ刻",
+                        "name_cn": "樱之刻",
+                        "rating": {"score": 8.4},
+                        "images": {"common": "https://img.example/sakura.jpg"},
                     }
                 ]
             }
@@ -223,6 +237,71 @@ def test_image_source_search_merges_trace_and_saucenao(monkeypatch):
     assert res.data
     assert {m.engine for m in res.data.matches} == {"trace.moe", "saucenao"}
     assert any(link["source"] == "pixiv" for link in res.data.navigation_links)
+
+
+def test_route_image_source_aggregates_trace_saucenao_ocr_and_book_sources(monkeypatch):
+    from otomo import config
+
+    monkeypatch.setattr(config.settings, "vlm_model", "fake-vlm")
+    monkeypatch.setattr(config.settings, "saucenao_api_key", "fake-key")
+
+    async def fake_trace(_image_url: str):
+        return [
+            {
+                "anilist": {"id": 98444, "title": {"native": "摇曳露营△"}},
+                "episode": 1,
+                "from": 12.0,
+                "similarity": 0.82,
+                "image": "https://trace.example/shot.jpg",
+            }
+        ]
+
+    async def fake_saucenao(_image_url: str, _limit: int):
+        return [
+            {
+                "header": {"similarity": "91.0", "index_name": "H-Game CG", "thumbnail": "https://thumb.example/gal.jpg"},
+                "data": {"title": "サクラノ刻", "ext_urls": ["https://vndb.org/v999"]},
+            }
+        ]
+
+    async def fake_vlm(_image_url: str, _system_prompt: str, _question: str):
+        return '{"markdown_text":"封面标题：《摇曳露营△》","structured_items":[],"entities":["摇曳露营△"],"visual_tags":["封面","漫画"],"confidence":0.8}'
+
+    async def fake_google_books(_query: str, _limit: int):
+        return [{"source": "google_books", "title": "摇曳露营△", "url": "https://books.example/yuru", "external_id": "gb1"}]
+
+    async def fake_open_library(_query: str, _limit: int):
+        return []
+
+    async def fake_mangadex(_query: str, _limit: int):
+        return [{"source": "mangadex", "title": "摇曳露营△", "url": "https://mangadex.org/title/yuru", "external_id": "md1"}]
+
+    monkeypatch.setattr(multimodal_tool, "_trace_moe_search", fake_trace)
+    monkeypatch.setattr(multimodal_tool, "_saucenao_search", fake_saucenao)
+    monkeypatch.setattr(multimodal_tool, "_call_vlm_with_prompt", fake_vlm)
+    monkeypatch.setattr(multimodal_tool, "_google_books_search", fake_google_books)
+    monkeypatch.setattr(multimodal_tool, "_open_library_search", fake_open_library)
+    monkeypatch.setattr(multimodal_tool, "_mangadex_search", fake_mangadex)
+
+    tool = RouteImageSourceTool(FakeBangumiClient())
+    res = asyncio.run(
+        tool.run(
+            RouteImageSourceArgs(
+                image_url="https://example.com/a.jpg",
+                routes=["auto"],
+                include_book_sources=True,
+                limit=12,
+            )
+        )
+    )
+    assert res.ok
+    assert res.data
+    routes = {c.route for c in res.data.candidates}
+    assert {"anime", "galgame", "comic"}.issubset(routes)
+    assert any(c.bangumi_id == 207195 for c in res.data.candidates)
+    assert any(c.bangumi_id == 500001 for c in res.data.candidates)
+    assert "get_subject" in res.data.next_tools
+    assert res.data.navigation_links
 
 
 def test_analyze_video_frames_uses_frame_images(monkeypatch):
