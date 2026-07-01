@@ -54,6 +54,13 @@ button:disabled { opacity: .5; cursor: default; }
   width: 42px; min-width: 42px; padding: 0; background: #0c0e13; color: var(--accent);
   border: 1px solid rgba(122, 162, 247, .35);
 }
+.upload-notice {
+  margin-top: 8px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 8px;
+  background: #0c0e13; color: var(--dim); font-size: 12px; line-height: 1.4;
+}
+.upload-notice.good { color: var(--green); border-color: rgba(158, 206, 106, .35); background: rgba(158, 206, 106, .07); }
+.upload-notice.warn { color: #e0af68; border-color: rgba(224, 175, 104, .38); background: rgba(224, 175, 104, .07); }
+.upload-notice.bad { color: var(--red); border-color: rgba(247, 118, 142, .38); background: rgba(247, 118, 142, .07); }
 .pending-images {
   display: grid; gap: 8px; margin-top: 8px; padding: 8px; background: #0c0e13;
   border: 1px solid var(--border); border-radius: 8px;

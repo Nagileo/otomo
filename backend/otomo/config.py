@@ -76,6 +76,7 @@ class Settings(BaseSettings):
     cf_i2i_dir: str = "otomo/data"
 
     # ---- 可观测（可选 Langfuse；不配则只用本地 trace JSONL，见 obs.py）----
+    langfuse_enabled: bool = False
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""
     langfuse_host: str = "https://cloud.langfuse.com"

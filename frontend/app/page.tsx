@@ -76,8 +76,10 @@ type AuthState = {
   csrf_token?: string;
 };
 type AuthNotice = { tone: "good" | "warn" | "bad"; text: string };
+type UploadNotice = { tone: "good" | "warn" | "bad"; text: string };
 
 const MAX_IMAGES = 4;
+const SUPPORTED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/jpg", "image/webp"]);
 
 function list(value: any): any[] {
   return Array.isArray(value) ? value : [];
@@ -262,6 +264,7 @@ export default function Home() {
   const [traceMode, setTraceMode] = useState<"summary" | "dev">("summary");
   const [evidenceMode, setEvidenceMode] = useState<"user" | "dev">("user");
   const [authNotice, setAuthNotice] = useState<AuthNotice | null>(null);
+  const [uploadNotice, setUploadNotice] = useState<UploadNotice | null>(null);
   const [busy, setBusy] = useState(false);
   const answerRef = useRef("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -319,15 +322,44 @@ export default function Home() {
     });
   }
 
+  function imageId() {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+      return crypto.randomUUID();
+    }
+    return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  }
+
+  function isSupportedImage(file: File) {
+    if (SUPPORTED_IMAGE_TYPES.has(file.type)) return true;
+    const name = file.name.toLowerCase();
+    return [".png", ".jpg", ".jpeg", ".webp"].some((ext) => name.endsWith(ext));
+  }
+
   function addPendingImages(files: FileList | null) {
-    if (!files?.length) return;
+    if (!files?.length) {
+      setUploadNotice({ tone: "warn", text: "没有选择图片文件" });
+      return;
+    }
+    const selected = Array.from(files);
+    const valid = selected.filter(isSupportedImage);
+    const invalid = selected.length - valid.length;
     setPendingImages((prev) => {
       const room = Math.max(MAX_IMAGES - prev.length, 0);
-      const next = Array.from(files).slice(0, room).map((file) => ({
-        id: crypto.randomUUID(),
+      const accepted = valid.slice(0, room);
+      const next = accepted.map((file) => ({
+        id: imageId(),
         file,
         preview: URL.createObjectURL(file),
       }));
+      const skipped = valid.length - accepted.length;
+      const parts = [];
+      if (accepted.length) parts.push(`已选择 ${accepted.length} 张截图`);
+      if (invalid) parts.push(`${invalid} 个文件格式不支持`);
+      if (skipped) parts.push(`已达到最多 ${MAX_IMAGES} 张`);
+      setUploadNotice({
+        tone: accepted.length ? (invalid || skipped ? "warn" : "good") : "bad",
+        text: parts.join("，") || "没有可用图片；仅支持 png/jpeg/webp",
+      });
       return [...prev, ...next];
     });
   }
@@ -345,6 +377,7 @@ export default function Home() {
       prev.forEach((img) => URL.revokeObjectURL(img.preview));
       return [];
     });
+    setUploadNotice(null);
   }
 
   async function uploadPendingImages(): Promise<ImageAttachment[]> {
@@ -429,6 +462,7 @@ export default function Home() {
       }
     } catch (e) {
       setTrace((t) => [...t, { kind: "obs", name: "error", ok: false, summary: String(e) }]);
+      setUploadNotice({ tone: "bad", text: String(e) });
     } finally {
       const final = answerRef.current;
       if (final) setMessages((m) => [...m, { role: "assistant", content: final }]);
@@ -765,7 +799,7 @@ export default function Home() {
               ref={fileInputRef}
               type="file"
               multiple
-              accept="image/png,image/jpeg,image/webp"
+              accept="image/*"
               className="file-input"
               onChange={(e) => {
                 addPendingImages(e.target.files);
@@ -793,6 +827,9 @@ export default function Home() {
               {busy ? "…" : "发送"}
             </button>
           </div>
+          {uploadNotice && (
+            <div className={`upload-notice ${uploadNotice.tone}`}>{uploadNotice.text}</div>
+          )}
           {pendingImages.length > 0 && (
             <div className="pending-images">
               <div className="pending-head">
