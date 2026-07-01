@@ -152,6 +152,8 @@ async def _maybe_revise_answer(
 ) -> tuple[str, Any | None]:
     if not settings.claim_auto_revision_enabled or not claim_check.needs_revision:
         return "", None
+    if not any(str(hint).startswith("block:") for hint in (claim_check.revision_hints or [])):
+        return "", None
     llm = getattr(runner, "llm", None)
     model = getattr(runner, "model", None) or settings.llm_model
     if llm is None or not model:

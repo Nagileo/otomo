@@ -56,6 +56,30 @@ def test_claim_verifier_rejects_conflicting_staff_claim():
     assert result.unsupported_count >= 1
 
 
+def test_claim_verifier_does_not_revise_narrative_or_discourse_summary():
+    result = verify_answer_claims(
+        "## 第11集「大家的梦、我的梦」（2020-12-12播出）\n"
+        "这一集是第一季的剧情高潮，也是粉丝公认的神回。讨论数（160条）为全季最高。"
+        "她发现偷看的目光不再只看着自己一个人了。",
+        [
+            {
+                "name": "get_episode_comments",
+                "summary": "第11集；讨论约160条；多条评论称神回、演出好",
+                "sources": [],
+                "entities": [],
+                "data": {
+                    "episode": {"sort": 11, "name_cn": "大家的梦、我的梦", "airdate": "2020-12-12", "comment": 160},
+                    "comments": ["神回", "这一集演出很好", "步梦这里很压抑"],
+                },
+            },
+        ],
+    )
+    assert result.claims
+    assert not result.needs_revision
+    assert result.unsupported_count == 0
+    assert result.unverifiable_count >= 1
+
+
 class DummyRunner:
     async def stream(self, user_input: str, state: AgentState | None = None):
         yield ToolCallEvent(name="get_subject", args={"subject_id": 1})

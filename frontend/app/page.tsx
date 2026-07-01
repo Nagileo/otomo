@@ -576,11 +576,14 @@ export default function Home() {
         }
         break;
       case "claim_check":
+        const verifiableClaims = Number(ev.supported_count || 0) + Number(ev.unsupported_count || 0);
         setTrace((t) => [
           ...t,
           {
             kind: "note",
-            text: `证据校验：support ${(Number(ev.support_rate || 0) * 100).toFixed(0)}% · unsupported ${ev.unsupported_count ?? 0}`,
+            text: verifiableClaims
+              ? `证据校验：support ${(Number(ev.support_rate || 0) * 100).toFixed(0)}% · unsupported ${ev.unsupported_count ?? 0}`
+              : "证据校验：无强 canonical 硬事实需要自动回退",
           },
         ]);
         setEvidence((prev) => ({

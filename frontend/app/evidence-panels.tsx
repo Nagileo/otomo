@@ -1889,15 +1889,21 @@ function ExplorerPanel({ data }: { data: AnyRecord }) {
 
 function ClaimCheckPanel({ data }: { data: AnyRecord }) {
   const claims = list(data.claims);
+  const verifiableCount = Number(data.supported_count || 0) + Number(data.unsupported_count || 0);
+  const supportLabel = verifiableCount ? `${(Number(data.support_rate || 0) * 100).toFixed(0)}%` : "N/A";
   return (
     <Panel
       title="逐条事实校验"
-      subtitle={`support ${(Number(data.support_rate || 0) * 100).toFixed(0)}% · supported ${data.supported_count ?? 0} · unsupported ${data.unsupported_count ?? 0}`}
+      subtitle={
+        verifiableCount
+          ? `support ${supportLabel} · supported ${data.supported_count ?? 0} · unsupported ${data.unsupported_count ?? 0}`
+          : "本轮没有强 canonical 硬事实需要自动回退"
+      }
     >
       <div className="metric-grid">
         <div className="metric-card">
           <div className="metric-label">支持率</div>
-          <div className="metric-value">{(Number(data.support_rate || 0) * 100).toFixed(0)}%</div>
+          <div className="metric-value">{supportLabel}</div>
         </div>
         <div className="metric-card">
           <div className="metric-label">未支持</div>

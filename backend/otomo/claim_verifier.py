@@ -62,7 +62,11 @@ class EvidenceDoc(BaseModel):
 _SOURCE_TERMS = ("Bangumi", "批判空间", "ErogameScape", "VNDB", "AniList", "MusicBrainz", "B站", "yuc", "萌娘", "维基")
 _FACT_TERMS = (
     "制作", "公司", "监督", "导演", "脚本", "原作", "声优", "CV", "配音", "播出",
-    "发售", "年份", "评分", "排名", "rank", "集", "话", "staff", "角色",
+    "发售", "年份", "评分", "排名", "rank", "staff", "角色",
+)
+_HARD_CANONICAL_TERMS = (
+    "制作公司", "动画制作", "制作方", "监督", "导演", "脚本", "系列构成", "原作",
+    "声优", "CV", "配音", "播出", "发售", "年份", "评分", "排名", "rank", "staff",
 )
 _DISCOURSE_TERMS = ("口碑", "短评", "评论", "讨论", "观众", "大家", "圈", "评价", "争议", "氛围")
 _INFERENCE_TERMS = ("推荐", "适合你", "你可能", "我觉得", "可以试", "口味", "画像", "偏好", "雷区", "好球")
@@ -156,15 +160,21 @@ def split_claims(answer: str, limit: int = 18) -> list[str]:
 
 
 def classify_claim(text: str) -> ClaimKind:
-    if any(t in text for t in _SPOILER_TERMS):
+    # Claim verifier 只做 evidence-local factuality，不承担剧透策略。
+    # 剧情/反转/神回/氛围一类解读默认不是可机器强校验事实，不能触发答案回退。
+    if any(t in text for t in _SPOILER_TERMS) and not any(t in text for t in _HARD_CANONICAL_TERMS):
         return "spoiler_sensitive"
     if any(t in text for t in _DISCOURSE_TERMS):
         return "discourse_summary"
     if any(t in text for t in _INFERENCE_TERMS):
         return "preference_inference"
-    if any(t in text for t in _FACT_TERMS) or re.search(r"\d", text):
+    if any(t in text for t in _FACT_TERMS) or (re.search(r"\d", text) and any(t in text for t in _HARD_CANONICAL_TERMS)):
         return "canonical_fact"
     return "unknown"
+
+
+def _is_hard_canonical_claim(text: str) -> bool:
+    return any(term in text for term in _HARD_CANONICAL_TERMS)
 
 
 def _anchors(text: str) -> list[str]:
@@ -270,19 +280,27 @@ def verify_answer_claims(answer: str, observations: list[dict[str, Any]]) -> Cla
         kind = classify_claim(text)
         evidence = _evidence_for(text, kind, docs)
         contradiction = _canonical_contradiction(text, docs) if kind == "canonical_fact" else ""
-        if kind == "preference_inference" and evidence:
+        hard_canonical = kind == "canonical_fact" and _is_hard_canonical_claim(text)
+        if kind in {"discourse_summary", "spoiler_sensitive"}:
+            supported = any(ev.role in {"discourse", "web", "canonical"} and ev.confidence >= 0.45 for ev in evidence)
+            note = (
+                "叙事/口碑类表述已命中本轮证据，但只作弱支持。"
+                if supported else
+                "叙事/口碑/剧透类表述不做自动事实回退；如需强校验，应接分集评论/剧情来源。"
+            )
+        elif kind == "preference_inference" and evidence:
             supported = True
             note = "偏好推断已对齐到本轮画像/推荐证据。"
         elif kind == "preference_inference":
             supported = False
-            note = "偏好推断没有命中本轮画像或推荐证据。"
+            note = "偏好推断没有命中本轮画像或推荐证据；仅记录为弱信号，不自动回退。"
         elif contradiction:
             supported = False
             note = contradiction
             evidence = []
         elif kind == "unknown":
             supported = bool(evidence)
-            note = "一般陈述；证据命中较弱。" if evidence else "一般陈述，未找到本轮证据。"
+            note = "一般陈述；证据命中较弱。" if evidence else "一般陈述，不进入强事实校验。"
         else:
             required = _claim_required_roles(kind)
             supported = any(ev.role in required and ev.confidence >= 0.45 for ev in evidence)
@@ -290,21 +308,23 @@ def verify_answer_claims(answer: str, observations: list[dict[str, Any]]) -> Cla
                 note = "已命中本轮同类型 evidence graph。"
             elif evidence:
                 note = "有弱命中，但来源类型或锚点不足，不足以支持该 claim。"
+            elif hard_canonical:
+                note = "本轮没有直接 canonical 证据；记录为未确认，不自动删除。"
             else:
-                note = "未在本轮 observation 中找到直接证据。"
+                note = "不是强 canonical 断言，或本轮无相关证据；不自动回退。"
         confidence = max([x.confidence for x in evidence], default=0.0)
         if supported:
             severity: ClaimSeverity = "info"
             suggestion = ""
-        elif kind in {"canonical_fact", "spoiler_sensitive"}:
+        elif contradiction:
             severity = "block"
-            suggestion = "删除该断言，或改写为“本轮证据未确认”，并补 canonical 工具后再回答。"
-        elif kind in {"discourse_summary", "preference_inference"}:
+            suggestion = "本轮 canonical 证据与该断言冲突；删除或改写为证据支持的版本。"
+        elif hard_canonical and kind == "canonical_fact":
             severity = "warn"
-            suggestion = "降级为带来源限制的表述，例如“从本轮少量评论/画像看”。"
+            suggestion = "如需严谨回答，应补 canonical 工具；当前只能视为未确认。"
         else:
             severity = "info"
-            suggestion = "可保留为一般性表达，但不要当作事实证据。"
+            suggestion = "不作为强事实校验对象；可保留为解释/口碑/剧情理解。"
         claims.append(
             VerifiedClaim(
                 text=text,
@@ -317,14 +337,15 @@ def verify_answer_claims(answer: str, observations: list[dict[str, Any]]) -> Cla
                 suggestion=suggestion,
             )
         )
-    supported_count = sum(1 for x in claims if x.supported)
-    unsupported_count = sum(1 for x in claims if not x.supported and x.kind != "unknown")
-    unverifiable_count = sum(1 for x in claims if not x.supported and x.kind == "unknown")
-    denom = max(len([x for x in claims if x.kind != "unknown"]), 1)
+    verifiable = [x for x in claims if x.kind == "canonical_fact" and (x.supported or x.severity in {"warn", "block"})]
+    supported_count = sum(1 for x in verifiable if x.supported)
+    unsupported_count = sum(1 for x in verifiable if not x.supported and x.severity in {"warn", "block"})
+    unverifiable_count = len([x for x in claims if x not in verifiable])
+    denom = max(len(verifiable), 1)
     revision_hints = [
         f"{x.severity}: {x.text} -> {x.suggestion or x.note}"
         for x in claims
-        if not x.supported and x.severity in {"block", "warn"}
+        if not x.supported and x.severity == "block"
     ][:8]
     return ClaimCheckResult(
         claims=claims,
@@ -332,10 +353,10 @@ def verify_answer_claims(answer: str, observations: list[dict[str, Any]]) -> Cla
         supported_count=supported_count,
         unsupported_count=unsupported_count,
         unverifiable_count=unverifiable_count,
-        needs_revision=any(x.severity == "block" for x in claims),
+        needs_revision=any(x.severity == "block" and x.kind == "canonical_fact" for x in claims),
         revision_hints=revision_hints,
         caveats=[
-            "claim verifier v3 只对齐本轮已有 observation evidence graph，不额外查证。",
-            "canonical fact 需要 canonical 工具证据；口碑/偏好是弱验证；未命中时应降级或补工具。",
+            "claim verifier v4 只对强 canonical 硬事实做自动修正；剧情/口碑/偏好不触发答案回退。",
+            "只有本轮 canonical 证据与断言冲突时才 needs_revision；未命中证据只是未确认。",
         ],
     )
