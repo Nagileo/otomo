@@ -52,6 +52,8 @@ def _legacy_runtime_state_prompt(state: Any | None) -> str:
         parts.append(f"- spoiler_memory_default={spoiler.get('memory_default')}（仅作长期偏好提示；本轮仍按 spoiler_mode={mode} 执行）。")
     if progress is not None:
         parts.append(f"- progress_episode={progress}；分集讨论/剧情回答不得越过该集。")
+    if spoiler.get("soft_warning"):
+        parts.append("- spoiler_soft_warning=true；长期记忆允许剧透且本轮命中剧透意图，可以回答完整剧情，但开头必须明确标注“以下涉及剧透”。")
     if spoiler.get("pending_followup"):
         parts.append("- 本轮问题可能要求后续剧情/结局，但用户未授权剧透；先追问无剧透/轻微/完整剧透，不要直接回答剧透内容。")
     parts.append("- 调 get_episode_comments 时，如果涉及分集进度，必须传 max_episode_sort/progress 对应参数。")
@@ -72,13 +74,24 @@ def update_spoiler_state_from_input(state: Any | None, user_input: str) -> None:
     policy = assess_spoiler_policy(user_input, default)
     if policy.progress_episode is not None:
         spoiler["progress_episode"] = policy.progress_episode
+    memory_default = spoiler.get("memory_default")
+    spoiler.pop("soft_warning", None)
     if policy.level in {"none", "mild", "full"} and not policy.needs_followup:
         spoiler["mode"] = policy.level
-    # 用户已显式授权(mild/full，含点 followup chips 后 api 设的 mode)就不再追问，避免"讲结局"被反复判 followup
-    spoiler["pending_followup"] = bool(policy.needs_followup and spoiler.get("mode") not in {"mild", "full"})
+    if policy.needs_followup and memory_default == "full":
+        # Long-term full is a soft preference: it can skip the follow-up for an
+        # explicit spoiler-intent question, but the final answer must still warn.
+        spoiler["mode"] = "full"
+        spoiler["soft_warning"] = True
+        spoiler["pending_followup"] = False
+    else:
+        # 用户已显式授权(mild/full，含点 followup chips 后 api 设的 mode)就不再追问，避免"讲结局"被反复判 followup
+        spoiler["pending_followup"] = bool(policy.needs_followup and spoiler.get("mode") not in {"mild", "full"})
     if policy.needs_followup and policy.followup_question:
         spoiler["followup_question"] = policy.followup_question
     else:
+        spoiler.pop("followup_question", None)
+    if spoiler.get("soft_warning"):
         spoiler.pop("followup_question", None)
     st["spoiler"] = spoiler
 
@@ -222,6 +235,8 @@ def runtime_state_prompt(state: Any | None) -> str:
             parts.append(f"- spoiler_memory_default={spoiler.get('memory_default')}（仅作长期偏好提示；本轮仍按 spoiler_mode={mode} 执行）。")
         if progress is not None:
             parts.append(f"- progress_episode={progress}；分集讨论和剧情回答不得越过该集。")
+        if spoiler.get("soft_warning"):
+            parts.append("- spoiler_soft_warning=true；长期记忆允许剧透且本轮命中剧透意图，可以回答完整剧情，但开头必须明确标注“以下涉及剧透”。")
         if spoiler.get("pending_followup"):
             parts.append("- 本轮问题可能要求后续剧情/结局，但用户未授权剧透；先追问无剧透/轻微/完整剧透，不要直接回答剧透内容。")
         parts.append("- 调 get_episode_comments 时，如果涉及分集进度，必须传 max_episode_sort/progress 对应参数。")
@@ -241,7 +256,7 @@ def runtime_state_prompt(state: Any | None) -> str:
                 image_bits.append(f"{filename}({mime_type})={uri}")
         if image_bits:
             parts.append("- 本轮用户上传图片：" + "；".join(image_bits) + "。")
-            parts.append("- 若用户泛问“这是什么图/出处/哪里来的/可能是哪部作品”，优先调用 route_image_source 做多源路由；若明确是动画截图识番/第几集，再调用 identify_acgn_screenshot；读图中文字用 extract_visual_text。单图传 image_url，多图传 image_urls=[upload://...]；不要把 upload:// 当普通网页链接。")
+            parts.append("- 若用户问“这是什么图/出处/哪部动画/第几集/galgame CG/漫画页/轻小说封面”，统一优先调用 route_image_source 做多源路由；读图中文字用 extract_visual_text。identify_acgn_screenshot 只作旧版兼容/开发调试入口。单图传 image_url，多图传 image_urls=[upload://...]；不要把 upload:// 当普通网页链接。")
     return "\n".join(parts)
 
 
@@ -268,6 +283,8 @@ def runtime_state_events(state: Any | None) -> list[StateEvent]:
                 scope="spoiler",
                 snapshot={
                     "mode": spoiler.get("mode") or "none",
+                    "memory_default": spoiler.get("memory_default"),
+                    "soft_warning": bool(spoiler.get("soft_warning")),
                     "progress_episode": spoiler.get("progress_episode"),
                     "pending_followup": bool(spoiler.get("pending_followup")),
                     "followup_question": spoiler.get("followup_question"),

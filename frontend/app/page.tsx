@@ -44,6 +44,8 @@ type Msg = { role: "user" | "assistant"; content: string; attachments?: ImageAtt
 type EvidenceMap = Record<string, Record<string, any>[]>;
 type SpoilerState = {
   mode?: string;
+  memory_default?: string;
+  soft_warning?: boolean;
   progress_episode?: number;
   pending_followup?: boolean;
   followup_question?: string;
@@ -98,11 +100,11 @@ function evidenceSummary(evidence: EvidenceMap) {
     ["recommend_subjects", "推荐候选"],
     ["season_guide_brief", "季番导视"],
     ["review_subject", "评价矩阵"],
+    ["route_image_source", "图片来源路由"],
     ["identify_acgn_screenshot", "截图识别"],
     ["extract_visual_text", "OCR 结构化"],
     ["recommend_by_visual_style", "视觉推荐"],
     ["search_image_source", "图片溯源"],
-    ["route_image_source", "图片来源路由"],
     ["analyze_video_frames", "视频帧分析"],
     ["summarize_bilibili_video_content", "B站视频分析"],
     ["compare_user_taste", "同步率"],

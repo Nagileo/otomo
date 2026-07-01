@@ -92,6 +92,28 @@ def test_memory_spoiler_default_does_not_auto_escalate_turn():
     assert state.short_term["spoiler"]["memory_default"] == "full"
 
 
+def test_memory_full_softly_allows_explicit_spoiler_intent_with_warning():
+    from otomo.agent._common import update_spoiler_state_from_input
+
+    state = AgentState(short_term={"spoiler": {"mode": "none", "memory_default": "full"}})
+    update_spoiler_state_from_input(state, "这部最后结局怎么样？")
+    spoiler = state.short_term["spoiler"]
+    assert spoiler["mode"] == "full"
+    assert spoiler["soft_warning"] is True
+    assert spoiler["pending_followup"] is False
+
+
+def test_explicit_no_spoiler_overrides_memory_full():
+    from otomo.agent._common import update_spoiler_state_from_input
+
+    state = AgentState(short_term={"spoiler": {"mode": "none", "memory_default": "full"}})
+    update_spoiler_state_from_input(state, "我看到第 5 集了，后面别剧透")
+    spoiler = state.short_term["spoiler"]
+    assert spoiler["mode"] == "none"
+    assert spoiler["progress_episode"] == 5
+    assert not spoiler.get("soft_warning")
+
+
 def test_review_rating_signals_and_consensus():
     assert _bangumi_signal(8.2, 1000, None) == "strong"
     assert _score_signal(82, 1200, 100) == "strong"

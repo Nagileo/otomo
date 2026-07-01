@@ -255,8 +255,8 @@ async def _safe_call_vlm(image_url: str, question: str) -> str:
 class IdentifyScreenshotTool(Tool):
     name = "identify_acgn_screenshot"
     description = (
-        "用已配置的现成 VLM API 识别 ACGN 截图可能来自哪部作品/角色/集数线索，并回锚 Bangumi 候选。"
-        "识别结果只是弱入口，不是 canonical 事实。"
+        "旧版兼容/开发调试入口：识别 ACGN 动画截图可能来自哪部作品/角色/集数线索，并回锚 Bangumi 候选。"
+        "普通用户问图片来源时优先用 route_image_source；本工具结果只是弱入口，不是 canonical 事实。"
     )
     args_model = IdentifyScreenshotArgs
     result_model = IdentifyScreenshotResult

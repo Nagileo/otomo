@@ -7,6 +7,8 @@ type EvidenceMap = Record<string, AnyRecord[]>;
 type EvidenceMode = "user" | "dev";
 type SpoilerState = {
   mode?: string;
+  memory_default?: string;
+  soft_warning?: boolean;
   progress_episode?: number;
   pending_followup?: boolean;
   followup_question?: string;
@@ -1591,6 +1593,10 @@ export function SpoilerBadge({ spoiler }: { spoiler: SpoilerState | null }) {
   return (
     <div className="spoiler-state">
       <Badge tone={tone}>剧透: {mode}</Badge>
+      {spoiler.memory_default && spoiler.memory_default !== mode && (
+        <Badge tone="dim">长期默认 {spoiler.memory_default}</Badge>
+      )}
+      {spoiler.soft_warning && <Badge tone="warn">先标注剧透</Badge>}
       {spoiler.progress_episode !== undefined && spoiler.progress_episode !== null && (
         <Badge tone="dim">进度: 第 {spoiler.progress_episode} 集</Badge>
       )}
@@ -2078,11 +2084,11 @@ export function EvidencePanels({
   const dashboard = list(evidence.build_collection_dashboard);
   const explorer = list(evidence.explore_voice_network);
   const episodeRadar = list(evidence.episode_buzz_radar);
-  const screenshot = list(evidence.identify_acgn_screenshot);
+  const routeImage = list(evidence.route_image_source);
+  const screenshot = devMode || !routeImage.length ? list(evidence.identify_acgn_screenshot) : [];
   const visualText = list(evidence.extract_visual_text);
   const visualStyle = list(evidence.recommend_by_visual_style);
   const imageSource = list(evidence.search_image_source);
-  const routeImage = list(evidence.route_image_source);
   const biliVideo = list(evidence.summarize_bilibili_video_content);
   const videoFrames = list(evidence.analyze_video_frames);
   const claimChecks = devMode ? list(evidence.claim_check) : [];
@@ -2107,6 +2113,7 @@ export function EvidencePanels({
   ) return null;
   return (
     <div className={`evidence-stack ${devMode ? "dev-mode" : "user-mode"}`}>
+      {routeImage.map((data, i) => <RouteImageSourcePanel data={data} key={`route-image-${i}`} />)}
       {screenshot.map((data, i) => (
         <ScreenshotIdentifyPanel
           data={data}
@@ -2117,7 +2124,6 @@ export function EvidencePanels({
       ))}
       {visualText.map((data, i) => <VisualTextPanel data={data} key={`visual-text-${i}`} />)}
       {visualStyle.map((data, i) => <VisualStylePanel data={data} key={`visual-style-${i}`} />)}
-      {routeImage.map((data, i) => <RouteImageSourcePanel data={data} key={`route-image-${i}`} />)}
       {imageSource.map((data, i) => <ImageSourcePanel data={data} key={`image-source-${i}`} />)}
       {biliVideo.map((data, i) => <BiliVideoContentPanel data={data} key={`bili-video-${i}`} />)}
       {videoFrames.map((data, i) => <VideoFramePanel data={data} key={`video-frames-${i}`} />)}
