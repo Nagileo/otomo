@@ -8,6 +8,7 @@ import asyncio
 
 from pydantic import BaseModel, Field
 
+from otomo.agent._common import should_fallback_answer
 from otomo.agent.contracts import Tool, ToolResult
 from otomo.agent.registry import ToolRegistry
 from otomo.tools.bangumi import build_bangumi_tools
@@ -66,3 +67,10 @@ def test_bangumi_tools_build_and_schema():
     for t in tools:
         s = t.openai_schema()
         assert s["function"]["name"] == t.name
+
+
+def test_final_answer_fallback_rejects_single_marker_fragments():
+    assert should_fallback_answer("<")
+    assert should_fallback_answer(">")
+    assert should_fallback_answer(">|")
+    assert not should_fallback_answer("这是正常回答。")

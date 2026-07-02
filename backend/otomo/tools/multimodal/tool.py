@@ -946,6 +946,56 @@ def _merge_route_candidates(items: list[RoutedImageCandidate], limit: int) -> li
     return list(merged.values())[:limit]
 
 
+def _candidate_source_families(c: RoutedImageCandidate) -> set[str]:
+    text = " ".join([c.source, c.source_site, c.note, c.match_note, *c.evidence]).lower()
+    families: set[str] = set()
+    if "trace.moe" in text or c.source == "trace.moe":
+        families.add("trace.moe")
+    if "saucenao" in text or c.source == "saucenao":
+        families.add("saucenao")
+    if "vlm 视觉" in " ".join(c.evidence).lower() or c.source == "vlm_semantic":
+        families.add("vlm_semantic")
+    if "ocr" in text or c.source == "vlm_ocr":
+        families.add("ocr")
+    if c.source in {"google_books", "open_library", "mangadex"} or "metadata" in text:
+        families.add(c.source or "metadata")
+    if "serpapi" in text or c.source == "serpapi_google_reverse":
+        families.add("serpapi")
+    if not families and c.source:
+        families.add(c.source)
+    return families
+
+
+def _trace_similarity(c: RoutedImageCandidate) -> float:
+    for ev in c.evidence:
+        if not ev.startswith("trace.moe similarity="):
+            continue
+        try:
+            return float(ev.split("=", 1)[1])
+        except (TypeError, ValueError):
+            return 0.0
+    return 0.0
+
+
+def _route_decision(candidates: list[RoutedImageCandidate]) -> tuple[str, bool, float]:
+    if not candidates:
+        return "no_candidate", True, 0.0
+    top = candidates[0]
+    top_conf = top.confidence
+    second = candidates[1].confidence if len(candidates) > 1 else 0.0
+    same_route_gap = not (second > 0 and top_conf - second < 0.08 and candidates[1].route != top.route)
+    families = _candidate_source_families(top)
+
+    # ACGN reverse image search is noisy. Keep this as a candidate generator
+    # unless evidence is unusually strong or independently corroborated.
+    multi_source_supported = top.bangumi_id is not None and len(families) >= 2 and top_conf >= 0.78
+    very_high_trace = top.source == "trace.moe" and top.bangumi_id is not None and _trace_similarity(top) >= 0.97
+    accepted = same_route_gap and (multi_source_supported or very_high_trace)
+    if accepted:
+        return f"likely_{top.route}", False, top_conf
+    return "needs_user_confirmation", True, top_conf
+
+
 async def _anchor_route_candidate(
     client: BangumiClient,
     *,
@@ -1614,13 +1664,9 @@ class RouteImageSourceTool(Tool):
         candidates = [c for c in candidates if c.title or c.url or c.note]
         candidates = _merge_route_candidates(candidates, args.limit)
         candidates.sort(key=lambda x: x.confidence, reverse=True)
-        top = candidates[0].confidence if candidates else 0.0
-        second = candidates[1].confidence if len(candidates) > 1 else 0.0
-        top_route = candidates[0].route if candidates else "unknown"
-        needs_confirmation = top < 0.75 or (second > 0 and top - second < 0.08 and candidates[1].route != top_route)
-        decision = "no_candidate"
-        if candidates:
-            decision = "needs_user_confirmation" if needs_confirmation else f"likely_{top_route}"
+        decision, needs_confirmation, top = _route_decision(candidates)
+        if needs_confirmation and candidates:
+            caveats.append("图片反搜只给候选；当前证据不足以直接确认来源，请让用户从候选中确认或补充截图/上下文。")
         next_tools = []
         if any(c.route == "anime" for c in candidates):
             next_tools.extend(["get_subject", "get_subject_episodes"])

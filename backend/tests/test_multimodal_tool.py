@@ -119,6 +119,34 @@ def test_route_trace_moe_candidate_anchors_to_bangumi(monkeypatch):
     assert res.data.candidates[0].bangumi_id == 207195
     assert res.data.candidates[0].source == "trace.moe"
     assert res.data.candidates[0].timestamp == "01:23"
+    assert res.data.needs_user_confirmation
+    assert res.data.decision == "needs_user_confirmation"
+
+
+def test_route_trace_moe_very_high_similarity_can_be_likely(monkeypatch):
+    from otomo import config
+
+    monkeypatch.setattr(config.settings, "vlm_model", "")
+    monkeypatch.setattr(config.settings, "saucenao_api_key", "")
+
+    async def fake_trace(_image_url: str):
+        return [
+            {
+                "anilist": {"id": 98444, "title": {"native": "摇曳露营△", "romaji": "Yuru Camp"}},
+                "episode": 1,
+                "from": 83.2,
+                "similarity": 0.98,
+                "image": "https://trace.example/shot.jpg",
+            }
+        ]
+
+    monkeypatch.setattr(multimodal_tool, "_trace_moe_search", fake_trace)
+    tool = RouteImageSourceTool(FakeBangumiClient())
+    res = asyncio.run(tool.run(RouteImageSourceArgs(image_url="https://example.com/shot.jpg", routes=["anime"])))
+    assert res.ok
+    assert res.data
+    assert not res.data.needs_user_confirmation
+    assert res.data.decision == "likely_anime"
 
 
 def test_route_vlm_character_candidate_anchors_to_bangumi(monkeypatch):
@@ -313,6 +341,8 @@ def test_route_image_source_aggregates_trace_saucenao_ocr_and_book_sources(monke
     assert any(c.bangumi_id == 207195 for c in res.data.candidates)
     assert any(c.bangumi_id == 500001 for c in res.data.candidates)
     assert res.data.character_candidates[0].bangumi_id == 123
+    assert res.data.needs_user_confirmation
+    assert res.data.decision == "needs_user_confirmation"
     assert "get_subject" in res.data.next_tools
     assert res.data.navigation_links
 

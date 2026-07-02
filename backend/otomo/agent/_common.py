@@ -310,7 +310,7 @@ def strip_leak(text: str) -> str:
     return text[:idx].strip()
 
 
-_BAD_FINAL_ANSWERS = {"<", "<|", "<｜", "｜", "|"}
+_BAD_FINAL_ANSWERS = {"<", ">", "<|", ">|", "<｜", ">｜", "｜", "|"}
 
 
 def should_fallback_answer(answer: str, leaked: list[bool] | None = None) -> bool:
@@ -318,7 +318,7 @@ def should_fallback_answer(answer: str, leaked: list[bool] | None = None) -> boo
     s = answer.strip()
     if not s or s in _BAD_FINAL_ANSWERS:
         return True
-    if len(s) < 3 and any(ch in s for ch in "<｜|"):
+    if len(s) < 3 and any(ch in s for ch in "<>｜|"):
         return True
     return bool(leaked) and len(s) < 20
 
