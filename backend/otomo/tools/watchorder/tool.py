@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ...agent.contracts import Citation, Tool, ToolResult
 from ...memory import LongTermMemory
 from ...memory.consolidate import now_iso
-from ...memory.models import InboxItem, MemorySummary, WeeklyChannel, WeeklyDigestSubscription, memory_summary
+from ...memory.models import InboxItem, MemorySummary, WeeklyChannel, WeeklyDigestSubscription, WeeklyWebhookFormat, memory_summary
 from ...profile import compute_taste_profile
 from ..bangumi.client import SUBJECT_TYPE, BangumiClient
 from ..calendar.tool import AiringProgressArgs, AiringProgressItem, AiringProgressTool
@@ -111,6 +111,10 @@ class ConfigureWeeklyDigestArgs(BaseModel):
     )
     email: str = Field("", description="email 渠道收件地址")
     webhook_url: str = Field("", description="webhook 渠道 URL")
+    webhook_format: WeeklyWebhookFormat = Field(
+        "generic",
+        description="webhook 格式：generic=Otomo JSON，serverchan=Server酱 Turbo，telegram=Telegram sendMessage",
+    )
 
 
 class WeeklyDigestMemoryResult(BaseModel):
@@ -517,6 +521,7 @@ class ConfigureWeeklyDigestTool(Tool):
             channels=list(dict.fromkeys(args.channels or ["inbox"])),
             email=args.email.strip() or mem.weekly_digest_subscription.email,
             webhook_url=args.webhook_url.strip() or mem.weekly_digest_subscription.webhook_url,
+            webhook_format=args.webhook_format or mem.weekly_digest_subscription.webhook_format,
             last_delivery=mem.weekly_digest_subscription.last_delivery,
             last_run_key=mem.weekly_digest_subscription.last_run_key,
             updated_at=now_iso(),

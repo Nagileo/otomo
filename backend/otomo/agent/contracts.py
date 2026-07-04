@@ -101,6 +101,7 @@ class AgentState(BaseModel):
 
     messages: list[dict[str, Any]] = Field(default_factory=list)
     short_term: dict[str, Any] = Field(default_factory=dict)
+    evidence_pool: list[dict[str, Any]] = Field(default_factory=list)
     status: Literal["running", "awaiting_approval", "done", "failed"] = "running"
 
 
@@ -122,9 +123,12 @@ class ToolCallEvent(BaseModel):
 
 class ProgressEvent(BaseModel):
     type: Literal["progress"] = "progress"
-    stage: Literal["tool_start", "tool_done", "tool_error", "synthesis"] = "tool_start"
+    stage: Literal["tool_start", "tool_progress", "tool_done", "tool_error", "synthesis", "quota", "rate_limit"] = "tool_start"
     summary: str
     tool: str = ""
+    current: int | None = None
+    total: int | None = None
+    note: str = ""
 
 
 class ObservationEvent(BaseModel):

@@ -1,0 +1,63 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    env_file:
+      - ./backend/.env
+    environment:
+      WEEKLY_SCHEDULER_ENABLED: "false"
+      COOKIE_SECURE: "${COOKIE_SECURE:-false}"
+    volumes:
+      - ./cache:/app/cache
+      - ./logs:/app/logs
+      - ./models:/app/models
+    expose:
+      - "8000"
+    restart: unless-stopped
+
+  weekly:
+    build:
+      context: ./backend
+    command: ["python", "-m", "otomo.weekly_daemon"]
+    env_file:
+      - ./backend/.env
+    environment:
+      WEEKLY_SCHEDULER_ENABLED: "true"
+    volumes:
+      - ./cache:/app/cache
+      - ./logs:/app/logs
+      - ./models:/app/models
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+    environment:
+      NEXT_PUBLIC_BACKEND: "${NEXT_PUBLIC_BACKEND:-/api}"
+    expose:
+      - "3000"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    environment:
+      OTOMO_DOMAIN: "${OTOMO_DOMAIN:-localhost}"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - frontend
+      - backend
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:

@@ -31,6 +31,7 @@ function safeMarkdownUrl(url: string) {
 type TraceItem =
   | { kind: "call"; name: string; args: Record<string, unknown> }
   | { kind: "obs"; name: string; ok: boolean; summary: string }
+  | { kind: "progress"; tool: string; summary: string; current?: number; total?: number; note?: string }
   | { kind: "note"; text: string };
 type ImageAttachment = {
   uri: string;
@@ -246,6 +247,20 @@ function TracePanel({
               <summary className="name">→ {friendlyToolName(t.name)}</summary>
               <span className="args">{JSON.stringify(t.args)}</span>
             </details>
+          </div>
+        ) : t.kind === "progress" ? (
+          <div key={i} className="trace-item progress-trace">
+            <div className="trace-progress-head">
+              <span>{friendlyToolName(t.tool)}</span>
+              <small>{t.current != null && t.total ? `${t.current}/${t.total}` : ""}</small>
+            </div>
+            <div className="trace-progress-text">{t.summary}</div>
+            {t.total ? (
+              <div className="trace-progress-bar">
+                <span style={{ width: `${Math.min(100, Math.round(((t.current ?? 0) / t.total) * 100))}%` }} />
+              </div>
+            ) : null}
+            {t.note ? <div className="trace-progress-note">{t.note}</div> : null}
           </div>
         ) : t.kind === "note" ? (
           <div key={i} className="trace-item muted">
@@ -585,6 +600,46 @@ export default function Home() {
     }
   }
 
+  async function postPrepareWrite(subjectId: number, subjectName: string, collectionType = 1) {
+    try {
+      const res = await fetch(`${BACKEND}/actions/prepare-write`, {
+        method: "POST",
+        credentials: "include",
+        headers: csrfHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({
+          subject_id: subjectId,
+          subject_name: subjectName,
+          collection_type: collectionType,
+          reason: "从前端推荐/日历卡片一键加入想看",
+        }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok || !payload.ok) {
+        setTrace((t) => [...t, { kind: "obs", name: "prepare_write", ok: false, summary: payload.detail || payload.error || `HTTP ${res.status}` }]);
+        return;
+      }
+      const data = payload.data;
+      if (data?.memory) {
+        setMemory(data.memory);
+        setEvidence((prev) => ({
+          ...prev,
+          prepare_bangumi_write_action: [...(prev.prepare_bangumi_write_action ?? []), data],
+        }));
+      }
+      setTrace((t) => [
+        ...t,
+        {
+          kind: "obs",
+          name: "prepare_write",
+          ok: true,
+          summary: data?.action?.summary || `已准备写回：${subjectName}`,
+        },
+      ]);
+    } catch (e) {
+      setTrace((t) => [...t, { kind: "obs", name: "prepare_write", ok: false, summary: String(e) }]);
+    }
+  }
+
   async function postVisualFeedback(payload: Record<string, any>) {
     try {
       const res = await fetch(`${BACKEND}/feedback/visual`, {
@@ -651,7 +706,17 @@ export default function Home() {
         setTrace((t) => [...t, { kind: "call", name: ev.name, args: ev.args }]);
         break;
       case "progress":
-        setTrace((t) => [...t, { kind: "note", text: `⏱ ${ev.summary}` }]);
+        setTrace((t) => [
+          ...t,
+          {
+            kind: "progress",
+            tool: ev.tool || "",
+            summary: ev.summary,
+            current: ev.current ?? undefined,
+            total: ev.total ?? undefined,
+            note: ev.note || "",
+          },
+        ]);
         break;
       case "observation":
         setTrace((t) => [...t, { kind: "obs", name: ev.name, ok: ev.ok, summary: ev.summary }]);
@@ -895,6 +960,7 @@ export default function Home() {
             onConfirmAction={(id) => postAction("confirm", id)}
             onCancelAction={(id) => postAction("cancel", id)}
             onUndoAction={(id) => postAction("undo", id)}
+            onPrepareWrite={postPrepareWrite}
             onVisualFeedback={postVisualFeedback}
             onVisualCorrectionSearch={searchVisualCorrection}
           />

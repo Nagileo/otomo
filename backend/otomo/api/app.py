@@ -26,6 +26,7 @@ from ..memory.consolidate import now_iso
 from ..memory.models import VisualFeedbackItem, VisualFeedbackSignal, memory_summary
 from ..obs import append_visual_feedback, traced_stream
 from ..factory import build_registry
+from ..quota import RateLimiter, TokenQuotaStore, client_ip, estimate_tokens
 from ..session_store import SessionStore
 from ..uploads import upload_store
 from ..weekly import WeeklyDigestService
@@ -47,6 +48,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         asyncio.create_task(app.state.weekly_service.run_forever())
         if settings.weekly_scheduler_enabled else None
     )
+    app.state.rate_limiter = RateLimiter()
+    app.state.quota_store = TokenQuotaStore()
     app.state.sessions: dict[str, AgentState] = {}  # 短期记忆：session_id -> 会话状态
     try:
         yield
@@ -114,6 +117,14 @@ class ActionRequest(BaseModel):
 class UndoActionRequest(BaseModel):
     action_id: str | None = None
     username: str | None = None
+    auth_session_id: str | None = None
+
+
+class PrepareWriteRequest(BaseModel):
+    subject_id: int = Field(..., ge=1)
+    subject_name: str = ""
+    collection_type: int = Field(1, ge=1, le=5)
+    reason: str = "前端卡片一键写回"
     auth_session_id: str | None = None
 
 
@@ -191,6 +202,32 @@ def _require_csrf(request: Request, auth_session_id: str) -> None:
     cookie_value = request.cookies.get(settings.csrf_cookie_name, "")
     if not header_value or header_value != session.csrf_token or cookie_value != session.csrf_token:
         raise HTTPException(status_code=403, detail="CSRF 校验失败，请刷新页面")
+
+
+def _authenticated_identity(auth_session_id: str):
+    identity = app.state.auth.identity(auth_session_id)
+    if not identity.authenticated:
+        raise HTTPException(status_code=401, detail="需要先绑定 Bangumi 账号")
+    return identity
+
+
+def _quota_key(auth_session_id: str, request: Request) -> str:
+    identity = app.state.auth.identity(auth_session_id)
+    if identity.authenticated and identity.username:
+        return f"user:{identity.username}"
+    return f"anon:{auth_session_id or client_ip(request)}"
+
+
+def _check_chat_limits(request: Request, auth_session_id: str) -> None:
+    limiter: RateLimiter = app.state.rate_limiter
+    ip = client_ip(request)
+    limiter.check(f"chat:ip:{ip}:minute", limit=settings.rate_limit_chat_per_minute, window_seconds=60)
+    limiter.check(
+        f"chat:session:{auth_session_id}:hour",
+        limit=settings.rate_limit_chat_per_hour,
+        window_seconds=3600,
+    )
+    limiter.cleanup()
 
 
 @app.get("/health")
@@ -298,6 +335,12 @@ async def bangumi_logout(req: dict[str, str], request: Request, response: Respon
 async def upload_image(req: UploadImageRequest, request: Request, response: Response) -> dict[str, Any]:
     session = _ensure_auth_session(request, response)
     _require_csrf(request, session.auth_session_id)
+    app.state.rate_limiter.check(
+        f"upload:ip:{client_ip(request)}:minute",
+        limit=settings.rate_limit_uploads_per_minute,
+        window_seconds=60,
+    )
+    _authenticated_identity(session.auth_session_id)
     try:
         image = upload_store.save_data_url(req.data_url, req.filename)
     except ValueError as e:
@@ -461,6 +504,26 @@ async def undo_action(req: UndoActionRequest, request: Request, response: Respon
     )
 
 
+@app.post("/actions/prepare-write")
+async def prepare_write_action(req: PrepareWriteRequest, request: Request, response: Response) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response, req.auth_session_id)
+    _require_csrf(request, session.auth_session_id)
+    _authenticated_identity(session.auth_session_id)
+    return await _dispatch_action(
+        app,
+        "prepare_bangumi_write_action",
+        {
+            "operation": "set_collection",
+            "subject_id": req.subject_id,
+            "subject_name": req.subject_name,
+            "collection_type": req.collection_type,
+            "reason": req.reason,
+        },
+        allow_write=False,
+        auth_session_id=session.auth_session_id,
+    )
+
+
 @app.post("/feedback/visual")
 async def visual_feedback(req: VisualFeedbackRequest, request: Request, response: Response) -> dict[str, Any]:
     session = _ensure_auth_session(request, response, req.auth_session_id)
@@ -559,12 +622,29 @@ async def _attach_memory_state(app: FastAPI, state: AgentState | None, client: B
 async def chat(req: ChatRequest, request: Request):
     session = app.state.auth.get_or_create_session(_auth_session_id(request, req.auth_session_id) or None)
     _require_csrf(request, session.auth_session_id)
+    _check_chat_limits(request, session.auth_session_id)
+    quota_key = _quota_key(session.auth_session_id, request)
+    app.state.quota_store.check(quota_key)
+    authenticated = app.state.auth.identity(session.auth_session_id).authenticated
+    if req.attachments and not authenticated:
+        raise HTTPException(status_code=401, detail="多模态上传需要先绑定 Bangumi 账号")
     client = await _request_client(app, session.auth_session_id)
     registry = build_registry(client, app.state.moegirl, app.state.ltm)
     runner = _runner_from_registry(req.runner, registry)
     chat_session_id = req.session_id or uuid.uuid4().hex
     # 短期记忆：有 session_id 就复用既有状态，否则新建
     state = _session_state(app, chat_session_id, session.auth_session_id)
+    if not authenticated and settings.anonymous_session_turn_limit > 0:
+        try:
+            message_count = app.state.session_store.message_count(chat_session_id, session.auth_session_id)
+        except FileNotFoundError:
+            message_count = 0
+        if message_count >= settings.anonymous_session_turn_limit * 2:
+            await client.aclose()
+            raise HTTPException(
+                status_code=403,
+                detail=f"未登录会话最多 {settings.anonymous_session_turn_limit} 轮；请绑定 Bangumi 账号后继续",
+            )
     if state is not None and (req.spoiler_mode or req.progress_episode is not None):
         current = dict(state.short_term.get("spoiler") or {})
         if req.spoiler_mode:
@@ -640,6 +720,10 @@ async def chat(req: ChatRequest, request: Request):
                     evidence=evidence,
                     sources=sources,
                 )
+                try:
+                    app.state.quota_store.record(quota_key, estimate_tokens(req.message, final_answer))
+                except Exception:  # noqa: BLE001 - quota 落盘失败不能吞掉已完成回答
+                    pass
             app.state.session_store.save_state(chat_session_id, session.auth_session_id, state)
             await client.aclose()
 

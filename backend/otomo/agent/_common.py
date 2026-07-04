@@ -8,6 +8,8 @@
 """
 from __future__ import annotations
 
+import asyncio
+import contextvars
 import json
 from typing import Any, AsyncIterator
 
@@ -32,6 +34,40 @@ CORRECT_FC = (
     "若信息已足够，请直接给出最终自然语言答案。"
 )
 _RUNTIME_STATE_MARKER = "[[OTOMO_RUNTIME_STATE]]"
+_TOOL_PROGRESS_QUEUE: contextvars.ContextVar[asyncio.Queue[ProgressEvent] | None] = contextvars.ContextVar(
+    "otomo_tool_progress_queue",
+    default=None,
+)
+
+
+async def emit_tool_progress(
+    *,
+    tool: str,
+    summary: str,
+    current: int | None = None,
+    total: int | None = None,
+    note: str = "",
+    stage: str = "tool_progress",
+) -> None:
+    """Emit fine-grained progress from inside a long-running tool.
+
+    Tools can import this helper without changing the Tool.run signature. If a
+    tool is executed outside an agent stream, the queue is absent and this is a
+    no-op.
+    """
+    queue = _TOOL_PROGRESS_QUEUE.get()
+    if queue is None:
+        return
+    await queue.put(
+        ProgressEvent(
+            stage=stage,  # type: ignore[arg-type]
+            tool=tool,
+            summary=summary,
+            current=current,
+            total=total,
+            note=note,
+        )
+    )
 
 
 def _legacy_runtime_state_prompt(state: Any | None) -> str:
@@ -1165,7 +1201,21 @@ async def step_tools(
         call_args = safe_json(tc.function.arguments)
         yield ToolCallEvent(name=tc.function.name, args=call_args)
         yield ProgressEvent(stage="tool_start", tool=tc.function.name, summary=f"开始执行 {tc.function.name}")
-        result = await registry.dispatch(tc.function.name, tc.function.arguments)
+        progress_queue: asyncio.Queue[ProgressEvent] = asyncio.Queue()
+        token = _TOOL_PROGRESS_QUEUE.set(progress_queue)
+        task = asyncio.create_task(registry.dispatch(tc.function.name, tc.function.arguments))
+        try:
+            while not task.done():
+                try:
+                    ev = await asyncio.wait_for(progress_queue.get(), timeout=0.12)
+                    yield ev
+                except asyncio.TimeoutError:
+                    pass
+            result = await task
+            while not progress_queue.empty():
+                yield progress_queue.get_nowait()
+        finally:
+            _TOOL_PROGRESS_QUEUE.reset(token)
         for c in result.sources:
             if c.url not in seen_urls:
                 seen_urls.add(c.url)

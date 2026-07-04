@@ -15,6 +15,7 @@ DecisionKind = Literal["accept", "reject", "defer", "write", "undo", "plan", "no
 PlanStatus = Literal["wishlist", "watching", "backlog", "on_hold", "revive", "completed", "rejected"]
 InboxKind = Literal["weekly_digest", "system"]
 WeeklyChannel = Literal["inbox", "webhook", "email"]
+WeeklyWebhookFormat = Literal["generic", "serverchan", "telegram"]
 AspectKey = Literal[
     "story", "character", "pacing", "visual", "music",
     "direction", "text", "system", "voice", "general",
@@ -130,6 +131,7 @@ class WeeklyDigestSubscription(BaseModel):
     channels: list[WeeklyChannel] = Field(default_factory=lambda: ["inbox"])
     email: str = ""
     webhook_url: str = ""
+    webhook_format: WeeklyWebhookFormat = "generic"
     last_delivery: list[dict] = Field(default_factory=list)
     last_run_key: str = ""
     updated_at: str = ""

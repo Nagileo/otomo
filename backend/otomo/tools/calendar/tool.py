@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ...agent._common import emit_tool_progress
 from ...agent.contracts import Citation, Tool, ToolResult
 from .._concurrency import gather_limited
 from ..bangumi.client import SUBJECT_TYPE, BangumiClient
@@ -249,7 +250,10 @@ class BroadcastCalendarTool(Tool):
         today = _today()
         today_weekday = today.weekday() + 1
         username = await _username(self.client, args.username) if args.only_mine else (args.username or "")
+        await emit_tool_progress(tool=self.name, summary="读取 Bangumi 当季放送表", current=1, total=3)
         coll = await _collection_map(self.client, username, include_wishlist=args.include_wishlist) if args.only_mine else {}
+        if args.only_mine:
+            await emit_tool_progress(tool=self.name, summary=f"对齐 @{username} 的在看/想看收藏", current=2, total=3)
         raw_days = await self.client.get_calendar()
         days: list[BroadcastCalendarDay] = []
         for raw_day in raw_days or []:
@@ -293,6 +297,7 @@ class BroadcastCalendarTool(Tool):
             Citation(title=item.name_cn or item.name, url=item.url, source="bangumi", image=item.image)
             for day in days for item in day.items[:4]
         ][:8]
+        await emit_tool_progress(tool=self.name, summary=f"放送表完成：{count} 部", current=3, total=3)
         return ToolResult(ok=True, data=data, sources=sources)
 
 
@@ -377,15 +382,18 @@ class AiringProgressTool(Tool):
         username = await _username(self.client, args.username)
         if not username:
             return ToolResult(ok=False, error="需要 username 或有效 Bangumi 登录态")
+        await emit_tool_progress(tool=self.name, summary=f"读取 @{username} 在看列表", current=1, total=4)
         rows = await self.client.get_all_user_collections(
             username, SUBJECT_TYPE["anime"], collection_type=3, max_items=200
         )
         jobs = [self._progress_for(row, "watching") for row in rows[: args.limit]]
         if args.include_wishlist:
+            await emit_tool_progress(tool=self.name, summary="读取想看列表并补本季开播候选", current=2, total=4)
             wish = await self.client.get_all_user_collections(
                 username, SUBJECT_TYPE["anime"], collection_type=1, max_items=120
             )
             jobs.extend(self._progress_for(row, "wishlist") for row in wish[: max(0, args.limit - len(jobs))])
+        await emit_tool_progress(tool=self.name, summary=f"并发计算 {len(jobs)} 部作品的已播进度", current=3, total=4)
         results = await gather_limited(jobs, host="bangumi")
         items = [x for x in results if isinstance(x, AiringProgressItem)]
         items.sort(key=lambda x: (-x.behind, x.next_air_date or "9999-99-99", -float(x.score or 0.0)))
@@ -400,6 +408,7 @@ class AiringProgressTool(Tool):
                 "my_ep 取用户收藏 ep_status；若用户没有更新 Bangumi 进度，会显示偏低。",
             ],
         )
+        await emit_tool_progress(tool=self.name, summary=f"追番进度完成：{len(items)} 部，落后 {data.behind_count} 部", current=4, total=4)
         return ToolResult(
             ok=True,
             data=data,

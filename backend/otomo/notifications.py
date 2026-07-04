@@ -11,6 +11,7 @@ import asyncio
 import smtplib
 from email.message import EmailMessage
 from typing import Any
+from urllib.parse import parse_qs, urlparse, urlunparse
 
 import httpx
 
@@ -27,7 +28,10 @@ def digest_text(item: InboxItem) -> str:
         lines.append(f"\n## {title}")
         for row in (section.get("items") or [])[:8]:
             name = row.get("name") or row.get("title") or row.get("subject_name") or "未命名条目"
-            reason = row.get("reason") or row.get("note") or ""
+            why = row.get("why") or row.get("reasons") or []
+            reason = row.get("reason") or row.get("note") or row.get("action") or ""
+            if not reason and why:
+                reason = "；".join(str(x) for x in why[:2])
             lines.append(f"- {name}" + (f"：{reason}" if reason else ""))
         for note in (section.get("notes") or [])[:3]:
             lines.append(f"  - {note}")
@@ -38,25 +42,56 @@ def digest_text(item: InboxItem) -> str:
     return "\n".join(lines).strip()
 
 
+def _telegram_endpoint_and_payload(url: str, text: str) -> tuple[str, dict[str, Any]]:
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query)
+    chat_id = (query.get("chat_id") or [""])[0]
+    endpoint = urlunparse(parsed._replace(query=""))
+    payload: dict[str, Any] = {"text": text[:3900], "disable_web_page_preview": True}
+    if chat_id:
+        payload["chat_id"] = chat_id
+    return endpoint, payload
+
+
 async def _send_webhook(username: str, sub: WeeklyDigestSubscription, item: InboxItem) -> dict[str, Any]:
     if not sub.webhook_url:
         return {"channel": "webhook", "ok": False, "error": "webhook_url empty", "ts": now_iso()}
-    payload = {
-        "source": "otomo",
-        "kind": item.kind,
-        "username": username,
-        "title": item.title,
-        "text": digest_text(item),
-        "payload": item.payload,
-        "created_at": item.created_at,
-    }
+    text = digest_text(item)
+    fmt = sub.webhook_format or "generic"
     try:
         async with httpx.AsyncClient(timeout=settings.weekly_webhook_timeout) as client:
-            resp = await client.post(sub.webhook_url, json=payload)
+            if fmt == "serverchan":
+                resp = await client.post(sub.webhook_url, data={"title": item.title, "desp": text})
+            elif fmt == "telegram":
+                endpoint, payload = _telegram_endpoint_and_payload(sub.webhook_url, text)
+                resp = await client.post(endpoint, json=payload)
+            else:
+                payload = {
+                    "source": "otomo",
+                    "kind": item.kind,
+                    "username": username,
+                    "title": item.title,
+                    "text": text,
+                    "payload": item.payload,
+                    "created_at": item.created_at,
+                }
+                resp = await client.post(sub.webhook_url, json=payload)
             resp.raise_for_status()
-        return {"channel": "webhook", "ok": True, "status_code": resp.status_code, "ts": now_iso()}
+        return {
+            "channel": "webhook",
+            "format": fmt,
+            "ok": True,
+            "status_code": resp.status_code,
+            "ts": now_iso(),
+        }
     except Exception as e:  # noqa: BLE001
-        return {"channel": "webhook", "ok": False, "error": f"{type(e).__name__}: {str(e)[:180]}", "ts": now_iso()}
+        return {
+            "channel": "webhook",
+            "format": fmt,
+            "ok": False,
+            "error": f"{type(e).__name__}: {str(e)[:180]}",
+            "ts": now_iso(),
+        }
 
 
 def _send_email_sync(username: str, sub: WeeklyDigestSubscription, item: InboxItem) -> dict[str, Any]:

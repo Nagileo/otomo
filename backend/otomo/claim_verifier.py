@@ -28,6 +28,7 @@ class ClaimEvidence(BaseModel):
     confidence: float = Field(0.0, ge=0.0, le=1.0)
     text: str = ""
     snippet: str = ""
+    evidence_turn: int | None = None
 
 
 class VerifiedClaim(BaseModel):
@@ -57,6 +58,7 @@ class EvidenceDoc(BaseModel):
     role: Literal["canonical", "discourse", "preference", "web", "unknown"] = "unknown"
     text: str
     facts: dict[str, Any] = Field(default_factory=dict)
+    turn: int | None = None
 
 
 _SOURCE_TERMS = ("Bangumi", "批判空间", "ErogameScape", "VNDB", "AniList", "MusicBrainz", "B站", "yuc", "萌娘", "维基")
@@ -131,7 +133,20 @@ def observation_documents(observations: list[dict[str, Any]]) -> list[EvidenceDo
                 aliases = ent.get("aliases") or []
                 if isinstance(aliases, list):
                     chunks.extend(str(x) for x in aliases[:8])
-        docs.append(EvidenceDoc(source=name, role=_source_role(name), text="\n".join(chunks), facts=facts))
+        turn = obs.get("turn")
+        try:
+            turn_value = int(turn) if turn is not None else None
+        except (TypeError, ValueError):
+            turn_value = None
+        docs.append(
+            EvidenceDoc(
+                source=name,
+                role=_source_role(name),
+                text="\n".join(chunks),
+                facts=facts,
+                turn=turn_value,
+            )
+        )
     return docs
 
 
@@ -267,6 +282,7 @@ def _evidence_for(claim: str, kind: ClaimKind, docs: list[EvidenceDoc]) -> list[
                 confidence=confidence,
                 text="命中：" + "、".join(hits[:5]),
                 snippet=_snippet(doc.text, hits),
+                evidence_turn=doc.turn,
             )
         )
     evidence.sort(key=lambda x: x.confidence, reverse=True)
@@ -358,5 +374,6 @@ def verify_answer_claims(answer: str, observations: list[dict[str, Any]]) -> Cla
         caveats=[
             "claim verifier v4 只对强 canonical 硬事实做自动修正；剧情/口碑/偏好不触发答案回退。",
             "只有本轮 canonical 证据与断言冲突时才 needs_revision；未命中证据只是未确认。",
+            "多轮会话会合并最近证据池；历史证据命中会在 evidence_turn 标出查询轮次。",
         ],
     )

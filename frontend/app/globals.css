@@ -303,6 +303,38 @@ button:disabled { opacity: .5; cursor: default; }
 .progress-title strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 .progress-bar { height: 6px; border-radius: 999px; overflow: hidden; background: #20242e; }
 .progress-bar span { display: block; height: 100%; background: var(--accent); border-radius: inherit; }
+.progress-trace {
+  display: grid;
+  gap: 6px;
+  border-left: 2px solid rgba(122, 162, 247, .45);
+  padding-left: 10px;
+}
+.trace-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--text);
+  font-size: 12px;
+}
+.trace-progress-head small,
+.trace-progress-note {
+  color: var(--dim);
+  font-size: 11px;
+}
+.trace-progress-text { color: #cbd0dc; font-size: 12px; line-height: 1.45; }
+.trace-progress-bar {
+  height: 5px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: #0c0e13;
+  border: 1px solid var(--border);
+}
+.trace-progress-bar span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
 .rating-source, .metric-label, .card-meta, .aspect-meta, .shared-meta, .digest-title {
   color: var(--dim); font-size: 11px; line-height: 1.4;
 }
@@ -382,6 +414,14 @@ a.card-title:hover { color: var(--accent); }
   margin-left: 8px; padding: 2px 8px; border-radius: 999px; font-size: 11px;
   background: transparent; color: var(--accent); border: 1px solid rgba(122, 162, 247, .35);
 }
+.card-action {
+  margin-left: 0;
+  height: 22px;
+  padding: 0 8px;
+  align-self: center;
+  cursor: pointer;
+}
+.card-action:hover { background: rgba(122, 162, 247, .12); }
 .claim-top { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
 .matrix-item {
   display: grid; grid-template-columns: auto 1fr; gap: 6px 8px; align-items: center;

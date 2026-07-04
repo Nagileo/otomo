@@ -288,7 +288,9 @@ function TasteAffinityPanel({ data }: { data: AnyRecord }) {
   );
 }
 
-function SeasonGuidePanel({ data }: { data: AnyRecord }) {
+type PrepareWriteHandler = (subjectId: number, subjectName: string, collectionType?: number) => void;
+
+function SeasonGuidePanel({ data, onPrepareWrite }: { data: AnyRecord; onPrepareWrite?: PrepareWriteHandler }) {
   const items = list(data.items);
   return (
     <Panel
@@ -323,6 +325,19 @@ function SeasonGuidePanel({ data }: { data: AnyRecord }) {
                 </div>
               )}
               <div className="link-row">
+                {item.subject_id && onPrepareWrite && (
+                  <button
+                    type="button"
+                    className="inline-action card-action"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      onPrepareWrite(Number(item.subject_id), text(item.title), 1);
+                    }}
+                  >
+                    想看
+                  </button>
+                )}
                 {item.official_url && <span>官网</span>}
                 {item.pv_url && <span>PV</span>}
                 {list(item.guide_videos).slice(0, 2).map((v) => <span key={v.url}>{text(v.up_name)}</span>)}
@@ -353,7 +368,7 @@ function SeasonGuidePanel({ data }: { data: AnyRecord }) {
   );
 }
 
-function BroadcastCalendarPanel({ data }: { data: AnyRecord }) {
+function BroadcastCalendarPanel({ data, onPrepareWrite }: { data: AnyRecord; onPrepareWrite?: PrepareWriteHandler }) {
   const days = list(data.days);
   return (
     <Panel
@@ -386,6 +401,19 @@ function BroadcastCalendarPanel({ data }: { data: AnyRecord }) {
                           <div className="evidence-row tight">
                             {item.my_collection_label && <Badge tone={item.my_collection === "watching" ? "good" : "dim"}>{text(item.my_collection_label)}</Badge>}
                             {item.ep_status != null && <Badge tone="dim">进度 {item.ep_status}</Badge>}
+                            {item.id && onPrepareWrite && (
+                              <button
+                                type="button"
+                                className="inline-action card-action"
+                                onClick={(e) => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  onPrepareWrite(Number(item.id), text(item.name_cn || item.name), 1);
+                                }}
+                              >
+                                想看
+                              </button>
+                            )}
                           </div>
                         </div>
                       </a>
@@ -494,7 +522,15 @@ function AspectProfilePanel({ data }: { data: AnyRecord }) {
   );
 }
 
-function RecommendPanel({ data, onCritique }: { data: AnyRecord; onCritique?: (q: string) => void }) {
+function RecommendPanel({
+  data,
+  onCritique,
+  onPrepareWrite,
+}: {
+  data: AnyRecord;
+  onCritique?: (q: string) => void;
+  onPrepareWrite?: PrepareWriteHandler;
+}) {
   const items = list(data.items);
   const aspectProfile = data.aspect_profile_summary || {};
   const mediaStrategy = data.media_strategy || {};
@@ -537,6 +573,19 @@ function RecommendPanel({ data, onCritique }: { data: AnyRecord; onCritique?: (q
                 {list<string>(item.quality_badges).map((tag) => <Badge key={tag} tone="warn">{tag}</Badge>)}
                 {list<string>(item.aspect_matches).map((tag) => <Badge key={tag} tone="good">{tag}</Badge>)}
                 {list<string>(item.aspect_warnings).map((tag) => <Badge key={tag} tone="warn">{tag}</Badge>)}
+                {item.id && onPrepareWrite && (
+                  <button
+                    type="button"
+                    className="inline-action card-action"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      onPrepareWrite(Number(item.id), text(item.name), 1);
+                    }}
+                  >
+                    想看
+                  </button>
+                )}
               </div>
               {list<string>(item.media_notes).length > 0 && (
                 <div className="compact-list inline">
@@ -2117,6 +2166,7 @@ export function EvidencePanels({
   onConfirmAction,
   onCancelAction,
   onUndoAction,
+  onPrepareWrite,
   onVisualFeedback,
   onVisualCorrectionSearch,
 }: {
@@ -2126,6 +2176,7 @@ export function EvidencePanels({
   onConfirmAction?: (id: string) => void;
   onCancelAction?: (id: string) => void;
   onUndoAction?: (id: string) => void;
+  onPrepareWrite?: PrepareWriteHandler;
   onVisualFeedback?: (payload: AnyRecord) => void;
   onVisualCorrectionSearch?: (query: string, subjectType?: string) => Promise<AnyRecord[]>;
 }) {
@@ -2184,10 +2235,10 @@ export function EvidencePanels({
       {imageSource.map((data, i) => <ImageSourcePanel data={data} key={`image-source-${i}`} />)}
       {biliVideo.map((data, i) => <BiliVideoContentPanel data={data} key={`bili-video-${i}`} />)}
       {videoFrames.map((data, i) => <VideoFramePanel data={data} key={`video-frames-${i}`} />)}
-      {broadcastCalendar.map((data, i) => <BroadcastCalendarPanel data={data} key={`broadcast-${i}`} />)}
+      {broadcastCalendar.map((data, i) => <BroadcastCalendarPanel data={data} onPrepareWrite={onPrepareWrite} key={`broadcast-${i}`} />)}
       {airingProgress.map((data, i) => <AiringProgressPanel data={data} key={`airing-progress-${i}`} />)}
-      {recommend.map((data, i) => <RecommendPanel data={data} onCritique={onCritique} key={`recommend-${i}`} />)}
-      {season.map((data, i) => <SeasonGuidePanel data={data} key={`season-${i}`} />)}
+      {recommend.map((data, i) => <RecommendPanel data={data} onCritique={onCritique} onPrepareWrite={onPrepareWrite} key={`recommend-${i}`} />)}
+      {season.map((data, i) => <SeasonGuidePanel data={data} onPrepareWrite={onPrepareWrite} key={`season-${i}`} />)}
       {review.map((data, i) => <ReviewEvidencePanel data={data} key={`review-${i}`} />)}
       {taste.map((data, i) => <TasteAffinityPanel data={data} key={`taste-${i}`} />)}
       {explorer.map((data, i) => <ExplorerPanel data={data} key={`explorer-${i}`} />)}

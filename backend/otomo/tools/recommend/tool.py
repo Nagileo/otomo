@@ -20,6 +20,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ...agent._common import emit_tool_progress
 from ...agent.contracts import Citation, Tool, ToolResult
 from ...config import settings
 from ...memory import LongTermMemory
@@ -589,6 +590,7 @@ class RecommendTool(Tool):
 
     async def run(self, args: RecommendArgs) -> ToolResult[RecommendResult]:
         stype = SUBJECT_TYPE[args.subject_type]
+        await emit_tool_progress(tool=self.name, summary="解析推荐目标与用户身份", current=1, total=6)
         if args.username:
             username = args.username
         else:
@@ -602,6 +604,7 @@ class RecommendTool(Tool):
             username = me.get("username") or str(me.get("id"))
 
         excluded = {int(x) for x in args.exclude_ids if x}
+        await emit_tool_progress(tool=self.name, summary=f"拉取 @{username} 的 {args.subject_type} 收藏", current=2, total=6)
         items = await self.client.get_all_user_collections(username, stype, None, max_items=_MAX_COLLECT)
         seen = {it["subject"]["id"] for it in items if it.get("subject", {}).get("id")} | excluded
         watched = [it for it in items if it.get("type") == 2]
@@ -631,6 +634,13 @@ class RecommendTool(Tool):
             recall_tags = list(dict.fromkeys(recall_tags + _COLD_START_TAGS.get(args.subject_type, [])))[:_MAX_RECALL_TAGS]
 
         cand: dict[int, dict] = {}
+        await emit_tool_progress(
+            tool=self.name,
+            summary="多路召回候选",
+            current=3,
+            total=6,
+            note="标签/外部排行/图谱/协同/跨媒体",
+        )
         await self._tag_recall(cand, stype, recall_tags, user_tags, maxw, mood, seen, args.niche)
         mapping_warnings: list[str] = []
         if args.subject_type == "game" and args.use_external_recall:
@@ -661,6 +671,12 @@ class RecommendTool(Tool):
                         )
                     )
             await self._cross_media_recall(cand, stype, source_items, seen)
+        await emit_tool_progress(
+            tool=self.name,
+            summary=f"召回完成：{len(cand)} 个候选，开始补评分与封面",
+            current=4,
+            total=6,
+        )
 
         def affinity(c: dict) -> float:
             return c["weight"] / maxw  # ≈ 加权命中标签数
@@ -811,6 +827,12 @@ class RecommendTool(Tool):
             ),
         )[:40]
         await self._enrich(prelim)
+        await emit_tool_progress(
+            tool=self.name,
+            summary=f"证据补全完成：{len(prelim)} 个候选，开始重排",
+            current=5,
+            total=6,
+        )
 
         def score(c: dict) -> float:
             if args.niche:  # 挖冷门：协同偏热门，权重压低
@@ -893,9 +915,17 @@ class RecommendTool(Tool):
                 break
 
         if args.enrich_evidence:
+            await emit_tool_progress(
+                tool=self.name,
+                summary=f"融合评价证据：{len(out)} 个候选",
+                current=5,
+                total=6,
+            )
             await self._enrich_review_evidence(out, aspect_profile, args.subject_type)
             out.sort(key=lambda x: -x.score)
             out = out[: args.limit]
+
+        await emit_tool_progress(tool=self.name, summary=f"推荐完成：输出 {len(out)} 个候选", current=6, total=6)
 
         mode = "niche" if args.niche else ("explore" if args.explore else "normal")
         notes: list[str] = []

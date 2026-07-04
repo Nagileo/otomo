@@ -55,6 +55,9 @@ packages = ["otomo"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "external: tests that require live third-party services, credentials, or network-dependent APIs",
+]
 
 [tool.ruff]
 line-length = 100

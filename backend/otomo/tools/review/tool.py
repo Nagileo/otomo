@@ -9,6 +9,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ...agent._common import emit_tool_progress
 from ...agent.contracts import Citation, Tool, ToolResult
 from ..anilist.tool import AniListArgs, SearchAniListTool
 from ..bangumi.client import BangumiClient
@@ -436,6 +437,7 @@ class ReviewSubjectTool(Tool):
         self.musicbrainz = SearchMusicBrainzTool()
 
     async def run(self, args: ReviewSubjectArgs) -> ToolResult[ReviewFusionResult]:
+        await emit_tool_progress(tool=self.name, summary="读取 Bangumi 条目详情", current=1, total=4)
         raw = await self.client.get_subject(args.subject_id)
         detail = SubjectDetail.from_raw(raw)
         title = args.title_hint or detail.name_cn or detail.name
@@ -462,6 +464,7 @@ class ReviewSubjectTool(Tool):
 
         comments: list[CommentEvidence] = []
         if args.include_comments:
+            await emit_tool_progress(tool=self.name, summary="处理短评与剧透边界", current=2, total=4)
             if args.spoiler_level == "none":
                 comments.append(
                     CommentEvidence(
@@ -489,6 +492,7 @@ class ReviewSubjectTool(Tool):
                         SourceAvailability(source="Bangumi 短评", role="话语/口碑样本", status="used")
                     )
 
+        await emit_tool_progress(tool=self.name, summary="补充外部评价源", current=3, total=4)
         if detail.type == 2:  # anime
             anilist = await self.anilist.run(AniListArgs(keyword=detail.name or title, type="anime", limit=3))
             if anilist.ok and anilist.data and anilist.data.results:
@@ -604,6 +608,7 @@ class ReviewSubjectTool(Tool):
         aspect_opinions = _extract_aspect_opinions(comments)
         aspect_summary = _build_aspect_summary(aspect_opinions)
 
+        await emit_tool_progress(tool=self.name, summary="融合评价矩阵与共识", current=4, total=4)
         result = ReviewFusionResult(
             subject_id=detail.id,
             title=title,

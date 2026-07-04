@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 from typing import Any, AsyncIterator
 
-from .agent.contracts import ClaimCheckEvent, FinalEvent
+from .agent.contracts import AgentState, ClaimCheckEvent, FinalEvent
 from .claim_verifier import verify_answer_claims
 from .config import settings
 
@@ -29,6 +29,7 @@ def _summarize_event(ev: Any) -> dict:
         d["name"], d["args"] = ev.name, ev.args
     elif t == "progress":
         d["stage"], d["tool"], d["summary"] = ev.stage, ev.tool, ev.summary
+        d["current"], d["total"] = ev.current, ev.total
     elif t == "observation":
         d["name"], d["ok"], d["entities"] = ev.name, ev.ok, len(ev.entities)
     elif t == "claim_check":
@@ -109,7 +110,40 @@ def _obs_for_verifier(ev: Any) -> dict[str, Any]:
     }
 
 
-_CLAIM_REVISION_PROMPT = """你是 Otomo 的事实修正器。请只根据「本轮 observation」和「claim verifier 修正建议」修正最终回答。
+def _current_turn(state: AgentState | None) -> int:
+    if state is None:
+        return 1
+    st = getattr(state, "short_term", {}) or {}
+    try:
+        return int(st.get("turn_index") or 0) + 1
+    except (TypeError, ValueError):
+        return 1
+
+
+def _historical_evidence(state: AgentState | None, *, current_turn: int) -> list[dict[str, Any]]:
+    if state is None:
+        return []
+    out: list[dict[str, Any]] = []
+    for obs in (getattr(state, "evidence_pool", []) or [])[-60:]:
+        if isinstance(obs, dict) and obs.get("turn") != current_turn:
+            out.append(obs)
+    return out[-60:]
+
+
+def _store_evidence_pool(state: AgentState | None, observations: list[dict[str, Any]], *, turn: int) -> None:
+    if state is None or not observations:
+        return
+    ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+    previous = [
+        x for x in (getattr(state, "evidence_pool", []) or [])
+        if isinstance(x, dict) and x.get("turn") != turn
+    ]
+    current = [{**obs, "turn": turn, "ts": ts} for obs in observations]
+    state.evidence_pool = (previous + current)[-60:]
+    state.short_term["turn_index"] = turn
+
+
+_CLAIM_REVISION_PROMPT = """你是 Otomo 的事实修正器。请只根据「本轮/历史 observation」和「claim verifier 修正建议」修正最终回答。
 
 要求：
 - 删除或降级 unsupported/block 事实断言，不要补新事实。
@@ -129,6 +163,7 @@ def _revision_payload(observations: list[dict[str, Any]], limit: int = 9000) -> 
                 "data": obs.get("data"),
                 "sources": obs.get("sources"),
                 "entities": obs.get("entities"),
+                "turn": obs.get("turn"),
             }
         )
     text = json.dumps(rows, ensure_ascii=False)
@@ -166,7 +201,7 @@ async def _maybe_revise_answer(
             f"{answer}\n\n"
             "claim verifier 修正建议：\n"
             f"{hints}\n\n"
-            "本轮 observation：\n"
+            "本轮/历史 observation：\n"
             f"{_revision_payload(observations)}"
         )},
     ]
@@ -214,6 +249,8 @@ async def traced_stream(runner, message: str, state, meta: dict) -> AsyncIterato
     t0 = time.monotonic()
     final_answer = ""
     status = "ok"
+    turn = _current_turn(state)
+    historical_observations = _historical_evidence(state, current_turn=turn)
     try:
         async for ev in runner.stream(message, state):
             if ev.type != "answer_delta":  # 流式增量太碎，不逐条记
@@ -231,12 +268,18 @@ async def traced_stream(runner, message: str, state, meta: dict) -> AsyncIterato
                 rl_rec["status"] = "error"
             yield ev
             if ev.type == "final":
-                claim_check = verify_answer_claims(final_answer, rl_rec["observations"])
+                verifier_observations = [*rl_rec["observations"], *historical_observations]
+                claim_check = verify_answer_claims(final_answer, verifier_observations)
                 rl_rec["claim_check"] = claim_check.model_dump(mode="json", exclude_none=True)
+                if historical_observations:
+                    rl_rec["claim_check"].setdefault("caveats", []).insert(
+                        0,
+                        f"已合并最近 {len(historical_observations)} 条跨轮 observation 作为证据池。",
+                    )
                 claim_event = ClaimCheckEvent(**rl_rec["claim_check"])
                 rec["events"].append(_summarize_event(claim_event))
                 yield claim_event
-                revised, revised_check = await _maybe_revise_answer(runner, final_answer, claim_check, rl_rec["observations"])
+                revised, revised_check = await _maybe_revise_answer(runner, final_answer, claim_check, verifier_observations)
                 if revised and revised_check is not None:
                     final_answer = revised
                     rl_rec["answer"] = final_answer
@@ -255,6 +298,7 @@ async def traced_stream(runner, message: str, state, meta: dict) -> AsyncIterato
         _append(rec)
         rl_rec["duration_ms"] = rec["duration_ms"]
         rl_rec["status"] = status
+        _store_evidence_pool(state, rl_rec["observations"], turn=turn)
         if settings.trajectory_capture_enabled:
             out = dict(rl_rec)
             if not settings.trajectory_store_observations:  # 落盘时才按开关裁剪 data，不影响内存里的 claim 校验

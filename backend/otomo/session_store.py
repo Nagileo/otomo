@@ -129,6 +129,15 @@ class SessionStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def message_count(self, session_id: str, auth_session_id: str) -> int:
+        self._existing_session(session_id, auth_session_id)
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM messages WHERE session_id=?",
+                (session_id,),
+            ).fetchone()
+        return int(row["n"] or 0) if row else 0
+
     def rename_session(self, session_id: str, auth_session_id: str, title: str) -> dict[str, Any]:
         self._existing_session(session_id, auth_session_id)
         clean = title.strip()[:80] or "新对话"
