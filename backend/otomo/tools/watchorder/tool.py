@@ -18,6 +18,7 @@ from ...memory.consolidate import now_iso
 from ...memory.models import InboxItem, MemorySummary, WeeklyChannel, WeeklyDigestSubscription, memory_summary
 from ...profile import compute_taste_profile
 from ..bangumi.client import SUBJECT_TYPE, BangumiClient
+from ..calendar.tool import AiringProgressArgs, AiringProgressItem, AiringProgressTool
 
 _SERIES_REL = {"续集", "前传", "不同演绎"}             # 同一观看线（排进顺序）
 _SIDE_REL = {"外传", "相同世界观", "不同世界观", "番外篇"}  # 旁支（可选看，不排进主线）
@@ -395,6 +396,32 @@ class WeeklyDigestTool(Tool):
     def __init__(self, client: BangumiClient) -> None:
         self.client = client
         self.copilot = WatchCopilotTool(client)
+        self.airing = AiringProgressTool(client)
+
+    @staticmethod
+    def _airing_item(raw: AiringProgressItem) -> WatchCopilotItem:
+        why = []
+        if raw.behind > 0:
+            why.append(f"已播到第 {raw.aired_ep} 集，你看到第 {raw.my_ep} 集，落后 {raw.behind} 集")
+        elif raw.next_air_date:
+            why.append(f"当前同步，下集预计 {raw.next_air_date}")
+        else:
+            why.append("当前没有明显落后")
+        if raw.score:
+            why.append(f"Bangumi 评分 {raw.score:g}")
+        return WatchCopilotItem(
+            id=raw.id,
+            name=raw.name,
+            status="在看" if raw.status == "watching" else "想看",
+            action=raw.action,
+            why=why[:5],
+            score=2.0 + raw.behind,
+            ep_status=raw.my_ep or None,
+            eps=raw.total_eps,
+            bangumi_score=raw.score,
+            image=raw.image,
+            tags=["本周放送"] if raw.next_air_date or raw.behind else [],
+        )
 
     async def run(self, args: WeeklyDigestArgs) -> ToolResult[WeeklyDigestResult]:
         copilot_res = await self.copilot.run(
@@ -407,8 +434,21 @@ class WeeklyDigestTool(Tool):
         if not copilot_res.ok or copilot_res.data is None:
             return ToolResult(ok=False, error=copilot_res.error or "周报生成失败")
         data = copilot_res.data
+        airing_res = await self.airing.run(
+            AiringProgressArgs(username=data.username, include_wishlist=True, limit=min(args.limit, 12))
+        )
+        airing_items: list[WatchCopilotItem] = []
+        airing_sources = []
+        if airing_res.ok and airing_res.data is not None:
+            airing_items = [self._airing_item(x) for x in airing_res.data.items[: args.limit]]
+            airing_sources = airing_res.sources
         week = datetime.now(UTC).strftime("%Y-W%U")
         sections = [
+            WeeklyDigestSection(
+                title="本周放送/进度",
+                items=airing_items[:4],
+                notes=["结合 Bangumi 正片 airdate 与你的 ep_status；日期以日本放送日为主。"],
+            ),
             WeeklyDigestSection(
                 title="继续追",
                 items=data.continue_watching[:4],
@@ -443,11 +483,11 @@ class WeeklyDigestTool(Tool):
                 sections=sections,
                 next_actions=next_actions,
                 caveats=[
-                    "这是按需周报内容，不是后台定时推送。",
-                    "周报基于 Bangumi 收藏状态、评分、标签和 ep_status；没有读取真实播放平台更新状态。",
+                    "这是按需周报内容；若配置订阅，会由后台 scheduler 写入 inbox/推送。",
+                    "放送进度基于 Bangumi 正片 airdate 和 ep_status；没有断言国内播放平台上架时间。",
                 ],
             ),
-            sources=copilot_res.sources,
+            sources=(airing_sources + copilot_res.sources)[:8],
         )
 
 

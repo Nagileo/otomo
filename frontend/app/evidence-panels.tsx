@@ -353,6 +353,103 @@ function SeasonGuidePanel({ data }: { data: AnyRecord }) {
   );
 }
 
+function BroadcastCalendarPanel({ data }: { data: AnyRecord }) {
+  const days = list(data.days);
+  return (
+    <Panel
+      title={data.scope === "today" ? "今日放送" : "本周放送日历"}
+      subtitle={`${text(data.today)} · ${data.count ?? 0} 部${data.only_mine ? ` · @${text(data.username)}` : ""}`}
+    >
+      {days.length > 0 ? (
+        <div className="calendar-stack">
+          {days.map((day, i) => {
+            const items = list(day.items);
+            return (
+              <div className={`calendar-day ${day.is_today ? "today" : ""}`} key={`${day.weekday_id}-${i}`}>
+                <div className="calendar-head">
+                  <strong>{text(day.weekday_cn)}</strong>
+                  {day.is_today && <Badge tone="good">今天</Badge>}
+                  <span>{items.length} 部</span>
+                </div>
+                {items.length > 0 ? (
+                  <div className="rec-grid">
+                    {items.map((item, idx) => (
+                      <a className="rec-card" href={item.url || `https://bgm.tv/subject/${item.id}`} target="_blank" rel="noreferrer" key={`${item.id}-${idx}`}>
+                        {item.image ? <img src={item.image} alt="" /> : <div className="rec-noimg" />}
+                        <div className="rec-body">
+                          <div className="card-title">{text(item.name_cn || item.name)}</div>
+                          <div className="card-meta">
+                            {item.air_date || "日期未定"}
+                            {item.score ? ` · BGM ${item.score}` : ""}
+                            {item.doing ? ` · 在看 ${item.doing}` : ""}
+                          </div>
+                          <div className="evidence-row tight">
+                            {item.my_collection_label && <Badge tone={item.my_collection === "watching" ? "good" : "dim"}>{text(item.my_collection_label)}</Badge>}
+                            {item.ep_status != null && <Badge tone="dim">进度 {item.ep_status}</Badge>}
+                          </div>
+                        </div>
+                      </a>
+                    ))}
+                  </div>
+                ) : (
+                  <EmptyHint text="这一天没有命中条目" />
+                )}
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <EmptyHint text="没有拿到放送条目；如果只看自己的列表，可能需要登录或公开收藏" />
+      )}
+      {list<string>(data.notes).length > 0 && (
+        <div className="caveats">{list<string>(data.notes).map((n, i) => <span key={i}>{n}</span>)}</div>
+      )}
+    </Panel>
+  );
+}
+
+function AiringProgressPanel({ data }: { data: AnyRecord }) {
+  const items = list(data.items);
+  return (
+    <Panel
+      title="追番进度"
+      subtitle={`@${text(data.username)} · ${text(data.today)} · 落后 ${data.behind_count ?? 0} 部`}
+    >
+      {items.length > 0 ? (
+        <div className="progress-list">
+          {items.map((item, i) => {
+            const max = Math.max(Number(item.aired_ep || 0), Number(item.my_ep || 0), 1);
+            const pctDone = Math.min(100, Math.round((Number(item.my_ep || 0) / max) * 100));
+            return (
+              <a className="progress-item" href={item.url || `https://bgm.tv/subject/${item.id}`} target="_blank" rel="noreferrer" key={`${item.id}-${i}`}>
+                {item.image ? <img src={item.image} alt="" /> : <div className="rec-noimg" />}
+                <div className="progress-body">
+                  <div className="progress-title">
+                    <strong>{text(item.name)}</strong>
+                    <Badge tone={item.behind > 0 ? "warn" : "good"}>{item.behind > 0 ? `落后 ${item.behind}` : "同步"}</Badge>
+                  </div>
+                  <div className="card-meta">
+                    你看到 {item.my_ep ?? 0} · 已播 {item.aired_ep ?? 0}
+                    {item.total_eps ? ` / ${item.total_eps}` : ""}
+                    {item.next_air_date ? ` · 下集 ${item.next_air_date}` : ""}
+                  </div>
+                  <div className="progress-bar"><span style={{ width: `${pctDone}%` }} /></div>
+                  <p className="card-note">{text(item.action)}</p>
+                </div>
+              </a>
+            );
+          })}
+        </div>
+      ) : (
+        <EmptyHint text="没有拿到在看进度；可能收藏列表为空、私有，或这些条目没有正片 airdate" />
+      )}
+      {list<string>(data.notes).length > 0 && (
+        <div className="caveats">{list<string>(data.notes).map((n, i) => <span key={i}>{n}</span>)}</div>
+      )}
+    </Panel>
+  );
+}
+
 function AspectProfilePanel({ data }: { data: AnyRecord }) {
   const profile = data.profile || {};
   const likes = list(profile.likes);
@@ -2037,6 +2134,8 @@ export function EvidencePanels({
   const taste = list(evidence.compare_user_taste);
   const season = list(evidence.season_guide_brief);
   const recommend = list(evidence.recommend_subjects);
+  const broadcastCalendar = list(evidence.get_broadcast_calendar);
+  const airingProgress = list(evidence.get_airing_progress);
   const aspect = devMode ? list(evidence.build_aspect_profile) : [];
   const watchCopilot = list(evidence.plan_watch_copilot);
   const weeklyDigest = list(evidence.build_weekly_digest);
@@ -2065,7 +2164,7 @@ export function EvidencePanels({
   ];
   const memory = devMode ? memoryEvidence : memoryEvidence.filter(hasActionableMemory);
   if (
-    !review.length && !taste.length && !season.length && !recommend.length && !memory.length
+    !review.length && !taste.length && !season.length && !recommend.length && !broadcastCalendar.length && !airingProgress.length && !memory.length
     && !aspect.length && !watchCopilot.length && !weeklyDigest.length && !tasteReport.length && !dashboard.length && !explorer.length
     && !episodeRadar.length && !routeImage.length && !visualText.length && !visualStyle.length && !imageSource.length
     && !biliVideo.length && !videoFrames.length && !claimChecks.length
@@ -2085,6 +2184,8 @@ export function EvidencePanels({
       {imageSource.map((data, i) => <ImageSourcePanel data={data} key={`image-source-${i}`} />)}
       {biliVideo.map((data, i) => <BiliVideoContentPanel data={data} key={`bili-video-${i}`} />)}
       {videoFrames.map((data, i) => <VideoFramePanel data={data} key={`video-frames-${i}`} />)}
+      {broadcastCalendar.map((data, i) => <BroadcastCalendarPanel data={data} key={`broadcast-${i}`} />)}
+      {airingProgress.map((data, i) => <AiringProgressPanel data={data} key={`airing-progress-${i}`} />)}
       {recommend.map((data, i) => <RecommendPanel data={data} onCritique={onCritique} key={`recommend-${i}`} />)}
       {season.map((data, i) => <SeasonGuidePanel data={data} key={`season-${i}`} />)}
       {review.map((data, i) => <ReviewEvidencePanel data={data} key={`review-${i}`} />)}

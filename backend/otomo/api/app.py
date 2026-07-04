@@ -26,6 +26,7 @@ from ..memory.consolidate import now_iso
 from ..memory.models import VisualFeedbackItem, VisualFeedbackSignal, memory_summary
 from ..obs import append_visual_feedback, traced_stream
 from ..factory import build_registry
+from ..session_store import SessionStore
 from ..uploads import upload_store
 from ..weekly import WeeklyDigestService
 from ..agent.plan_execute import PlanExecuteRunner
@@ -40,6 +41,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.moegirl = MoegirlClient()
     app.state.ltm = LongTermMemory()
     app.state.auth = AuthStore()
+    app.state.session_store = SessionStore()
     app.state.weekly_service = WeeklyDigestService(app.state.ltm, app.state.auth)
     app.state.weekly_task = (
         asyncio.create_task(app.state.weekly_service.run_forever())
@@ -134,6 +136,11 @@ class VisualFeedbackSearchRequest(BaseModel):
     keyword: str
     subject_type: Literal["anime", "book", "music", "game", "real"] = "anime"
     limit: int = Field(8, ge=1, le=12)
+    auth_session_id: str | None = None
+
+
+class RenameSessionRequest(BaseModel):
+    title: str
     auth_session_id: str | None = None
 
 
@@ -310,6 +317,56 @@ async def preview_image(image_id: str) -> Response:
     return Response(content=payload, media_type=mime_type)
 
 
+@app.get("/sessions")
+async def list_sessions(request: Request, response: Response, limit: int = 40) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    return {"ok": True, "sessions": app.state.session_store.list_sessions(session.auth_session_id, limit)}
+
+
+@app.get("/sessions/{session_id}/messages")
+async def get_session_messages(session_id: str, request: Request, response: Response) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    try:
+        payload = app.state.session_store.load_messages(session_id, session.auth_session_id)
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail="无权访问该会话") from e
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail="会话不存在") from e
+    return {"ok": True, **payload}
+
+
+@app.patch("/sessions/{session_id}")
+async def rename_session(
+    session_id: str,
+    req: RenameSessionRequest,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response, req.auth_session_id)
+    _require_csrf(request, session.auth_session_id)
+    try:
+        payload = app.state.session_store.rename_session(session_id, session.auth_session_id, req.title)
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail="无权修改该会话") from e
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail="会话不存在") from e
+    return {"ok": True, "session": payload}
+
+
+@app.delete("/sessions/{session_id}")
+async def delete_session(session_id: str, request: Request, response: Response) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    try:
+        app.state.session_store.delete_session(session_id, session.auth_session_id)
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail="无权删除该会话") from e
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail="会话不存在") from e
+    app.state.sessions.pop(session_id, None)
+    return {"ok": True}
+
+
 def _runner_from_registry(kind: str, registry):
     if kind == "plan":
         return PlanExecuteRunner(registry)
@@ -321,12 +378,13 @@ def _runner_from_registry(kind: str, registry):
 _MAX_SESSIONS = 500
 
 
-def _session_state(app: FastAPI, session_id: str) -> AgentState:
-    """复用会话状态；进程内会话数有上限，超出按 FIFO 丢弃最旧会话（近似 LRU），避免长跑内存无界增长。"""
+def _session_state(app: FastAPI, session_id: str, auth_session_id: str) -> AgentState:
+    """复用会话状态；内存热缓存 miss 时从 SQLite 惰性恢复。"""
+    app.state.session_store.ensure_session(session_id, auth_session_id)
     sessions: dict[str, AgentState] = app.state.sessions
     state = sessions.get(session_id)
     if state is None:
-        state = AgentState()
+        state = app.state.session_store.load_state(session_id, auth_session_id) or AgentState()
         sessions[session_id] = state
         while len(sessions) > _MAX_SESSIONS:
             sessions.pop(next(iter(sessions)))
@@ -504,12 +562,9 @@ async def chat(req: ChatRequest, request: Request):
     client = await _request_client(app, session.auth_session_id)
     registry = build_registry(client, app.state.moegirl, app.state.ltm)
     runner = _runner_from_registry(req.runner, registry)
+    chat_session_id = req.session_id or uuid.uuid4().hex
     # 短期记忆：有 session_id 就复用既有状态，否则新建
-    state = None
-    if req.session_id:
-        state = _session_state(app, req.session_id)
-    elif req.spoiler_mode or req.progress_episode is not None or req.attachments:
-        state = AgentState()
+    state = _session_state(app, chat_session_id, session.auth_session_id)
     if state is not None and (req.spoiler_mode or req.progress_episode is not None):
         current = dict(state.short_term.get("spoiler") or {})
         if req.spoiler_mode:
@@ -537,19 +592,55 @@ async def chat(req: ChatRequest, request: Request):
         if cleaned:
             state.short_term["attachments"] = cleaned
     await _attach_memory_state(app, state, client)
+    stored_attachments = [
+        {
+            **item,
+            "preview_url": f"/uploads/{str(item.get('uri', '')).removeprefix('upload://')}/preview"
+            if str(item.get("uri", "")).startswith("upload://") else "",
+        }
+        for item in (req.attachments or [])[:4]
+        if isinstance(item, dict)
+    ]
+    app.state.session_store.append_message(
+        chat_session_id,
+        session.auth_session_id,
+        role="user",
+        content=req.message,
+        attachments=stored_attachments,
+    )
 
     async def event_gen() -> AsyncIterator[dict]:
         meta = {
-            "session_id": req.session_id or "",
+            "session_id": chat_session_id,
             "auth_session_id": session.auth_session_id,
             "runner": req.runner,
         }
+        final_answer = ""
+        evidence: dict[str, list[dict[str, Any]]] = {}
+        sources: list[dict[str, Any]] = []
         try:
             async for ev in traced_stream(runner, req.message, state, meta):
+                if ev.type == "observation" and getattr(ev, "data", None):
+                    evidence.setdefault(ev.name, []).append(ev.data)
+                elif ev.type == "claim_check":
+                    evidence.setdefault("claim_check", []).append(ev.model_dump(mode="json", exclude_none=True))
+                elif ev.type == "final":
+                    final_answer = ev.answer
+                    sources = [s.model_dump(mode="json", exclude_none=True) for s in ev.sources]
                 yield {"event": ev.type, "data": ev.model_dump_json()}
         finally:
             if turn_has_attachments and state is not None:
                 state.short_term.pop("attachments", None)
+            if final_answer:
+                app.state.session_store.append_message(
+                    chat_session_id,
+                    session.auth_session_id,
+                    role="assistant",
+                    content=final_answer,
+                    evidence=evidence,
+                    sources=sources,
+                )
+            app.state.session_store.save_state(chat_session_id, session.auth_session_id, state)
             await client.aclose()
 
     response = EventSourceResponse(event_gen())

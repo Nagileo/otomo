@@ -8,7 +8,7 @@ import asyncio
 
 from pydantic import BaseModel, Field
 
-from otomo.agent._common import should_fallback_answer
+from otomo.agent._common import _looks_like_leak_prefix, should_fallback_answer
 from otomo.agent.contracts import Tool, ToolResult
 from otomo.agent.registry import ToolRegistry
 from otomo.tools.bangumi import build_bangumi_tools
@@ -74,3 +74,11 @@ def test_final_answer_fallback_rejects_single_marker_fragments():
     assert should_fallback_answer(">")
     assert should_fallback_answer(">|")
     assert not should_fallback_answer("这是正常回答。")
+
+
+def test_stream_guard_buffers_only_dangerous_prefixes():
+    assert _looks_like_leak_prefix("<")
+    assert _looks_like_leak_prefix(">")
+    assert _looks_like_leak_prefix("D")
+    assert not _looks_like_leak_prefix("D.Gray-man 是一部动画。")
+    assert not _looks_like_leak_prefix("这是正常回答。")

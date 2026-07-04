@@ -79,6 +79,13 @@ type AuthState = {
 };
 type AuthNotice = { tone: "good" | "warn" | "bad"; text: string };
 type UploadNotice = { tone: "good" | "warn" | "bad"; text: string };
+type ChatSession = {
+  id: string;
+  title: string;
+  updated_at?: string;
+  created_at?: string;
+  message_count?: number;
+};
 
 const MAX_IMAGES = 4;
 const SUPPORTED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/jpg", "image/webp"]);
@@ -100,6 +107,8 @@ function evidenceSummary(evidence: EvidenceMap) {
     ["recommend_subjects", "推荐候选"],
     ["season_guide_brief", "季番导视"],
     ["review_subject", "评价矩阵"],
+    ["get_broadcast_calendar", "放送日历"],
+    ["get_airing_progress", "追番进度"],
     ["route_image_source", "图片来源路由"],
     ["extract_visual_text", "OCR 结构化"],
     ["recommend_by_visual_style", "视觉推荐"],
@@ -176,6 +185,8 @@ function friendlyToolName(name: string) {
     search_image_source: "搜索图片来源",
     analyze_video_frames: "分析视频帧",
     summarize_bilibili_video_content: "分析B站视频",
+    get_broadcast_calendar: "查询放送日历",
+    get_airing_progress: "计算追番进度",
     compare_user_taste: "计算同步率",
     build_aspect_profile: "更新口味画像",
     build_collection_dashboard: "生成收藏仪表盘",
@@ -267,6 +278,8 @@ export default function Home() {
   const [evidenceMode, setEvidenceMode] = useState<"user" | "dev">("user");
   const [authNotice, setAuthNotice] = useState<AuthNotice | null>(null);
   const [uploadNotice, setUploadNotice] = useState<UploadNotice | null>(null);
+  const [sessions, setSessions] = useState<ChatSession[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState("");
   const [busy, setBusy] = useState(false);
   const answerRef = useRef("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -291,7 +304,7 @@ export default function Home() {
       const cleanUrl = `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`;
       window.history.replaceState(null, "", cleanUrl);
     }
-    void refreshAuthSession();
+    void refreshAuthSession().then(() => restoreLastSession());
   }, []);
 
   function csrfHeaders(extra?: Record<string, string>) {
@@ -309,9 +322,76 @@ export default function Home() {
         authSessionId.current = payload.auth_session_id || "";
         csrfToken.current = payload.csrf_token || "";
         setAuth(payload);
+        await loadSessions();
       }
     } catch {
       setAuth({ auth_session_id: authSessionId.current, authenticated: false });
+    }
+  }
+
+  async function loadSessions() {
+    try {
+      const res = await fetch(`${BACKEND}/sessions`, { credentials: "include" });
+      const payload = await res.json().catch(() => ({}));
+      if (res.ok && payload.ok) setSessions(list(payload.sessions));
+    } catch {
+      /* 历史会话不是主流程，失败静默降级 */
+    }
+  }
+
+  async function restoreLastSession() {
+    const saved = window.localStorage.getItem("otomo.activeSessionId") || "";
+    if (saved) await loadSession(saved);
+  }
+
+  function normalizeRestoredMessages(rows: any[]): Msg[] {
+    return list(rows).map((row) => ({
+      role: row.role === "assistant" ? "assistant" : "user",
+      content: String(row.content || ""),
+      attachments: list(row.attachments).map((img) => ({
+        ...img,
+        preview_url: img.preview_url?.startsWith("/") ? `${BACKEND}${img.preview_url}` : img.preview_url,
+      })),
+    }));
+  }
+
+  async function loadSession(id: string) {
+    if (!id || busy) return;
+    try {
+      const res = await fetch(`${BACKEND}/sessions/${encodeURIComponent(id)}/messages`, { credentials: "include" });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok || !payload.ok) return;
+      sessionId.current = id;
+      setActiveSessionId(id);
+      window.localStorage.setItem("otomo.activeSessionId", id);
+      setMessages(normalizeRestoredMessages(payload.messages));
+      setEvidence(payload.evidence || {});
+      setSources(list(payload.sources));
+      const shortTerm = payload.state?.short_term || {};
+      setSpoiler(shortTerm.spoiler || null);
+      setMemory(shortTerm.memory || null);
+      setTrace([]);
+      setFollowups([]);
+      setAnswer("");
+      answerRef.current = "";
+    } catch {
+      /* ignore */
+    }
+  }
+
+  async function deleteSession(id: string) {
+    if (!id || busy) return;
+    try {
+      const res = await fetch(`${BACKEND}/sessions/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+        credentials: "include",
+        headers: csrfHeaders(),
+      });
+      if (!res.ok) return;
+      if (sessionId.current === id) newChat();
+      await loadSessions();
+    } catch {
+      /* ignore */
     }
   }
 
@@ -422,7 +502,11 @@ export default function Home() {
     setAnswer("");
     answerRef.current = "";
     setBusy(true);
-    if (!sessionId.current) sessionId.current = crypto.randomUUID();  // 客户端 lazy 生成，避免 SSR mismatch
+    if (!sessionId.current) {
+      sessionId.current = crypto.randomUUID();  // 客户端 lazy 生成，避免 SSR mismatch
+      setActiveSessionId(sessionId.current);
+      window.localStorage.setItem("otomo.activeSessionId", sessionId.current);
+    }
 
     try {
       const attachments = shouldUseImage ? await uploadPendingImages() : [];
@@ -470,6 +554,7 @@ export default function Home() {
       if (final) setMessages((m) => [...m, { role: "assistant", content: final }]);
       setAnswer("");
       setBusy(false);
+      void loadSessions();
     }
   }
 
@@ -619,6 +704,8 @@ export default function Home() {
 
   function newChat() {
     sessionId.current = "";  // 重置 → 下次发送会生成新会话 id（清空多轮上下文）
+    setActiveSessionId("");
+    window.localStorage.removeItem("otomo.activeSessionId");
     setMessages([]);
     setTrace([]);
     setSources([]);
@@ -718,6 +805,38 @@ export default function Home() {
             )}
           </div>
           {authNotice && <div className={`auth-notice ${authNotice.tone}`}>{authNotice.text}</div>}
+          <div className="session-strip">
+            <button className="inline-action" onClick={newChat} disabled={busy}>新建</button>
+            {sessions.slice(0, 6).map((s) => (
+              <button
+                key={s.id}
+                className={`session-chip ${activeSessionId === s.id ? "active" : ""}`}
+                onClick={() => loadSession(s.id)}
+                disabled={busy}
+                title={`${s.title || "新对话"} · ${s.updated_at || ""}`}
+              >
+                <span>{s.title || "新对话"}</span>
+                <small>{s.message_count ?? 0}</small>
+                <b
+                  role="button"
+                  tabIndex={0}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void deleteSession(s.id);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.stopPropagation();
+                      void deleteSession(s.id);
+                    }
+                  }}
+                  aria-label="删除会话"
+                >
+                  ×
+                </b>
+              </button>
+            ))}
+          </div>
         </div>
         <button className="ghost" onClick={newChat} disabled={busy}>+ 新对话</button>
       </div>

@@ -190,6 +190,28 @@ button:disabled { opacity: .5; cursor: default; }
 .chip:hover { border-color: var(--accent); color: var(--accent); }
 
 .spoiler-state, .memory-state, .auth-state { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; align-items: center; }
+.session-strip {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  margin-top: 8px; max-width: 720px;
+}
+.session-chip {
+  display: inline-flex; align-items: center; gap: 6px; max-width: 190px; height: 28px;
+  padding: 0 8px; border: 1px solid var(--border); border-radius: 999px;
+  background: #0c0e13; color: var(--dim); font-size: 12px;
+}
+.session-chip.active { color: var(--accent); border-color: rgba(122, 162, 247, .5); background: rgba(122, 162, 247, .08); }
+.session-chip span {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.session-chip small {
+  flex: 0 0 auto; color: var(--dim); font-size: 10px;
+}
+.session-chip b {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; flex: 0 0 auto; border-radius: 999px;
+  color: var(--dim); font-style: normal; font-weight: 700;
+}
+.session-chip b:hover { color: var(--red); background: rgba(247, 118, 142, .1); }
 .auth-notice {
   margin-top: 6px; max-width: 560px; padding: 6px 8px; border: 1px solid var(--border);
   border-radius: 8px; background: #0c0e13; color: var(--dim); font-size: 12px; line-height: 1.45;
@@ -258,6 +280,29 @@ button:disabled { opacity: .5; cursor: default; }
   padding: 9px; color: var(--text); text-decoration: none; min-width: 0;
 }
 .rating-card:hover, .season-card:hover, .rec-card:hover, .digest-card:hover { border-color: var(--accent); }
+.calendar-stack { display: grid; gap: 12px; }
+.calendar-day {
+  display: grid; gap: 8px; padding: 8px; border: 1px solid var(--border);
+  border-radius: 8px; background: #0c0e13;
+}
+.calendar-day.today { border-color: rgba(158, 206, 106, .38); background: rgba(158, 206, 106, .04); }
+.calendar-head { display: flex; align-items: center; gap: 8px; color: var(--dim); font-size: 12px; }
+.calendar-head strong { color: var(--text); font-size: 13px; }
+.progress-list { display: grid; gap: 8px; }
+.progress-item {
+  display: grid; grid-template-columns: 52px 1fr; gap: 10px; align-items: center;
+  min-width: 0; padding: 8px; border: 1px solid var(--border); border-radius: 8px;
+  background: #0c0e13; color: var(--text); text-decoration: none;
+}
+.progress-item:hover { border-color: var(--accent); }
+.progress-item img, .progress-item .rec-noimg {
+  width: 52px; height: 70px; border-radius: 7px; object-fit: cover; background: #20242e;
+}
+.progress-body { min-width: 0; display: grid; gap: 4px; }
+.progress-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+.progress-title strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.progress-bar { height: 6px; border-radius: 999px; overflow: hidden; background: #20242e; }
+.progress-bar span { display: block; height: 100%; background: var(--accent); border-radius: inherit; }
 .rating-source, .metric-label, .card-meta, .aspect-meta, .shared-meta, .digest-title {
   color: var(--dim); font-size: 11px; line-height: 1.4;
 }

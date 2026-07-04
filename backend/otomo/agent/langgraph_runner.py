@@ -93,7 +93,9 @@ class LangGraphRunner(AgentRunner):
                         data=C.panel_data_from_payload(name, payload) if ok else None,
                     )
                 elif isinstance(m, AIMessage) and not m.tool_calls and m.content:
-                    answer = m.content if isinstance(m.content, str) else str(m.content)
+                    answer = C.strip_leak(m.content if isinstance(m.content, str) else str(m.content))
+            if C.should_fallback_answer(answer):
+                answer = "抱歉，这次没能整理出回答，请再问一次或换个问法。"
             if answer:
                 yield AnswerDeltaEvent(text=answer)
             yield FinalEvent(answer=answer or "（无回答）", sources=[], steps=steps)

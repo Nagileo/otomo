@@ -26,7 +26,7 @@ from .contracts import (
 from .registry import ToolRegistry
 
 # DeepSeek 等模型偶尔把工具调用写成 DSML 文本塞进 content，而非结构化 tool_calls 字段
-LEAK_MARKERS = ("｜DSML｜", "DSML", "tool_calls", "invoke name", "<｜")
+LEAK_MARKERS = ("｜DSML｜", "DSML", "tool_calls", "invoke name", "<｜", "<|", ">|")
 CORRECT_FC = (
     "请使用函数调用（tool calls）来调用工具，不要在回复正文里输出 invoke / DSML / tool_calls 等标记。"
     "若信息已足够，请直接给出最终自然语言答案。"
@@ -311,6 +311,25 @@ def strip_leak(text: str) -> str:
 
 
 _BAD_FINAL_ANSWERS = {"<", ">", "<|", ">|", "<｜", ">｜", "｜", "|"}
+_DANGEROUS_STREAM_FRAGMENTS = _BAD_FINAL_ANSWERS | {"`", "```"}
+
+
+def _looks_like_leak_prefix(text: str) -> bool:
+    """Whether a leading stream fragment is too risky to show yet.
+
+    Some OpenAI-compatible providers stream a malformed tool marker one
+    character at a time. If we yield the first "<" or ">" immediately and the
+    fallback call later fails, the UI is left with that marker fragment. Hold
+    only short leading fragments that could still become a tool/DSML marker.
+    """
+    s = text.strip()
+    if not s:
+        return True
+    if s in _DANGEROUS_STREAM_FRAGMENTS:
+        return True
+    if len(s) <= max(len(m) for m in LEAK_MARKERS) and any(m.startswith(s) for m in LEAK_MARKERS):
+        return True
+    return False
 
 
 def should_fallback_answer(answer: str, leaked: list[bool] | None = None) -> bool:
@@ -353,6 +372,12 @@ def summarize(result: ToolResult) -> str:
     if d.get("queue"):
         names = [x.get("name") for x in d["queue"][:4] if isinstance(x, dict) and x.get("name")]
         return f"追番副驾：{len(d['queue'])} 个本周候选" + (f"：{', '.join(names)}" if names else "")
+    if d.get("days") and d.get("scope"):
+        count = d.get("count") or sum(len(x.get("items") or []) for x in d.get("days") or [] if isinstance(x, dict))
+        scope = "今日" if d.get("scope") == "today" else "本周"
+        return f"{scope}放送：{count} 部"
+    if d.get("behind_count") is not None and d.get("items") is not None:
+        return f"追番进度：{len(d.get('items') or [])} 部，落后 {d.get('behind_count') or 0} 部"
     if d.get("week") and d.get("sections"):
         return f"周报：{d.get('week')} · {len(d.get('sections') or [])} 个分区"
     if d.get("sections"):
@@ -412,6 +437,8 @@ _PANEL_TOOLS = {
     "compare_user_taste",
     "season_guide_brief",
     "recommend_subjects",
+    "get_broadcast_calendar",
+    "get_airing_progress",
     "explore_voice_network",
     "episode_buzz_radar",
     "extract_visual_text",
@@ -610,6 +637,45 @@ def _safe_watch_copilot_payload(data: dict[str, Any]) -> dict[str, Any]:
         "start_from_wishlist": items("start_from_wishlist", 8),
         "revive_on_hold": items("revive_on_hold", 8),
         "notes": _trim_strings(data.get("notes"), limit=8, text_limit=180),
+    }
+
+
+def _safe_broadcast_calendar_payload(data: dict[str, Any]) -> dict[str, Any]:
+    days = []
+    for day in _trim_dicts(data.get("days"), limit=7):
+        copied = dict(day)
+        items = []
+        for item in _trim_dicts(copied.get("items"), limit=24):
+            item_copy = dict(item)
+            item_copy["note"] = _trim_text(item_copy.get("note"), 120)
+            items.append(item_copy)
+        copied["items"] = items
+        days.append(copied)
+    return {
+        "scope": data.get("scope"),
+        "today": data.get("today"),
+        "timezone": data.get("timezone"),
+        "days": days,
+        "only_mine": bool(data.get("only_mine")),
+        "username": data.get("username"),
+        "count": data.get("count"),
+        "notes": _trim_strings(data.get("notes"), limit=6, text_limit=180),
+    }
+
+
+def _safe_airing_progress_payload(data: dict[str, Any]) -> dict[str, Any]:
+    items = []
+    for item in _trim_dicts(data.get("items"), limit=40):
+        copied = dict(item)
+        copied["action"] = _trim_text(copied.get("action"), 120)
+        items.append(copied)
+    return {
+        "username": data.get("username"),
+        "today": data.get("today"),
+        "timezone": data.get("timezone"),
+        "items": items,
+        "behind_count": data.get("behind_count"),
+        "notes": _trim_strings(data.get("notes"), limit=6, text_limit=180),
     }
 
 
@@ -931,6 +997,10 @@ def panel_data_from_payload(name: str, payload: dict[str, Any] | None) -> dict[s
         return _safe_season_payload(data)
     if name == "recommend_subjects":
         return _safe_recommend_payload(data)
+    if name == "get_broadcast_calendar":
+        return _safe_broadcast_calendar_payload(data)
+    if name == "get_airing_progress":
+        return _safe_airing_progress_payload(data)
     if name == "build_aspect_profile":
         return _safe_aspect_profile_payload(data)
     if name == "plan_watch_copilot":
@@ -1158,17 +1228,28 @@ async def stream_answer(
         model=model, messages=messages, tools=tools, tool_choice="none", stream=True
     )
     acc = ""
+    pending = ""
     async for chunk in stream:
         if not chunk.choices:
             continue
         delta = chunk.choices[0].delta
         if delta and delta.content:
             acc += delta.content
+            pending += delta.content
             if has_leak(acc):
                 if leaked is not None:
                     leaked.append(True)
                 break
-            yield AnswerDeltaEvent(text=delta.content)
+            if _looks_like_leak_prefix(pending):
+                continue
+            yield AnswerDeltaEvent(text=pending)
+            pending = ""
+    if pending:
+        if _looks_like_leak_prefix(pending):
+            if leaked is not None:
+                leaked.append(True)
+        else:
+            yield AnswerDeltaEvent(text=pending)
 
 
 _FORCE_TEXT = (
@@ -1179,10 +1260,13 @@ _FORCE_TEXT = (
 
 async def compose_fallback(llm: AsyncOpenAI, model: str, messages: list[dict]) -> str:
     """流式合成泄漏/为空时的兜底：彻底不带 tools 调一次，强制纯文本。"""
-    resp = await llm.chat.completions.create(
-        model=model, messages=messages + [{"role": "system", "content": _FORCE_TEXT}]
-    )
-    return strip_leak(resp.choices[0].message.content or "")
+    try:
+        resp = await llm.chat.completions.create(
+            model=model, messages=messages + [{"role": "system", "content": _FORCE_TEXT}]
+        )
+        return strip_leak(resp.choices[0].message.content or "")
+    except Exception:  # noqa: BLE001 - fallback 不能把 run 变成半截流式残留
+        return ""
 
 
 _FOLLOWUP_PROMPT = (

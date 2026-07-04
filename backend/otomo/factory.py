@@ -11,6 +11,7 @@ from .agent.registry import ToolRegistry
 from .memory import LongTermMemory
 from .tools.anilist import build_anilist_tools
 from .tools.aspect_profile import build_aspect_profile_tools
+from .tools.calendar import build_calendar_tools
 from .tools.comments import build_comment_tools
 from .tools.community import build_community_tools
 from .tools.bangumi import build_bangumi_tools
@@ -77,6 +78,8 @@ def build_registry(
     for tool in build_writeback_tools(client, shared_ltm):
         registry.register(tool)
     for tool in build_aspect_profile_tools(client, shared_ltm):
+        registry.register(tool)
+    for tool in build_calendar_tools(client):
         registry.register(tool)
     for tool in build_profile_tools(client, shared_ltm):
         registry.register(tool)

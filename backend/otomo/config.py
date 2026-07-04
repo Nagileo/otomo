@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     session_cookie_name: str = "otomo_session"
     csrf_cookie_name: str = "otomo_csrf"
     csrf_header_name: str = "x-otomo-csrf"
+    session_store_path: str = "cache/sessions.sqlite3"
     cookie_secure: bool = False          # 生产 HTTPS 必须设 true
     csrf_protection_enabled: bool = True
     session_ttl_seconds: int = 60 * 60 * 24 * 30

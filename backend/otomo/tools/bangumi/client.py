@@ -161,6 +161,10 @@ class BangumiClient:
     async def get_subject(self, subject_id: int) -> Any:
         return await self._get(f"/v0/subjects/{subject_id}")
 
+    async def get_calendar(self) -> Any:
+        """Bangumi daily broadcast calendar grouped by weekday."""
+        return await self._get("/calendar")
+
     async def get_subject_characters(self, subject_id: int) -> Any:
         return await self._get(f"/v0/subjects/{subject_id}/characters")
 
