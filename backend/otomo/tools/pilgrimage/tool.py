@@ -1,9 +1,14 @@
 """圣地巡礼工具（anitabi.cn 开放 API，key 原生为 Bangumi subject id）。
 
 数据含贡献者署名（origin 字段），展示时保留来源；截图为 anitabi 图床外链，不转存。
+对公益站保持克制：持久磁盘缓存 7 天 + 低并发 + 请求间隔（曾因 300 连发触发 403）。
 """
 from __future__ import annotations
 
+import asyncio
+import json
+import time
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -51,8 +56,8 @@ class PilgrimageResult(BaseModel):
 
 class PilgrimageTripArgs(BaseModel):
     username: str | None = Field(None, description="Bangumi 用户名；不传用当前账号")
-    city: str = Field("", description="可选：目的地城市简名（如 东京/京都/大阪），前缀匹配过滤")
-    max_subjects: int = Field(40, ge=5, le=80, description="最多检查多少部（按用户评分从高到低截断，最爱优先）")
+    city: str = Field("", description="可选：目的地简名，支持城市（东京/京都/大阪）和区域（关西/关东/九州），按都市圈分层")
+    max_subjects: int = Field(300, ge=5, le=1000, description="最多检查多少部（按用户评分从高到低截断；结果有 24h 缓存，重复查询很快）")
 
 
 class PilgrimageTripEntry(BaseModel):
@@ -62,6 +67,8 @@ class PilgrimageTripEntry(BaseModel):
     point_count: int = 0
     map_url: str = ""
     cover: str = ""
+    tier: str = "core"  # core=目的地同城 / nearby=顺路近郊 / bonus=稍远的惊喜添头
+    distance_km: int | None = None
     sample_points: list[str] = Field(default_factory=list)
 
 
@@ -91,9 +98,112 @@ def _city_match(query: str, city: str) -> bool:
     return c.startswith(q) or q.startswith(c)
 
 
+# 目的地中心坐标 + 圈层半径 (lat, lng, nearby_km, bonus_km)：
+# anitabi 的 city 是市级文本（"宇治市/秩父市"），名称匹配盖不住都市圈——
+# "去东京玩"该带出饭能/鹫宫/秩父（埼玉），"飞大阪"该带出京都/神户，稍远的
+# 和歌山/冈山作惊喜添头。geo 圈层按番剧中心坐标算距离分档，比枚举地名可靠。
+_REGION_CENTERS: dict[str, tuple[float, float, float, float]] = {
+    "东京": (35.681, 139.767, 85, 180),
+    "关东": (35.681, 139.767, 130, 250),
+    "首都圈": (35.681, 139.767, 130, 250),
+    "大阪": (34.694, 135.502, 85, 180),
+    "关西": (34.80, 135.60, 130, 250),
+    "京阪神": (34.80, 135.60, 130, 250),
+    "京都": (35.012, 135.768, 85, 180),
+    "神户": (34.690, 135.196, 85, 180),
+    "奈良": (34.685, 135.805, 60, 150),
+    "名古屋": (35.181, 136.906, 85, 180),
+    "横滨": (35.444, 139.638, 60, 150),
+    "镰仓": (35.319, 139.547, 40, 120),
+    "札幌": (43.062, 141.354, 80, 250),
+    "北海道": (43.20, 142.50, 300, 500),
+    "福冈": (33.590, 130.402, 70, 200),
+    "九州": (32.80, 130.90, 220, 350),
+    "仙台": (38.268, 140.869, 70, 200),
+    "广岛": (34.385, 132.455, 70, 200),
+    "金泽": (36.561, 136.656, 70, 200),
+    "冲绳": (26.212, 127.679, 100, 300),
+}
+
+
+def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    from math import asin, cos, radians, sin, sqrt
+
+    rlat1, rlng1, rlat2, rlng2 = map(radians, (lat1, lng1, lat2, lng2))
+    a = sin((rlat2 - rlat1) / 2) ** 2 + cos(rlat1) * cos(rlat2) * sin((rlng2 - rlng1) / 2) ** 2
+    return 6371.0 * 2 * asin(sqrt(a))
+
+
+def _classify_entry(query: str, city: str, geo: Any) -> tuple[str, float | None] | None:
+    """返回 (tier, distance_km)：core=同城/名称命中，nearby=顺路近郊，bonus=惊喜添头；None=不在圈内。"""
+    if _city_match(query, city):
+        return "core", None
+    center = _REGION_CENTERS.get(query.strip())
+    if not center:
+        return None  # 未知目的地：只能名称匹配
+    try:
+        lat, lng = float(geo[0]), float(geo[1])
+    except (TypeError, ValueError, IndexError):
+        return None
+    dist = _haversine_km(center[0], center[1], lat, lng)
+    if dist <= 25:
+        return "core", round(dist)
+    if dist <= center[2]:
+        return "nearby", round(dist)
+    if dist <= center[3]:
+        return "bonus", round(dist)
+    return None
+
+
+class AnitabiRateLimited(RuntimeError):
+    """anitabi 返回 403/429（批量请求触发防护）。调用方应如实告知结果不完整。"""
+
+
+# 持久磁盘缓存：anitabi 是公益站，巡礼数据变化慢——lite/points 结果落盘 7 天，
+# miss 才发请求（含"未收录"也缓存，避免对同一部反复打）。批量扫描只有首次有成本。
+_DISK_CACHE_PATH = Path("cache/anitabi_cache.json")
+_DISK_TTL = 7 * 24 * 3600
+_disk_cache: dict[str, Any] | None = None
+
+
+def _disk_load() -> dict[str, Any]:
+    global _disk_cache
+    if _disk_cache is None:
+        try:
+            _disk_cache = json.loads(_DISK_CACHE_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            _disk_cache = {}
+    return _disk_cache
+
+
+def _disk_get(url: str) -> Any:
+    entry = _disk_load().get(url)
+    if not isinstance(entry, dict) or (time.time() - entry.get("ts", 0)) > _DISK_TTL:
+        return _MISS
+    return entry.get("data")
+
+
+def _disk_put(url: str, data: Any) -> None:
+    cache = _disk_load()
+    cache[url] = {"ts": time.time(), "data": data}
+    try:
+        _DISK_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _DISK_CACHE_PATH.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+
+
+_MISS = object()
+
+
 @acached(ttl=settings.cache_ttl * 24)
 async def _fetch_anitabi(url: str) -> Any:
+    cached = _disk_get(url)
+    if cached is not _MISS:
+        return cached
+
     async def fetch() -> Any:
+        await asyncio.sleep(0.15)  # 公益站礼貌间隔：并发 2 × 间隔 ≈ 每秒 ~5 请求上限
         async with httpx.AsyncClient(
             timeout=settings.http_timeout,
             headers={"User-Agent": settings.bangumi_user_agent},
@@ -101,6 +211,8 @@ async def _fetch_anitabi(url: str) -> Any:
             res = await client.get(url)
             if res.status_code == 404:
                 return None
+            if res.status_code in {403, 429}:
+                raise AnitabiRateLimited(f"anitabi {res.status_code}")
             res.raise_for_status()
             text = res.text.strip()
             return res.json() if text else None
@@ -109,6 +221,7 @@ async def _fetch_anitabi(url: str) -> Any:
     first = result[0]
     if isinstance(first, BaseException):
         raise first
+    _disk_put(url, first)  # 命中与"未收录(None)"都落盘；被限流的不缓存
     return first
 
 
@@ -144,13 +257,19 @@ class GetPilgrimageMapTool(Tool):
         if not sid:
             return ToolResult(ok=False, error="需要 subject_id 或可解析的动画标题")
         await emit_tool_progress(tool=self.name, summary=f"查询《{title}》巡礼点", current=1, total=2)
-        lite = await _fetch_anitabi(_ANITABI_LITE.format(sid=sid))
+        try:
+            lite = await _fetch_anitabi(_ANITABI_LITE.format(sid=sid))
+        except AnitabiRateLimited:
+            return ToolResult(ok=False, error="anitabi 暂时限流（访问过于频繁），请过一会儿重试；不代表该作品没有巡礼数据")
         if not lite:
             return ToolResult(
                 ok=False,
                 error=f"anitabi 未收录《{title}》的巡礼数据（社区库覆盖以有实地取景的作品为主）",
             )
-        detail = await _fetch_anitabi(_ANITABI_POINTS.format(sid=sid)) or []
+        try:
+            detail = await _fetch_anitabi(_ANITABI_POINTS.format(sid=sid)) or []
+        except AnitabiRateLimited:
+            detail = []
         rows = detail if isinstance(detail, list) and detail else (lite.get("litePoints") or [])
         points: list[PilgrimagePoint] = []
         for p in rows[: args.limit]:
@@ -240,12 +359,20 @@ class PlanPilgrimageTripTool(Tool):
         )
         entries: list[PilgrimageTripEntry] = []
         city_key = args.city.strip()
+        known_region = not city_key or city_key in _REGION_CENTERS
+        rate_limited = sum(1 for x in lites if isinstance(x, AnitabiRateLimited))
+        other_errors = sum(1 for x in lites if isinstance(x, BaseException) and not isinstance(x, AnitabiRateLimited))
         for (sid, name), lite in zip(subjects, lites, strict=False):
             if isinstance(lite, BaseException) or not lite:
                 continue
             city = str(lite.get("city") or "")
-            if city_key and not _city_match(city_key, city):
-                continue
+            tier: str = "core"
+            distance: int | None = None
+            if city_key:
+                classified = _classify_entry(city_key, city, lite.get("geo"))
+                if classified is None:
+                    continue
+                tier, distance = classified
             pts = lite.get("litePoints") or []
             entries.append(
                 PilgrimageTripEntry(
@@ -255,18 +382,36 @@ class PlanPilgrimageTripTool(Tool):
                     point_count=int(lite.get("pointsLength") or len(pts) or 0),
                     map_url=_ANITABI_MAP.format(sid=sid),
                     cover=str(lite.get("cover") or ""),
+                    tier=tier,
+                    distance_km=distance,
                     sample_points=[str(p.get("name")) for p in pts[:3] if p.get("name")],
                 )
             )
-        entries.sort(key=lambda e: -e.point_count)
+        tier_rank = {"core": 0, "nearby": 1, "bonus": 2}
+        entries.sort(key=lambda e: (tier_rank.get(e.tier, 3), -e.point_count))
         await emit_tool_progress(tool=self.name, summary=f"命中 {len(entries)} 部有巡礼数据的作品", current=3, total=3)
         result = PilgrimageTripResult(
             username=username,
             city_filter=city_key,
-            entries=entries[:20],
+            entries=entries[:24],
             checked=len(subjects),
             caveats=[
-                "候选按你的评分从高到低检查（最爱优先）；城市为 anitabi 标注的主要取景城市（前缀匹配），跨城作品可能未命中，可去掉过滤重查。",
+                *(
+                    [f"⚠ anitabi 访问受限（{rate_limited}/{len(subjects)} 个请求被限流），本次结果**不完整**，请过一会儿重试；不代表这些作品没有巡礼数据。"]
+                    if rate_limited else []
+                ),
+                *(
+                    [f"{other_errors} 个请求失败（网络波动），结果可能略有遗漏。"]
+                    if other_errors > len(subjects) // 5 else []
+                ),
+                "候选按你的评分从高到低检查（最爱优先）。",
+                (
+                    "目的地按都市圈分层：core=同城、nearby=顺路近郊（如东京→饭能/秩父）、bonus=稍远惊喜（如大阪→冈山），距离为番剧取景中心到目的地的直线距离。"
+                    if known_region and city_key else
+                    "该目的地不在内置都市圈表中，仅做了城市名前缀匹配；可换用 东京/大阪/京都/关西/关东 等常用名获得圈层推荐。"
+                    if city_key else
+                    "未指定目的地，列出全部有巡礼数据的作品。"
+                ),
                 "数据来自 anitabi.cn 社区共建；实地探访请遵守当地秩序。",
             ],
         )

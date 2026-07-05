@@ -706,14 +706,14 @@ class RecommendTool(Tool):
         if args.cross_media:
             if args.subject_type != "anime":
                 source_items = await self.client.get_all_user_collections(
-                    username, SUBJECT_TYPE["anime"], collection_type=2, max_items=300
+                    username, SUBJECT_TYPE["anime"], collection_type=2, max_items=1000
                 )
             else:
                 source_items = []
                 for source_type in ("book", "game"):
                     source_items.extend(
                         await self.client.get_all_user_collections(
-                            username, SUBJECT_TYPE[source_type], collection_type=2, max_items=200
+                            username, SUBJECT_TYPE[source_type], collection_type=2, max_items=500
                         )
                     )
             await self._cross_media_recall(cand, stype, source_items, seen)

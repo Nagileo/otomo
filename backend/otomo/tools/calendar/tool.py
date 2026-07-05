@@ -441,13 +441,13 @@ class AiringProgressTool(Tool):
             return ToolResult(ok=False, error="需要 username 或有效 Bangumi 登录态")
         await emit_tool_progress(tool=self.name, summary=f"读取 @{username} 在看列表", current=1, total=4)
         rows = await self.client.get_all_user_collections(
-            username, SUBJECT_TYPE["anime"], collection_type=3, max_items=200
+            username, SUBJECT_TYPE["anime"], collection_type=3, max_items=300
         )
         jobs = [self._progress_for(row, "watching") for row in rows[: args.limit]]
         if args.include_wishlist:
             await emit_tool_progress(tool=self.name, summary="读取想看列表并补本季开播候选", current=2, total=4)
             wish = await self.client.get_all_user_collections(
-                username, SUBJECT_TYPE["anime"], collection_type=1, max_items=120
+                username, SUBJECT_TYPE["anime"], collection_type=1, max_items=300
             )
             jobs.extend(self._progress_for(row, "wishlist") for row in wish[: max(0, args.limit - len(jobs))])
         await emit_tool_progress(tool=self.name, summary=f"并发计算 {len(jobs)} 部作品的已播进度", current=3, total=4)

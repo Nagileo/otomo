@@ -347,13 +347,13 @@ class WatchCopilotTool(Tool):
             username, SUBJECT_TYPE["anime"], collection_type=2, max_items=1000
         )
         watching = await self.client.get_all_user_collections(
-            username, SUBJECT_TYPE["anime"], collection_type=3, max_items=100
+            username, SUBJECT_TYPE["anime"], collection_type=3, max_items=200
         )
         wishlist = await self.client.get_all_user_collections(
-            username, SUBJECT_TYPE["anime"], collection_type=1, max_items=160
+            username, SUBJECT_TYPE["anime"], collection_type=1, max_items=400
         )
         on_hold = (
-            await self.client.get_all_user_collections(username, SUBJECT_TYPE["anime"], collection_type=4, max_items=100)
+            await self.client.get_all_user_collections(username, SUBJECT_TYPE["anime"], collection_type=4, max_items=200)
             if args.include_on_hold else []
         )
         profile = compute_taste_profile(username, watched)

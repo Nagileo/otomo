@@ -200,3 +200,22 @@ def test_pilgrimage_city_match_prefix_not_substring():
     assert _city_match("秩父", "秩父市")
     assert _city_match("京都市", "京都")  # 双向前缀：查询比标注更具体
     assert not _city_match("大阪", "东京都")
+
+
+def test_pilgrimage_geo_tiers():
+    """都市圈分层：名称命中=core；25km 内=core；nearby/bonus 按半径分档。
+
+    覆盖用户点名的场景：东京→饭能/鹫宫/秩父（nearby）、大阪→冈山（bonus）、
+    京都→宇治（core，京吹的 city 标"宇治市"，名称匹配盖不住）。"""
+    from otomo.tools.pilgrimage.tool import _classify_entry
+
+    assert _classify_entry("京都", "京都市", None) == ("core", None)  # 名称命中不需要坐标
+    assert _classify_entry("京都", "宇治市", [34.906, 135.812])[0] == "core"  # ~15km 同城
+    hanno = _classify_entry("东京", "饭能市", [35.855, 139.327])
+    assert hanno[0] == "nearby" and 30 <= hanno[1] <= 60
+    chichibu = _classify_entry("东京", "秩父市", [35.99, 139.08])
+    assert chichibu[0] == "nearby"
+    okayama = _classify_entry("大阪", "冈山市", [34.655, 133.919])
+    assert okayama[0] == "bonus" and okayama[1] > 100
+    assert _classify_entry("东京", "冲绳", [26.2, 127.7]) is None  # 圈外
+    assert _classify_entry("桂林", "东京都", [35.68, 139.77]) is None  # 未知目的地→仅名称匹配

@@ -137,33 +137,60 @@ export function PilgrimagePanel({ data }: { data: AnyRecord }) {
   );
 }
 
+const TRIP_TIERS: [string, string][] = [
+  ["core", "目的地"],
+  ["nearby", "顺路近郊"],
+  ["bonus", "稍远惊喜"],
+];
+
+function TripCard({ e }: { e: AnyRecord }) {
+  return (
+    <a className="trip-card" href={text(e.map_url, "#")} target="_blank" rel="noreferrer">
+      {e.cover ? <img src={e.cover} alt="" loading="lazy" referrerPolicy="no-referrer" /> : null}
+      <div className="trip-meta">
+        <div className="trip-title">{text(e.title)}</div>
+        <div className="trip-sub">
+          <Badge tone="good">{e.point_count} 个取景点</Badge>
+          {e.city && <Badge tone="dim">{text(e.city)}</Badge>}
+          {e.distance_km != null && <Badge tone="warn">约 {e.distance_km}km</Badge>}
+        </div>
+        {list<string>(e.sample_points).length > 0 && (
+          <div className="trip-samples">{list<string>(e.sample_points).join(" · ")}</div>
+        )}
+      </div>
+    </a>
+  );
+}
+
 export function PilgrimageTripPanel({ data }: { data: AnyRecord }) {
   const entries = list(data.entries);
+  const hasTiers = entries.some((e) => e.tier && e.tier !== "core");
   return (
     <Panel
       title={`巡礼行程 · @${text(data.username)}`}
       subtitle={`${data.city_filter ? `目的地「${text(data.city_filter)}」 · ` : ""}检查 ${data.checked ?? 0} 部 → ${entries.length} 部有圣地数据`}
     >
-      {entries.length === 0 && <div className="empty-hint">看过/在看里没有命中巡礼数据；可去掉城市过滤重查。</div>}
-      <div className="trip-list">
-        {entries.map((e, i) => (
-          <a key={i} className="trip-card" href={text(e.map_url, "#")} target="_blank" rel="noreferrer">
-            {e.cover ? <img src={e.cover} alt="" loading="lazy" referrerPolicy="no-referrer" /> : null}
-            <div className="trip-meta">
-              <div className="trip-title">{text(e.title)}</div>
-              <div className="trip-sub">
-                <Badge tone="good">{e.point_count} 个取景点</Badge>
-                {e.city && <Badge tone="dim">{text(e.city)}</Badge>}
+      {entries.length === 0 && <div className="empty-hint">看过/在看里没有命中巡礼数据；可去掉城市过滤或换用 东京/关西 等常用目的地名重查。</div>}
+      {hasTiers ? (
+        TRIP_TIERS.map(([tier, label]) => {
+          const group = entries.filter((e) => (e.tier || "core") === tier);
+          if (!group.length) return null;
+          return (
+            <div key={tier}>
+              <div className="section-title">{label}（{group.length}）</div>
+              <div className="trip-list">
+                {group.map((e, i) => <TripCard e={e} key={`${tier}-${i}`} />)}
               </div>
-              {list<string>(e.sample_points).length > 0 && (
-                <div className="trip-samples">{list<string>(e.sample_points).join(" · ")}</div>
-              )}
             </div>
-          </a>
-        ))}
-      </div>
-      {list<string>(data.caveats).length > 0 && (
-        <p className="card-note">{list<string>(data.caveats)[0]}</p>
+          );
+        })
+      ) : (
+        <div className="trip-list">
+          {entries.map((e, i) => <TripCard e={e} key={i} />)}
+        </div>
+      )}
+      {list<string>(data.caveats).length > 1 && (
+        <p className="card-note">{list<string>(data.caveats)[1]}</p>
       )}
     </Panel>
   );

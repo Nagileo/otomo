@@ -254,7 +254,7 @@ class BangumiClient:
 
     async def get_all_user_collections(
         self, username: str, subject_type: int = 2, collection_type: int | None = None,
-        max_items: int = 300,
+        max_items: int = 500,
     ) -> list[dict]:
         """分页拉取收藏（默认全部状态），用于口味聚合 / 排除已看。"""
         items: list[dict] = []
