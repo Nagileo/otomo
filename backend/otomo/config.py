@@ -96,8 +96,11 @@ class Settings(BaseSettings):
     rate_limit_chat_per_hour: int = 30
     rate_limit_uploads_per_minute: int = 5
     anonymous_session_turn_limit: int = 8
-    daily_token_budget_user: int = 200_000
-    daily_token_budget_global: int = 1_000_000
+    # 真实 usage 计量（llm.py 代理逐次累加，DeepSeek cache hit 按 1/10 折算）。
+    # 参考量级：一次复杂查询（推荐/资源聚合）约 1~4 万折算 token。
+    # 本地开发可设 0 关闭；公网部署按预算在 production.env 收紧。
+    daily_token_budget_user: int = 1_500_000
+    daily_token_budget_global: int = 8_000_000
     quota_store_path: str = "cache/quota.json"
     notification_email_enabled: bool = False
     smtp_host: str = ""

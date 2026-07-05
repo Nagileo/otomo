@@ -55,7 +55,18 @@ def add_usage_from_response(resp: Any) -> None:
     usage = getattr(resp, "usage", None)
     if usage is None:
         return
-    add_usage(getattr(usage, "prompt_tokens", 0) or 0, getattr(usage, "completion_tokens", 0) or 0)
+    prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
+    completion = int(getattr(usage, "completion_tokens", 0) or 0)
+    # DeepSeek 的前缀缓存命中计费约为原价 1/10（system prompt + 73 个工具 schema
+    # 每轮几乎全命中）；按折算计入，让配额数字接近真实成本比例，避免误熔断。
+    cache_hit = getattr(usage, "prompt_cache_hit_tokens", None)
+    if cache_hit is None:
+        extra = getattr(usage, "model_extra", None) or {}
+        cache_hit = extra.get("prompt_cache_hit_tokens")
+    if cache_hit:
+        hit = min(int(cache_hit), prompt)
+        prompt = (prompt - hit) + hit // 10
+    add_usage(prompt, completion)
 
 
 def collected_usage() -> int:
@@ -140,9 +151,15 @@ class TokenQuotaStore:
         user_used = int((data.get("users") or {}).get(user_key, 0) or 0)
         global_used = int(data.get("global", 0) or 0)
         if settings.daily_token_budget_global > 0 and global_used >= settings.daily_token_budget_global:
-            raise HTTPException(status_code=429, detail="今日全局 LLM/VLM 配额已用完，请明天再试")
+            raise HTTPException(
+                status_code=429,
+                detail=f"今日全局 LLM/VLM 配额已用完（已计 {global_used:,}/{settings.daily_token_budget_global:,}），请明天再试",
+            )
         if settings.daily_token_budget_user > 0 and user_used >= settings.daily_token_budget_user:
-            raise HTTPException(status_code=429, detail="你今日的 LLM/VLM 配额已用完，请明天再试")
+            raise HTTPException(
+                status_code=429,
+                detail=f"你今日的 LLM/VLM 配额已用完（已计 {user_used:,}/{settings.daily_token_budget_user:,}），请明天再试",
+            )
 
     def record(self, user_key: str, tokens: int) -> dict[str, int]:
         if tokens <= 0:
