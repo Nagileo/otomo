@@ -1047,6 +1047,24 @@ export default function Home() {
       <div className="grid">
         <div className="panel">
           <h3>对话</h3>
+          {messages.length === 0 && !answer && (
+            <div className="welcome">
+              <div className="welcome-title">你的 ACGN 生活助手</div>
+              <div className="welcome-sub">推荐 · 评价 · 追番 · 资源 · 识图，都可以直接问。试试：</div>
+              <div className="welcome-chips">
+                {[
+                  "今天有什么番更新？",
+                  "今天谁过生日？",
+                  "孤独摇滚和轻音少女哪个好看？",
+                  "本周放送时间表",
+                  "推荐几部治愈系 galgame",
+                  "最近全站什么番最火？",
+                ].map((q) => (
+                  <button key={q} className="chip" onClick={() => send(q)} disabled={busy}>{q}</button>
+                ))}
+              </div>
+            </div>
+          )}
           {messages.map((m, i) => (
             <div key={i} className={`msg ${m.role}`}>
               <div className="role">{m.role === "user" ? "你" : "Otomo"}</div>

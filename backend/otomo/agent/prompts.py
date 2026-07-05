@@ -107,7 +107,8 @@ SYSTEM_PROMPT += """
 - 评分预测：用户问“我会给它打几分/我会喜欢吗/估个分”时，调用 predict_my_rating；要说明是画像级估计、非真实评分。
 - 萌点检索：用户要“多个标签组合精确筛选/某年后某题材高分作”时，调用 search_by_traits（tags 取交集，可加 min_score/年份）。
 - 分集口碑雷达：用户问“哪几集最热/名场面在第几集/口碑高峰”时，调用 episode_buzz_radar；用户给了进度就传 progress_episode 防剧透。
-- 今天谁过生日/生日角色：调用 get_character_birthdays（AniList 人气排序，可用 Bangumi 检索链接核对）。
+- 今天谁过生日/生日角色：调用 get_character_birthdays（AniList 人气图卡 + 萌娘完整名单，含游戏角色/声优）。
+- **R18/NSFW 可见性**：Bangumi 对未登录请求完全隐藏 R18 条目（搜索不出现、条目页 404）；登录且账号开启"显示成人内容"才可见。搜索 galgame 落空时（尤其知名 R18 作），要主动说明"该作品可能是 R18 条目，需要绑定 Bangumi 账号且在 bgm.tv 设置中开启显示成人内容"，不要断言作品不存在。
 - "A 和 B 哪个好看/对比一下 X 和 Y"：调用 compare_subjects 拿硬指标对照（评分/热度/弃番率/标签异同），主观取舍再结合 review_subject 或口味画像。
 
 证据面板与正文分工（重要，影响观感）：

@@ -204,3 +204,19 @@
   expect_tools: ["episode_buzz_radar"]
   expect_panels: ["episode_buzz_radar"]
   note: 分集讨论数雷达，应产出曲线面板
+
+- id: birthday_today
+  question: 今天有哪些角色过生日？
+  kind: single_hop
+  expect_tools: ["get_character_birthdays"]
+  expect_panels: ["get_character_birthdays"]
+  forbid_tools: ["web_search"]
+  note: 双源生日（AniList 图卡 + 萌娘名单）；不应走 web 搜索
+
+- id: compare_inline_anchor
+  question: 孤独摇滚和轻音少女哪个好看？对比一下。
+  kind: two_hop
+  expect_tools: ["compare_subjects"]
+  expect_any: ["[[panel:"]
+  expect_absent: ["| 评分 |", "|评分|"]
+  note: 应调对比工具并在正文插 [[panel:]] 锚定标记；正文不得用 markdown 表格复述面板数据（方案C回归保护）

@@ -162,6 +162,30 @@ class DailyAiringService:
             plan.updated_at = now_iso()
         return updates
 
+    async def _birthday_section(self) -> dict[str, Any] | None:
+        """今日生日（AniList 图卡 + 萌娘名单）——所有用户共享，循环外取一次（内部有缓存）。"""
+        try:
+            from .tools.discovery.tool import BirthdayArgs, GetCharacterBirthdaysTool
+
+            res = await GetCharacterBirthdaysTool().run(BirthdayArgs(limit=6, moegirl_limit=12))
+        except Exception:  # noqa: BLE001
+            return None
+        if not res.ok or res.data is None or not res.data.count:
+            return None
+        rows = [
+            {"name": c.name_native or c.name, "title": c.from_media, "url": c.anilist_url or c.bangumi_search_url}
+            for c in res.data.characters[:6]
+        ]
+        rows.extend(
+            {"name": m.name, "title": m.from_media, "url": m.url}
+            for m in res.data.moegirl_entries[:8]
+        )
+        return {
+            "title": "今日生日",
+            "items": rows,
+            "notes": ["来自 AniList 人气榜与萌娘百科生日分类；两源口径不同可能有重复。"],
+        }
+
     async def run_due_once(self, now: datetime | None = None) -> int:
         if not settings.daily_airing_enabled:
             return 0
@@ -171,6 +195,7 @@ class DailyAiringService:
         if local_now.hour != settings.daily_airing_hour:
             return 0
         run_key = local_now.strftime("%Y-%m-%d-%H")
+        birthday_section = await self._birthday_section()
         for username in self.ltm.list_users():
             mem = self.ltm.load_user(username)
             sub = mem.weekly_digest_subscription
@@ -206,6 +231,7 @@ class DailyAiringService:
                         "items": rss_updates[:12],
                         "notes": ["只检查计划板 rss_url；Otomo 不下载、不托管资源。"],
                     },
+                    *([birthday_section] if birthday_section else []),
                 ],
                 "next_actions": [
                     "如果某部番确定追，可以把 release RSS 写入计划板，用每日提醒检查更新。",

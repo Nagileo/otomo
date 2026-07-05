@@ -642,3 +642,9 @@ a.card-title:hover { color: var(--accent); }
 }
 .birthday-tag:hover { border-color: var(--accent); }
 .birthday-tag small { color: var(--dim); }
+
+/* ---- 空会话引导 ---- */
+.welcome { padding: 28px 12px 20px; text-align: center; }
+.welcome-title { font-size: 17px; font-weight: 700; }
+.welcome-sub { font-size: 12.5px; color: var(--dim); margin: 6px 0 14px; }
+.welcome-chips { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; max-width: 560px; margin: 0 auto; }
