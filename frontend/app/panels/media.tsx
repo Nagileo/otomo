@@ -95,6 +95,80 @@ export function BirthdayPanel({ data }: { data: AnyRecord }) {
   );
 }
 
+export function PilgrimagePanel({ data }: { data: AnyRecord }) {
+  const points = list(data.points);
+  return (
+    <Panel
+      title={`圣地巡礼 · ${text(data.title)}`}
+      subtitle={`${text(data.city, "多地")} · 共 ${data.count ?? points.length} 个取景点`}
+    >
+      <div className="evidence-row">
+        <Badge tone="dim">source: anitabi 社区共建</Badge>
+        {data.map_url && (
+          <a className="inline-link" href={data.map_url} target="_blank" rel="noreferrer">打开完整地图 →</a>
+        )}
+      </div>
+      <div className="pilgrimage-grid">
+        {points.map((p, i) => (
+          <a
+            key={i}
+            className="pilgrimage-card"
+            href={text(p.google_maps_url || data.map_url, "#")}
+            target="_blank"
+            rel="noreferrer"
+            title={text(p.name)}
+          >
+            {p.image ? <img src={p.image} alt="" loading="lazy" referrerPolicy="no-referrer" /> : null}
+            <div className="pilgrimage-meta">
+              <div className="pilgrimage-name">{text(p.name)}</div>
+              <div className="pilgrimage-sub">
+                {p.episode != null && <Badge tone="dim">ep{p.episode}</Badge>}
+                {p.second != null && <Badge tone="dim">{Math.floor(p.second / 60)}:{String(p.second % 60).padStart(2, "0")}</Badge>}
+                {p.origin && <small>{text(p.origin)}</small>}
+              </div>
+            </div>
+          </a>
+        ))}
+      </div>
+      {list<string>(data.caveats).length > 0 && (
+        <p className="card-note">{list<string>(data.caveats)[0]}</p>
+      )}
+    </Panel>
+  );
+}
+
+export function PilgrimageTripPanel({ data }: { data: AnyRecord }) {
+  const entries = list(data.entries);
+  return (
+    <Panel
+      title={`巡礼行程 · @${text(data.username)}`}
+      subtitle={`${data.city_filter ? `目的地「${text(data.city_filter)}」 · ` : ""}检查 ${data.checked ?? 0} 部 → ${entries.length} 部有圣地数据`}
+    >
+      {entries.length === 0 && <div className="empty-hint">看过/在看里没有命中巡礼数据；可去掉城市过滤重查。</div>}
+      <div className="trip-list">
+        {entries.map((e, i) => (
+          <a key={i} className="trip-card" href={text(e.map_url, "#")} target="_blank" rel="noreferrer">
+            {e.cover ? <img src={e.cover} alt="" loading="lazy" referrerPolicy="no-referrer" /> : null}
+            <div className="trip-meta">
+              <div className="trip-title">{text(e.title)}</div>
+              <div className="trip-sub">
+                <Badge tone="good">{e.point_count} 个取景点</Badge>
+                {e.city && <Badge tone="dim">{text(e.city)}</Badge>}
+              </div>
+              {list<string>(e.sample_points).length > 0 && (
+                <div className="trip-samples">{list<string>(e.sample_points).join(" · ")}</div>
+              )}
+            </div>
+          </a>
+        ))}
+      </div>
+      {list<string>(data.caveats).length > 0 && (
+        <p className="card-note">{list<string>(data.caveats)[0]}</p>
+      )}
+    </Panel>
+  );
+}
+
 const COMPARE_ROWS: [string, string, (c: Record<string, any>) => string][] = [
   ["score", "评分", (c) => (c.score != null ? String(c.score) : "—")],
   ["rank", "排名", (c) => (c.rank ? `#${c.rank}` : "—")],

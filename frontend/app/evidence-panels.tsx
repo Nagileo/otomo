@@ -2,7 +2,7 @@
 
 import { useState, type ReactNode } from "react";
 
-import { BirthdayPanel, ComparePanel, TrendingPanel } from "./panels/media";
+import { BirthdayPanel, ComparePanel, PilgrimagePanel, PilgrimageTripPanel, TrendingPanel } from "./panels/media";
 import { InboxPanel } from "./panels/memory";
 import { PixivPanel } from "./panels/visual";
 
@@ -2475,6 +2475,8 @@ export const PANEL_LABELS: Record<string, string> = {
   get_trending_subjects: "全站热门",
   get_character_birthdays: "今日生日",
   compare_subjects: "作品对比",
+  get_pilgrimage_map: "圣地巡礼",
+  plan_pilgrimage_trip: "巡礼行程",
   list_weekly_digest_inbox: "收件箱",
   get_broadcast_calendar: "放送日历",
   get_airing_progress: "追番进度",
@@ -2525,6 +2527,8 @@ export function renderPanelByName(name: string, rows: AnyRecord[], h: PanelHandl
     case "get_trending_subjects": return render((d, i) => <TrendingPanel data={d} key={`${name}-${i}`} />);
     case "get_character_birthdays": return render((d, i) => <BirthdayPanel data={d} key={`${name}-${i}`} />);
     case "compare_subjects": return render((d, i) => <ComparePanel data={d} key={`${name}-${i}`} />);
+    case "get_pilgrimage_map": return render((d, i) => <PilgrimagePanel data={d} key={`${name}-${i}`} />);
+    case "plan_pilgrimage_trip": return render((d, i) => <PilgrimageTripPanel data={d} key={`${name}-${i}`} />);
     case "list_weekly_digest_inbox": return render((d, i) => <InboxPanel data={d} key={`${name}-${i}`} />);
     case "get_broadcast_calendar": return render((d, i) => <BroadcastCalendarPanel data={d} onPrepareWrite={h.onPrepareWrite} key={`${name}-${i}`} />);
     case "get_airing_progress": return render((d, i) => <AiringProgressPanel data={d} key={`${name}-${i}`} />);

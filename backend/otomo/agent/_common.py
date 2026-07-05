@@ -496,6 +496,8 @@ _PANEL_TOOLS = {
     "get_trending_subjects",
     "get_character_birthdays",
     "compare_subjects",
+    "get_pilgrimage_map",
+    "plan_pilgrimage_trip",
     "where_to_watch",
     "get_anime_release_feeds",
     "get_bangumi_index",
@@ -1192,6 +1194,24 @@ def panel_data_from_payload(name: str, payload: dict[str, Any] | None) -> dict[s
             "columns": _trim_dicts(data.get("columns"), limit=3),
             "shared_tags": _trim_strings(data.get("shared_tags"), limit=8, text_limit=24),
             "highlights": _trim_strings(data.get("highlights"), limit=5, text_limit=80),
+            "caveats": _trim_strings(data.get("caveats"), limit=3, text_limit=160),
+        }
+    if name == "get_pilgrimage_map":
+        return {
+            "subject_id": data.get("subject_id"),
+            "title": data.get("title"),
+            "city": data.get("city"),
+            "map_url": data.get("map_url"),
+            "count": data.get("count"),
+            "points": _trim_dicts(data.get("points"), limit=20),
+            "caveats": _trim_strings(data.get("caveats"), limit=3, text_limit=160),
+        }
+    if name == "plan_pilgrimage_trip":
+        return {
+            "username": data.get("username"),
+            "city_filter": data.get("city_filter"),
+            "checked": data.get("checked"),
+            "entries": _trim_dicts(data.get("entries"), limit=20),
             "caveats": _trim_strings(data.get("caveats"), limit=3, text_limit=160),
         }
     if name in _MEMORY_TOOLS:

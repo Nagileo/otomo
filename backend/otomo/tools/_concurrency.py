@@ -20,6 +20,8 @@ HOST_LIMITS = {
     "dmhy": 1,
     "acgnx": 1,
     "moegirl": 2,
+    "anitabi": 3,
+    "anitabi_batch": 4,  # 旅行模式外层批量；与内层 "anitabi" 分层（同名嵌套会死锁）
     "qbittorrent": 1,
 }
 
