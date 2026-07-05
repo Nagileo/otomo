@@ -27,6 +27,7 @@ from ...memory.models import (
     memory_summary,
 )
 from ..bangumi.client import BangumiClient
+from ..release.qbittorrent import DownloaderPushRequest, push_to_qbittorrent
 
 COLLECTION_TYPE_LABELS = {
     1: "想看/想读/想听/想玩",
@@ -106,6 +107,9 @@ class UpsertWatchPlanArgs(BaseModel):
     priority: int = Field(3, ge=1, le=5)
     reason: str = ""
     tags: list[str] = Field(default_factory=list)
+    rss_url: str = Field("", description="可选：该作品/字幕组的 RSS 订阅地址，用于每日放送提醒")
+    subgroup: str = Field("", description="可选：订阅字幕组名")
+    last_seen_pub_date: str = Field("", description="可选：RSS 已处理到的最新 pubDate/ISO 时间")
     source: str = "agent"
 
 
@@ -365,7 +369,17 @@ class ExecuteBangumiWriteActionTool(Tool):
             return ToolResult(ok=False, error=f"动作状态不是 pending：{action.status}")
 
         try:
-            if action.operation == "set_collection":
+            if action.operation == "push_downloader":
+                result = await push_to_qbittorrent(
+                    DownloaderPushRequest(
+                        url=str(action.payload.get("url") or ""),
+                        category=str(action.payload.get("category") or ""),
+                        save_path=str(action.payload.get("save_path") or ""),
+                        paused=bool(action.payload.get("paused") or False),
+                    )
+                )
+                action.after = result
+            elif action.operation == "set_collection":
                 if action.subject_id is None:
                     return ToolResult(ok=False, error="动作缺少 subject_id")
                 await self.client.set_my_collection(action.subject_id, action.payload)
@@ -391,9 +405,12 @@ class ExecuteBangumiWriteActionTool(Tool):
                     after=action.after,
                     confirmed=True,
                     source="bangumi_write",
+                    # qB 推送仍用 write 决策类型；source 字段区分边界。
                     ts=now_iso(),
                 ),
             )
+            if action.operation == "push_downloader":
+                decision.source = "downloader"
             self.ltm.save_user(mem)
             return ToolResult(
                 ok=True,
@@ -402,7 +419,11 @@ class ExecuteBangumiWriteActionTool(Tool):
                     action=action,
                     decision=decision,
                     memory=_summ(mem),
-                    message="已写回 Bangumi，并记录到 decision_log。",
+                    message=(
+                        "已推送到 qBittorrent，并记录到 decision_log。"
+                        if action.operation == "push_downloader"
+                        else "已写回 Bangumi，并记录到 decision_log。"
+                    ),
                 ),
             )
         except Exception as e:  # noqa: BLE001
@@ -475,6 +496,8 @@ class UndoBangumiWriteActionTool(Tool):
         action = next((x for x in candidates if x.id == args.action_id), None) if args.action_id else (candidates[-1] if candidates else None)
         if action is None:
             return ToolResult(ok=False, error="没有可撤销的已执行动作")
+        if action.operation == "push_downloader":
+            return ToolResult(ok=False, error="下载器推送不支持自动撤销；请在 qBittorrent WebUI 中手动移除。")
         if not action.before:
             return ToolResult(ok=False, error="该动作没有旧值快照，无法安全撤销；请在 Bangumi 手动检查。")
         try:
@@ -545,6 +568,12 @@ class UpsertWatchPlanTool(Tool):
             current.priority = args.priority
             current.reason = args.reason.strip()
             current.tags = [x.strip() for x in args.tags if x.strip()]
+            if args.rss_url.strip():
+                current.rss_url = args.rss_url.strip()
+            if args.subgroup.strip():
+                current.subgroup = args.subgroup.strip()
+            if args.last_seen_pub_date.strip():
+                current.last_seen_pub_date = args.last_seen_pub_date.strip()
             current.source = args.source
             current.updated_at = now
             message = "已更新计划板条目。"
@@ -558,6 +587,9 @@ class UpsertWatchPlanTool(Tool):
                 priority=args.priority,
                 reason=args.reason.strip(),
                 tags=[x.strip() for x in args.tags if x.strip()],
+                rss_url=args.rss_url.strip(),
+                subgroup=args.subgroup.strip(),
+                last_seen_pub_date=args.last_seen_pub_date.strip(),
                 source=args.source,
                 created_at=now,
                 updated_at=now,

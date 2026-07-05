@@ -165,6 +165,17 @@ class BangumiClient:
         """Bangumi daily broadcast calendar grouped by weekday."""
         return await self._get("/calendar")
 
+    async def get_index(self, index_id: int) -> Any:
+        """Bangumi 目录详情。"""
+        return await self._get(f"/v0/indices/{index_id}")
+
+    async def get_index_subjects(self, index_id: int, limit: int = 50, offset: int = 0) -> Any:
+        """Bangumi 目录条目列表（分页）。"""
+        return await self._get(
+            f"/v0/indices/{index_id}/subjects",
+            {"limit": min(limit, 50), "offset": offset},
+        )
+
     async def get_subject_characters(self, subject_id: int) -> Any:
         return await self._get(f"/v0/subjects/{subject_id}/characters")
 

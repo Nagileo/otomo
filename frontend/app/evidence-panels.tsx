@@ -289,6 +289,202 @@ function TasteAffinityPanel({ data }: { data: AnyRecord }) {
 }
 
 type PrepareWriteHandler = (subjectId: number, subjectName: string, collectionType?: number) => void;
+type PrepareDownloaderHandler = (payload: AnyRecord) => void;
+
+function WhereToWatchPanel({ data }: { data: AnyRecord }) {
+  const official = list(data.official_sources);
+  const fallbacks = list(data.search_fallbacks);
+  return (
+    <Panel
+      title={`正版观看 · ${text(data.title)}`}
+      subtitle={`${official.length} 个官方候选 · ${fallbacks.length} 个搜索兜底`}
+    >
+      <div className="evidence-row">
+        <Badge tone={official.length ? "good" : "warn"}>{official.length ? "official sources" : "no verified platform"}</Badge>
+        {data.offline_hint && <Badge tone="dim">可继续查 RSS/BD</Badge>}
+      </div>
+      {official.length ? (
+        <div className="rating-grid">
+          {official.map((src, i) => (
+            <a className="rating-card" href={src.url} target="_blank" rel="noreferrer" key={`${src.url}-${i}`}>
+              <div className="rating-source">{text(src.label)}</div>
+              <div className="card-meta">{text(src.source)} · {list<string>(src.regions).join("/") || "region unknown"}</div>
+              <Badge tone={src.confidence >= 0.8 ? "good" : "warn"}>match {pct(src.confidence)}</Badge>
+              {src.note && <p className="card-note">{text(src.note)}</p>}
+            </a>
+          ))}
+        </div>
+      ) : (
+        <EmptyHint text="没有查到明确正版平台入口，下面只给搜索兜底。" />
+      )}
+      {fallbacks.length > 0 && (
+        <>
+          <div className="section-title">搜索兜底</div>
+          <div className="compact-list">
+            {fallbacks.map((src, i) => (
+              <a href={src.url} target="_blank" rel="noreferrer" key={`${src.url}-${i}`}>
+                {text(src.label)}<small> · {text(src.note, "")}</small>
+              </a>
+            ))}
+          </div>
+        </>
+      )}
+      {list<string>(data.mapping_notes).length > 0 && (
+        <div className="compact-list">{list<string>(data.mapping_notes).map((n, i) => <span key={i}>{n}</span>)}</div>
+      )}
+      {list<string>(data.caveats).length > 0 && (
+        <div className="caveats">{list<string>(data.caveats).map((c, i) => <span key={i}>{c}</span>)}</div>
+      )}
+    </Panel>
+  );
+}
+
+function ReleaseFeedsPanel({ data, onPrepareDownloaderPush }: { data: AnyRecord; onPrepareDownloaderPush?: PrepareDownloaderHandler }) {
+  const groups = list(data.groups);
+  const fallback = list(data.fallback_items);
+  const links = list(data.search_links);
+  const subjectId = data.subject_id ? Number(data.subject_id) : undefined;
+  return (
+    <Panel
+      title={`离线资源/RSS · ${text(data.title)}`}
+      subtitle={`Mikan ${list(data.mikan_ids).length} 映射 · ${groups.length} 组 · 兜底 ${fallback.length} 条`}
+    >
+      <div className="evidence-row">
+        <Badge tone={data.mapping_confidence >= 0.8 ? "good" : "warn"}>mapping {pct(data.mapping_confidence)}</Badge>
+        <Badge tone="warn">link aggregation only</Badge>
+      </div>
+      {groups.length ? (
+        <div className="digest-list">
+          {groups.map((group, i) => (
+            <div className="digest-card" key={`${group.source}-${group.subgroup}-${i}`}>
+              <div className="digest-title">
+                {text(group.subgroup)} · {text(group.source)} · {text(group.quality)}
+              </div>
+              {group.rss_url && (
+                <a href={group.rss_url} target="_blank" rel="noreferrer" className="inline-link">RSS</a>
+              )}
+              <div className="compact-list">
+                {list(group.latest_items).map((item, idx) => (
+                  <span key={`${item.title}-${idx}`}>
+                    <a href={item.page_url || item.torrent_url || item.magnet || "#"} target="_blank" rel="noreferrer">
+                      {text(item.title)}
+                    </a>
+                    <small> · {text(item.pub_date, "no date")} · {text(item.quality)}</small>
+                    {onPrepareDownloaderPush && (item.torrent_url || item.magnet) && (
+                      <button
+                        type="button"
+                        className="inline-action"
+                        onClick={() => onPrepareDownloaderPush({
+                          torrent_url: item.torrent_url || "",
+                          magnet: item.magnet || "",
+                          title: item.title,
+                          subject_id: subjectId,
+                          subject_name: data.title,
+                        })}
+                      >
+                        推送
+                      </button>
+                    )}
+                  </span>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <EmptyHint text="没有查到 Mikan 分组 RSS；可看下方搜索兜底。" />
+      )}
+      {fallback.length > 0 && (
+        <>
+          <div className="section-title">RSS 兜底结果</div>
+          <div className="compact-list">
+            {fallback.map((item, i) => (
+              <span key={`${item.title}-${i}`}>
+                <a href={item.page_url || item.torrent_url || item.magnet || "#"} target="_blank" rel="noreferrer">
+                  {text(item.source)} · {text(item.title)}
+                </a>
+                {onPrepareDownloaderPush && (item.torrent_url || item.magnet) && (
+                  <button
+                    type="button"
+                    className="inline-action"
+                    onClick={() => onPrepareDownloaderPush({
+                      torrent_url: item.torrent_url || "",
+                      magnet: item.magnet || "",
+                      title: item.title,
+                      subject_id: subjectId,
+                      subject_name: data.title,
+                    })}
+                  >
+                    推送
+                  </button>
+                )}
+              </span>
+            ))}
+          </div>
+        </>
+      )}
+      {links.length > 0 && (
+        <>
+          <div className="section-title">搜索入口</div>
+          <div className="compact-list">
+            {links.map((link, i) => (
+              <a href={link.url} target="_blank" rel="noreferrer" key={`${link.url}-${i}`}>
+                {text(link.label)}<small> · {text(link.note, "")}</small>
+              </a>
+            ))}
+          </div>
+        </>
+      )}
+      {list<string>(data.caveats).length > 0 && (
+        <div className="caveats">{list<string>(data.caveats).map((c, i) => <span key={i}>{c}</span>)}</div>
+      )}
+    </Panel>
+  );
+}
+
+function BangumiIndexPanel({ data, onPrepareWrite }: { data: AnyRecord; onPrepareWrite?: PrepareWriteHandler }) {
+  const items = list(data.items);
+  return (
+    <Panel
+      title={`Bangumi 目录 · ${text(data.title)}`}
+      subtitle={`${text(data.creator, "unknown")} · ${items.length} 条 · index ${text(data.index_id)}`}
+    >
+      {data.description && <p className="evidence-copy">{text(data.description)}</p>}
+      <div className="season-grid">
+        {items.map((item, i) => (
+          <a className="season-card" href={item.url || `https://bgm.tv/subject/${item.id}`} target="_blank" rel="noreferrer" key={`${item.id}-${i}`}>
+            {item.image ? <img src={item.image} alt="" /> : <div className="season-noimg" />}
+            <div className="season-main">
+              <div className="card-title">{text(item.name_cn || item.name)}</div>
+              <div className="card-meta">
+                {item.score ? `Bangumi ${item.score}` : "暂无评分"}
+                {item.rank ? ` · rank ${item.rank}` : ""}
+                {item.collection_status ? ` · 收藏状态 ${item.collection_status}` : ""}
+              </div>
+              {item.comment && <p className="card-note">{text(item.comment)}</p>}
+              {item.id && onPrepareWrite && (
+                <button
+                  type="button"
+                  className="inline-action card-action"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    onPrepareWrite(Number(item.id), text(item.name_cn || item.name), 1);
+                  }}
+                >
+                  想看
+                </button>
+              )}
+            </div>
+          </a>
+        ))}
+      </div>
+      {list<string>(data.notes).length > 0 && (
+        <div className="caveats">{list<string>(data.notes).map((n, i) => <span key={i}>{n}</span>)}</div>
+      )}
+    </Panel>
+  );
+}
 
 function SeasonGuidePanel({ data, onPrepareWrite }: { data: AnyRecord; onPrepareWrite?: PrepareWriteHandler }) {
   const items = list(data.items);
@@ -340,6 +536,7 @@ function SeasonGuidePanel({ data, onPrepareWrite }: { data: AnyRecord; onPrepare
                 )}
                 {item.official_url && <span>官网</span>}
                 {item.pv_url && <span>PV</span>}
+                {item.bili_url && <span>B站正版</span>}
                 {list(item.guide_videos).slice(0, 2).map((v) => <span key={v.url}>{text(v.up_name)}</span>)}
               </div>
             </div>
@@ -1782,7 +1979,7 @@ function MemoryPanel({
 
       {pendingActions.length > 0 && (
         <>
-          <div className="section-title">待确认 Bangumi 写回</div>
+          <div className="section-title">待确认动作</div>
           <div className="action-list">
             {pendingActions.map((action, i) => (
               <div className="action-card" key={`${action.id}-${i}`}>
@@ -1791,10 +1988,16 @@ function MemoryPanel({
                   <div className="card-meta">
                     {text(action.operation)} · {text(action.subject_name || action.subject_id, "未知条目")}
                   </div>
-                  <div className="card-meta">等待你确认后才会写回 Bangumi</div>
+                  <div className="card-meta">
+                    {action.operation === "push_downloader" ? "等待你确认后才会推送到下载器" : "等待你确认后才会写回 Bangumi"}
+                  </div>
                 </div>
                 <div className="action-buttons">
-                  {onConfirmAction && <button className="chip action-confirm" onClick={() => onConfirmAction(text(action.id, ""))}>确认写回</button>}
+                  {onConfirmAction && (
+                    <button className="chip action-confirm" onClick={() => onConfirmAction(text(action.id, ""))}>
+                      {action.operation === "push_downloader" ? "确认推送" : "确认写回"}
+                    </button>
+                  )}
                   {onCancelAction && <button className="chip" onClick={() => onCancelAction(text(action.id, ""))}>取消</button>}
                 </div>
               </div>
@@ -2167,6 +2370,7 @@ export function EvidencePanels({
   onCancelAction,
   onUndoAction,
   onPrepareWrite,
+  onPrepareDownloaderPush,
   onVisualFeedback,
   onVisualCorrectionSearch,
 }: {
@@ -2177,6 +2381,7 @@ export function EvidencePanels({
   onCancelAction?: (id: string) => void;
   onUndoAction?: (id: string) => void;
   onPrepareWrite?: PrepareWriteHandler;
+  onPrepareDownloaderPush?: PrepareDownloaderHandler;
   onVisualFeedback?: (payload: AnyRecord) => void;
   onVisualCorrectionSearch?: (query: string, subjectType?: string) => Promise<AnyRecord[]>;
 }) {
@@ -2184,6 +2389,9 @@ export function EvidencePanels({
   const review = list(evidence.review_subject);
   const taste = list(evidence.compare_user_taste);
   const season = list(evidence.season_guide_brief);
+  const whereToWatch = list(evidence.where_to_watch);
+  const releaseFeeds = list(evidence.get_anime_release_feeds);
+  const bangumiIndex = list(evidence.get_bangumi_index);
   const recommend = list(evidence.recommend_subjects);
   const broadcastCalendar = list(evidence.get_broadcast_calendar);
   const airingProgress = list(evidence.get_airing_progress);
@@ -2207,6 +2415,7 @@ export function EvidencePanels({
     ...list(evidence.forget_user_memory),
     ...list(evidence.record_recommendation_feedback),
     ...list(evidence.prepare_bangumi_write_action),
+    ...list(evidence.prepare_downloader_push),
     ...list(evidence.cancel_bangumi_write_action),
     ...list(evidence.upsert_watch_plan_item),
     ...list(evidence.list_watch_plan),
@@ -2216,6 +2425,7 @@ export function EvidencePanels({
   const memory = devMode ? memoryEvidence : memoryEvidence.filter(hasActionableMemory);
   if (
     !review.length && !taste.length && !season.length && !recommend.length && !broadcastCalendar.length && !airingProgress.length && !memory.length
+    && !whereToWatch.length && !releaseFeeds.length && !bangumiIndex.length
     && !aspect.length && !watchCopilot.length && !weeklyDigest.length && !tasteReport.length && !dashboard.length && !explorer.length
     && !episodeRadar.length && !routeImage.length && !visualText.length && !visualStyle.length && !imageSource.length
     && !biliVideo.length && !videoFrames.length && !claimChecks.length
@@ -2237,6 +2447,11 @@ export function EvidencePanels({
       {videoFrames.map((data, i) => <VideoFramePanel data={data} key={`video-frames-${i}`} />)}
       {broadcastCalendar.map((data, i) => <BroadcastCalendarPanel data={data} onPrepareWrite={onPrepareWrite} key={`broadcast-${i}`} />)}
       {airingProgress.map((data, i) => <AiringProgressPanel data={data} key={`airing-progress-${i}`} />)}
+      {whereToWatch.map((data, i) => <WhereToWatchPanel data={data} key={`watch-${i}`} />)}
+      {releaseFeeds.map((data, i) => (
+        <ReleaseFeedsPanel data={data} onPrepareDownloaderPush={onPrepareDownloaderPush} key={`release-${i}`} />
+      ))}
+      {bangumiIndex.map((data, i) => <BangumiIndexPanel data={data} onPrepareWrite={onPrepareWrite} key={`index-${i}`} />)}
       {recommend.map((data, i) => <RecommendPanel data={data} onCritique={onCritique} onPrepareWrite={onPrepareWrite} key={`recommend-${i}`} />)}
       {season.map((data, i) => <SeasonGuidePanel data={data} onPrepareWrite={onPrepareWrite} key={`season-${i}`} />)}
       {review.map((data, i) => <ReviewEvidencePanel data={data} key={`review-${i}`} />)}

@@ -183,7 +183,7 @@ def _memory_prompt_lines(memory: dict[str, Any]) -> list[str]:
             lines.append("- 本地计划板：" + "；".join(plan_bits) + "。")
     pending_write_actions = memory.get("pending_write_actions") or []
     if isinstance(pending_write_actions, list) and pending_write_actions:
-        lines.append("- 有待用户确认的 Bangumi 写回动作；不要声称已执行，等待前端确认。")
+        lines.append("- 有待用户确认的写动作（Bangumi 写回或下载器推送）；不要声称已执行，等待前端确认。")
     profiles = memory.get("profile_snapshot") or {}
     if isinstance(profiles, dict) and profiles:
         chunks = []
@@ -416,6 +416,13 @@ def summarize(result: ToolResult) -> str:
         return f"追番进度：{len(d.get('items') or [])} 部，落后 {d.get('behind_count') or 0} 部"
     if d.get("week") and d.get("sections"):
         return f"周报：{d.get('week')} · {len(d.get('sections') or [])} 个分区"
+    if d.get("official_sources") is not None and d.get("search_fallbacks") is not None:
+        return f"正版入口：{len(d.get('official_sources') or [])} 个官方候选，{len(d.get('search_fallbacks') or [])} 个兜底"
+    if d.get("mikan_ids") is not None and d.get("groups") is not None:
+        count = sum(len(x.get("latest_items") or []) for x in d.get("groups") or [] if isinstance(x, dict))
+        return f"release/RSS：{len(d.get('groups') or [])} 组，{count} 条组内候选"
+    if d.get("index_id") and d.get("items") is not None:
+        return f"Bangumi 目录：{d.get('title') or d.get('index_id')} · {len(d.get('items') or [])} 条"
     if d.get("sections"):
         types = [x.get("subject_type") for x in d["sections"] if isinstance(x, dict)]
         return f"口味报告：{len(d['sections'])} 个媒介分区（{', '.join(str(x) for x in types[:5])}）"
@@ -486,6 +493,9 @@ _PANEL_TOOLS = {
     "get_pixiv_ranking",
     "search_pixiv_illusts",
     "get_pixiv_artist_portfolio",
+    "where_to_watch",
+    "get_anime_release_feeds",
+    "get_bangumi_index",
     "build_aspect_profile",
     "plan_watch_copilot",
     "build_taste_report",
@@ -499,6 +509,7 @@ _PANEL_TOOLS = {
     "forget_user_memory",
     "record_recommendation_feedback",
     "prepare_bangumi_write_action",
+    "prepare_downloader_push",
     "cancel_bangumi_write_action",
     "upsert_watch_plan_item",
     "list_watch_plan",
@@ -511,6 +522,7 @@ _MEMORY_TOOLS = {
     "forget_user_memory",
     "record_recommendation_feedback",
     "prepare_bangumi_write_action",
+    "prepare_downloader_push",
     "cancel_bangumi_write_action",
     "upsert_watch_plan_item",
     "list_watch_plan",
@@ -738,6 +750,58 @@ def _safe_weekly_digest_payload(data: dict[str, Any]) -> dict[str, Any]:
         "sections": sections,
         "next_actions": _trim_strings(data.get("next_actions"), limit=8, text_limit=160),
         "caveats": _trim_strings(data.get("caveats"), limit=8, text_limit=180),
+    }
+
+
+def _safe_watch_sources_payload(data: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "subject_id": data.get("subject_id"),
+        "title": _trim_text(data.get("title"), 140),
+        "title_jp": _trim_text(data.get("title_jp"), 140),
+        "air_date": data.get("air_date"),
+        "image": data.get("image"),
+        "official_sources": _trim_dicts(data.get("official_sources"), limit=12),
+        "search_fallbacks": _trim_dicts(data.get("search_fallbacks"), limit=6),
+        "offline_hint": bool(data.get("offline_hint")),
+        "mapping_notes": _trim_strings(data.get("mapping_notes"), limit=8, text_limit=180),
+        "caveats": _trim_strings(data.get("caveats"), limit=8, text_limit=180),
+    }
+
+
+def _safe_release_feed_payload(data: dict[str, Any]) -> dict[str, Any]:
+    groups = []
+    for group in _trim_dicts(data.get("groups"), limit=12):
+        copied = dict(group)
+        copied["latest_items"] = _trim_dicts(copied.get("latest_items"), limit=8)
+        groups.append(copied)
+    return {
+        "subject_id": data.get("subject_id"),
+        "title": _trim_text(data.get("title"), 140),
+        "mikan_ids": data.get("mikan_ids") if isinstance(data.get("mikan_ids"), list) else [],
+        "mapping_confidence": data.get("mapping_confidence"),
+        "groups": groups,
+        "fallback_items": _trim_dicts(data.get("fallback_items"), limit=12),
+        "search_links": _trim_dicts(data.get("search_links"), limit=8),
+        "offline_hint": bool(data.get("offline_hint")),
+        "caveats": _trim_strings(data.get("caveats"), limit=8, text_limit=180),
+    }
+
+
+def _safe_bangumi_index_payload(data: dict[str, Any]) -> dict[str, Any]:
+    items = []
+    for item in _trim_dicts(data.get("items"), limit=40):
+        copied = dict(item)
+        copied["comment"] = _trim_text(copied.get("comment"), 180)
+        items.append(copied)
+    return {
+        "index_id": data.get("index_id"),
+        "title": _trim_text(data.get("title"), 160),
+        "description": _trim_text(data.get("description"), 600),
+        "creator": _trim_text(data.get("creator"), 80),
+        "source_url": data.get("source_url"),
+        "count": data.get("count"),
+        "items": items,
+        "notes": _trim_strings(data.get("notes"), limit=6, text_limit=180),
     }
 
 
@@ -1064,6 +1128,12 @@ def panel_data_from_payload(name: str, payload: dict[str, Any] | None) -> dict[s
         return _safe_watch_copilot_payload(data)
     if name == "build_weekly_digest":
         return _safe_weekly_digest_payload(data)
+    if name == "where_to_watch":
+        return _safe_watch_sources_payload(data)
+    if name == "get_anime_release_feeds":
+        return _safe_release_feed_payload(data)
+    if name == "get_bangumi_index":
+        return _safe_bangumi_index_payload(data)
     if name in {"configure_weekly_digest", "generate_weekly_digest_now", "list_weekly_digest_inbox"}:
         return _safe_weekly_inbox_payload(data)
     if name == "build_taste_report":

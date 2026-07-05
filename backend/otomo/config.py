@@ -87,6 +87,10 @@ class Settings(BaseSettings):
     weekly_scheduler_enabled: bool = False
     weekly_scheduler_interval_seconds: int = 900
     weekly_webhook_timeout: float = 8.0
+    daily_airing_enabled: bool = False
+    daily_airing_hour: int = 9
+    daily_airing_timezone: str = "Asia/Shanghai"
+    daily_airing_interval_seconds: int = 900
     rate_limit_enabled: bool = True
     rate_limit_chat_per_minute: int = 10
     rate_limit_chat_per_hour: int = 30
@@ -133,6 +137,20 @@ class Settings(BaseSettings):
     pixiv_refresh_token: str = ""
     pixiv_proxy: str = ""
     pixiv_cache_ttl: float = 60 * 60 * 6
+
+    # ---- Watch / release aggregation ----
+    bangumi_data_url: str = "https://unpkg.com/bangumi-data@0.3/dist/data.json"
+    bangumi_data_cache_path: str = "cache/bangumi_data.json"
+    bangumi_data_cache_ttl: float = 60 * 60 * 24 * 7
+    mikan_mapping_cache_path: str = "cache/mikan_mapping.json"
+    mikan_mapping_cache_ttl: float = 60 * 60 * 24
+    release_feed_cache_ttl: float = 60 * 30
+    release_feed_timeout: float = 12.0
+    qbittorrent_url: str = ""
+    qbittorrent_username: str = ""
+    qbittorrent_password: str = ""
+    qbittorrent_category: str = "otomo"
+    qbittorrent_save_path: str = ""
 
 
 settings = Settings()

@@ -10,10 +10,10 @@ SpoilerDefault = Literal["none", "mild", "full"]
 FeedbackSignal = Literal["like", "dislike", "more", "less"]
 VisualFeedbackSignal = Literal["correct", "wrong", "ambiguous"]
 WriteActionStatus = Literal["pending", "executed", "cancelled", "failed", "undone"]
-WriteOperation = Literal["set_collection", "set_episode_collection"]
+WriteOperation = Literal["set_collection", "set_episode_collection", "push_downloader"]
 DecisionKind = Literal["accept", "reject", "defer", "write", "undo", "plan", "note"]
 PlanStatus = Literal["wishlist", "watching", "backlog", "on_hold", "revive", "completed", "rejected"]
-InboxKind = Literal["weekly_digest", "system"]
+InboxKind = Literal["weekly_digest", "daily_airing", "system"]
 WeeklyChannel = Literal["inbox", "webhook", "email"]
 WeeklyWebhookFormat = Literal["generic", "serverchan", "telegram"]
 AspectKey = Literal[
@@ -104,6 +104,9 @@ class WatchPlanItem(BaseModel):
     priority: int = Field(3, ge=1, le=5)
     reason: str = ""
     tags: list[str] = Field(default_factory=list)
+    rss_url: str = ""
+    subgroup: str = ""
+    last_seen_pub_date: str = ""
     source: str = "agent"
     created_at: str = ""
     updated_at: str = ""
@@ -134,6 +137,7 @@ class WeeklyDigestSubscription(BaseModel):
     webhook_format: WeeklyWebhookFormat = "generic"
     last_delivery: list[dict] = Field(default_factory=list)
     last_run_key: str = ""
+    daily_last_run_key: str = ""
     updated_at: str = ""
 
 

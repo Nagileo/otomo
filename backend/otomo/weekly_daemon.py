@@ -12,7 +12,8 @@ import signal
 
 from .auth import AuthStore
 from .memory import LongTermMemory
-from .weekly import WeeklyDigestService
+from .config import settings
+from .weekly import DailyAiringService, WeeklyDigestService
 
 
 async def main() -> None:
@@ -22,15 +23,28 @@ async def main() -> None:
         with contextlib.suppress(NotImplementedError):
             loop.add_signal_handler(sig, stop.set)
 
-    service = WeeklyDigestService(LongTermMemory(), AuthStore())
-    task = asyncio.create_task(service.run_forever())
+    ltm = LongTermMemory()
+    auth = AuthStore()
+    services = []
+    if settings.weekly_scheduler_enabled:
+        services.append(WeeklyDigestService(ltm, auth))
+    if settings.daily_airing_enabled:
+        services.append(DailyAiringService(ltm, auth))
+    if not services:
+        # Standalone worker is usually run with at least one scheduler enabled,
+        # but keeping weekly as a default makes local smoke testing explicit.
+        services.append(WeeklyDigestService(ltm, auth))
+    tasks = [asyncio.create_task(service.run_forever()) for service in services]
     try:
         await stop.wait()
     finally:
-        await service.stop()
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+        for service in services:
+            await service.stop()
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
 
 if __name__ == "__main__":

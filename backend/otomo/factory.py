@@ -14,6 +14,7 @@ from .tools.aspect_profile import build_aspect_profile_tools
 from .tools.calendar import build_calendar_tools
 from .tools.comments import build_comment_tools
 from .tools.community import build_community_tools
+from .tools.curation import build_curation_tools
 from .tools.bangumi import build_bangumi_tools
 from .tools.bangumi.client import BangumiClient
 from .tools.explorer import build_explorer_tools
@@ -27,12 +28,14 @@ from .tools.multimodal import build_multimodal_tools
 from .tools.pixiv import build_pixiv_tools
 from .tools.profile import build_profile_tools
 from .tools.recommend import build_recommend_tools
+from .tools.release import build_release_tools
 from .tools.review import build_review_tools
 from .tools.season import build_season_tools
 from .tools.spoiler import build_spoiler_tools
 from .tools.user_analysis import build_user_analysis_tools
 from .tools.videos import build_video_tools
 from .tools.vndb import build_vndb_tools
+from .tools.watch import build_watch_tools
 from .tools.watchorder import build_watchorder_tools
 from .tools.websearch import build_websearch_tools
 from .tools.wiki import build_wiki_tools
@@ -54,6 +57,8 @@ def build_registry(
     for tool in build_explorer_tools(client):
         registry.register(tool)
     for tool in build_discovery_tools(client):
+        registry.register(tool)
+    for tool in build_curation_tools(client):
         registry.register(tool)
     if moegirl is not None:
         for tool in build_moegirl_tools(moegirl):
@@ -88,6 +93,8 @@ def build_registry(
         registry.register(tool)
     for tool in build_recommend_tools(client, shared_ltm):
         registry.register(tool)
+    for tool in build_release_tools(client, shared_ltm):
+        registry.register(tool)
     for tool in build_review_tools(client):
         registry.register(tool)
     for tool in build_season_tools(client):
@@ -97,6 +104,8 @@ def build_registry(
     for tool in build_user_analysis_tools(client):
         registry.register(tool)
     for tool in build_yuc_tools():
+        registry.register(tool)
+    for tool in build_watch_tools(client):
         registry.register(tool)
     for tool in build_watchorder_tools(client, shared_ltm):
         registry.register(tool)

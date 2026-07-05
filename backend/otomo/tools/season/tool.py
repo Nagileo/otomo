@@ -114,6 +114,8 @@ class SeasonGuideItem(BaseModel):
     guide_videos: list[GuideVideoLink] = Field(default_factory=list)
     official_url: str | None = None
     pv_url: str | None = None
+    bili_url: str | None = None
+    stream_urls: list[dict] = Field(default_factory=list)
     image: str | None = None
 
 
@@ -396,6 +398,8 @@ class SeasonGuideBriefTool(Tool):
                 guide_videos=item_guides,
                 official_url=yuc.official_url if yuc else None,
                 pv_url=yuc.pv_url if yuc else None,
+                bili_url=yuc.bili_url if yuc else None,
+                stream_urls=[x.model_dump(mode="json") for x in (yuc.stream_urls if yuc else [])],
                 image=subject.image or (yuc.image if yuc else None),
             )
         item_results = await gather_limited([build_item(subject) for subject in season.anime[: args.limit]], host="bangumi")

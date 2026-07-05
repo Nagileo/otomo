@@ -15,6 +15,11 @@ HOST_LIMITS = {
     "bilibili": 2,
     "yuc": 2,
     "musicbrainz": 1,
+    "bangumi_data": 1,
+    "mikan": 2,
+    "dmhy": 1,
+    "acgnx": 1,
+    "qbittorrent": 1,
 }
 
 # 按 (event loop, host) 隔离：asyncio.Semaphore 一旦产生 waiter 就绑死首个 loop，

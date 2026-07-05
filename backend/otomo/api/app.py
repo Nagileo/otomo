@@ -36,7 +36,7 @@ from ..quota import (
 )
 from ..session_store import SessionStore
 from ..uploads import upload_store
-from ..weekly import WeeklyDigestService
+from ..weekly import DailyAiringService, WeeklyDigestService
 from ..agent.plan_execute import PlanExecuteRunner
 from ..agent.react import ReActRunner
 from ..tools.bangumi.client import SUBJECT_TYPE, BangumiClient
@@ -51,9 +51,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.auth = AuthStore()
     app.state.session_store = SessionStore()
     app.state.weekly_service = WeeklyDigestService(app.state.ltm, app.state.auth)
+    app.state.daily_airing_service = DailyAiringService(app.state.ltm, app.state.auth)
     app.state.weekly_task = (
         asyncio.create_task(app.state.weekly_service.run_forever())
         if settings.weekly_scheduler_enabled else None
+    )
+    app.state.daily_airing_task = (
+        asyncio.create_task(app.state.daily_airing_service.run_forever())
+        if settings.daily_airing_enabled else None
     )
     app.state.rate_limiter = RateLimiter()
     app.state.quota_store = TokenQuotaStore()
@@ -81,6 +86,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             app.state.weekly_task.cancel()
             try:
                 await app.state.weekly_task
+            except asyncio.CancelledError:
+                pass
+        if app.state.daily_airing_task is not None:
+            await app.state.daily_airing_service.stop()
+            app.state.daily_airing_task.cancel()
+            try:
+                await app.state.daily_airing_task
             except asyncio.CancelledError:
                 pass
         await app.state.bangumi.aclose()
@@ -147,6 +159,19 @@ class PrepareWriteRequest(BaseModel):
     subject_name: str = ""
     collection_type: int = Field(1, ge=1, le=5)
     reason: str = "前端卡片一键写回"
+    auth_session_id: str | None = None
+
+
+class PrepareDownloaderPushRequest(BaseModel):
+    torrent_url: str = ""
+    magnet: str = ""
+    title: str = ""
+    subject_id: int | None = None
+    subject_name: str = ""
+    category: str = ""
+    save_path: str = ""
+    paused: bool = False
+    reason: str = "从 release 面板准备推送到下载器"
     auth_session_id: str | None = None
 
 
@@ -552,6 +577,30 @@ async def prepare_write_action(req: PrepareWriteRequest, request: Request, respo
             "subject_id": req.subject_id,
             "subject_name": req.subject_name,
             "collection_type": req.collection_type,
+            "reason": req.reason,
+        },
+        allow_write=False,
+        auth_session_id=session.auth_session_id,
+    )
+
+
+@app.post("/actions/prepare-downloader-push")
+async def prepare_downloader_push(req: PrepareDownloaderPushRequest, request: Request, response: Response) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response, req.auth_session_id)
+    _require_csrf(request, session.auth_session_id)
+    _authenticated_identity(session.auth_session_id)
+    return await _dispatch_action(
+        app,
+        "prepare_downloader_push",
+        {
+            "torrent_url": req.torrent_url,
+            "magnet": req.magnet,
+            "title": req.title,
+            "subject_id": req.subject_id,
+            "subject_name": req.subject_name,
+            "category": req.category,
+            "save_path": req.save_path,
+            "paused": req.paused,
             "reason": req.reason,
         },
         allow_write=False,

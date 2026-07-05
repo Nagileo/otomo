@@ -26,6 +26,13 @@ class YucSeasonArgs(BaseModel):
     limit: int = Field(20, ge=1, le=80)
 
 
+class YucStreamUrl(BaseModel):
+    site: str
+    label: str
+    url: str
+    kind: str = "official_stream"
+
+
 class YucAnime(BaseModel):
     model_config = ConfigDict(extra="ignore")
     code: str | None = None
@@ -37,6 +44,8 @@ class YucAnime(BaseModel):
     studio: str | None = None
     official_url: str | None = None
     pv_url: str | None = None
+    bili_url: str | None = None
+    stream_urls: list[YucStreamUrl] = Field(default_factory=list)
     image: str | None = None
     staff_summary: str | None = None
     cast_summary: str | None = None
@@ -67,15 +76,23 @@ def _first(pattern: str, text: str) -> str | None:
     return value or None
 
 
-def _links(table: str) -> tuple[str | None, str | None]:
+def _is_bili_stream(url: str) -> bool:
+    return "bilibili.com/bangumi/play/" in url or "bilibili.com/bangumi/media/" in url
+
+
+def _links(table: str) -> tuple[str | None, str | None, list[YucStreamUrl]]:
     official, pv = None, None
+    streams: list[YucStreamUrl] = []
     for href, text in re.findall(r'<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', table, flags=re.S | re.I):
         label = _clean(text)
+        url = urljoin(_BASE, href)
         if label == "动画官网":
-            official = urljoin(_BASE, href)
+            official = url
         elif label == "PV":
-            pv = urljoin(_BASE, href)
-    return official, pv
+            pv = url
+        if _is_bili_stream(url):
+            streams.append(YucStreamUrl(site="bilibili", label=label or "Bilibili 正版", url=url))
+    return official, pv, streams
 
 
 def _studio(staff: str | None) -> str | None:
@@ -108,7 +125,7 @@ def _parse(html: str, limit: int) -> list[YucAnime]:
         tag_text = _first(r'<td class="type_tag[^"]*">(.*?)</td>', table) or ""
         staff = _first(r'<td[^>]+class="staff[^"]*"[^>]*>(.*?)</td>', table)
         cast = _first(r'<td[^>]+class="cast[^"]*"[^>]*>(.*?)</td>', table)
-        official, pv = _links(table)
+        official, pv, streams = _links(table)
         item = YucAnime(
             code=m.group("code"),
             title_cn=title_cn or title_jp or "",
@@ -119,6 +136,8 @@ def _parse(html: str, limit: int) -> list[YucAnime]:
             studio=_studio(staff),
             official_url=official,
             pv_url=pv,
+            bili_url=streams[0].url if streams else None,
+            stream_urls=streams,
             image=urljoin(_BASE, m.group("img")),
             staff_summary=staff,
             cast_summary=cast,

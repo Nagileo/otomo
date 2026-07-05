@@ -28,6 +28,7 @@ from ...memory.models import UserAspectProfile
 from ...profile import compute_taste_profile
 from .._concurrency import gather_limited
 from ..bangumi.client import SUBJECT_TYPE, BangumiClient
+from ..curation import curated_recall_candidates
 from ..erogamescape.tool import EGSRankArgs, RankErogameScapeTool
 from ..review.tool import ReviewSubjectArgs, ReviewSubjectTool, _ASPECT_HINTS
 
@@ -301,6 +302,7 @@ class RecommendArgs(BaseModel):
     use_cf: bool = Field(True, description="协同召回：看过你爱的作品的人还看了啥（离线 CF，需 i2i 表；无表则自动跳过）")
     use_series: bool = Field(True, description="系列入口回溯：若推荐项是续集而你没看前作，自动换成入口作（别莫名其妙推你第二季）")
     use_external_recall: bool = Field(True, description="game/galgame 推荐时，是否用批判空间排行做前置召回并映射回 Bangumi")
+    use_curation: bool = Field(True, description="是否用精选 Bangumi 目录作为低权重策展召回")
     enrich_evidence: bool = Field(True, description="为推荐结果补充统一评价证据；game 会补批判空间/VNDB，默认开启")
     use_aspect_profile: bool = Field(True, description="是否读取长期记忆中的 aspect 好球区/雷区参与 rerank 与解释")
     exclude_ids: list[int] = Field(default_factory=list, max_length=80, description="本轮要排除的 Bangumi subject_id；用于 critiquing 换一批")
@@ -662,6 +664,33 @@ class RecommendTool(Tool):
         mapping_warnings: list[str] = []
         if args.subject_type == "game" and args.use_external_recall:
             mapping_warnings = await self._external_game_recall(cand, seen, args.limit)
+        curation_hits = 0
+        if args.use_curation:
+            for subj, index in await curated_recall_candidates(
+                self.client,
+                subject_type=args.subject_type,
+                tags=recall_tags,
+                seen=seen,
+                limit=max(args.limit * 3, 12),
+            ):
+                sid = subj.get("id")
+                if not sid:
+                    continue
+                c = cand.setdefault(int(sid), _blank(subj))
+                c["tags"].update(_tag_names(subj))
+                c["external"].add(f"入选 Bangumi 目录《{index.get('title') or index.get('id')}》")
+                c["external_boost"] = max(c.get("external_boost", 0.0), float(index.get("weight") or 0.16))
+                c["external_evidence"].append(
+                    RecEvidence(
+                        source="Bangumi 目录",
+                        score=None,
+                        scale=None,
+                        count=None,
+                        signal="positive",
+                        note=f"入选目录《{index.get('title') or index.get('id')}》；{index.get('note') or '社区策展线索'}",
+                    )
+                )
+                curation_hits += 1
 
         # 用户最爱作品（按评分降序）——图谱召回与协同召回共用作种子
         fav_sorted = sorted(watched, key=lambda it: -(it.get("rate") or 0))
@@ -980,6 +1009,8 @@ class RecommendTool(Tool):
             applied_constraints.append("本轮偏好：" + "、".join(args.prefer_tags[:8]))
         if args.cross_media:
             applied_constraints.append("已启用跨媒体召回")
+        if args.use_curation and curation_hits:
+            applied_constraints.append(f"已启用 Bangumi 目录策展召回：{curation_hits} 个候选")
         if args.subject_type == "book" and args.book_subtype != "auto":
             applied_constraints.append(f"book 分型约束：{_BOOK_SUBTYPE_LABEL.get(args.book_subtype, args.book_subtype)}")
         if args.subject_type == "music" and args.music_subtype != "auto":

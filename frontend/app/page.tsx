@@ -107,6 +107,9 @@ function evidenceSummary(evidence: EvidenceMap) {
   const rows = [
     ["recommend_subjects", "推荐候选"],
     ["season_guide_brief", "季番导视"],
+    ["where_to_watch", "正版观看"],
+    ["get_anime_release_feeds", "离线资源/RSS"],
+    ["get_bangumi_index", "Bangumi目录"],
     ["review_subject", "评价矩阵"],
     ["get_broadcast_calendar", "放送日历"],
     ["get_airing_progress", "追番进度"],
@@ -179,6 +182,9 @@ function friendlyToolName(name: string) {
   const map: Record<string, string> = {
     recommend_subjects: "生成推荐候选",
     season_guide_brief: "整理季番导视",
+    where_to_watch: "查询正版入口",
+    get_anime_release_feeds: "聚合离线RSS",
+    get_bangumi_index: "读取Bangumi目录",
     review_subject: "融合评价证据",
     route_image_source: "路由图片来源",
     extract_visual_text: "读取图片文字",
@@ -194,6 +200,7 @@ function friendlyToolName(name: string) {
     claim_check: "核对事实声明",
     get_user_memory: "读取记忆",
     remember_user_preference: "写入偏好记忆",
+    prepare_downloader_push: "准备下载器推送",
   };
   return map[name] || name.replaceAll("_", " ");
 }
@@ -640,6 +647,44 @@ export default function Home() {
     }
   }
 
+  async function postPrepareDownloaderPush(payloadIn: Record<string, any>) {
+    try {
+      const res = await fetch(`${BACKEND}/actions/prepare-downloader-push`, {
+        method: "POST",
+        credentials: "include",
+        headers: csrfHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({
+          ...payloadIn,
+          reason: "从前端 release/RSS 面板准备推送到下载器",
+        }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok || !payload.ok) {
+        setTrace((t) => [...t, { kind: "obs", name: "prepare_downloader_push", ok: false, summary: payload.detail || payload.error || `HTTP ${res.status}` }]);
+        return;
+      }
+      const data = payload.data;
+      if (data?.memory) {
+        setMemory(data.memory);
+        setEvidence((prev) => ({
+          ...prev,
+          prepare_downloader_push: [...(prev.prepare_downloader_push ?? []), data],
+        }));
+      }
+      setTrace((t) => [
+        ...t,
+        {
+          kind: "obs",
+          name: "prepare_downloader_push",
+          ok: true,
+          summary: data?.action?.summary || "已准备下载器推送",
+        },
+      ]);
+    } catch (e) {
+      setTrace((t) => [...t, { kind: "obs", name: "prepare_downloader_push", ok: false, summary: String(e) }]);
+    }
+  }
+
   async function postVisualFeedback(payload: Record<string, any>) {
     try {
       const res = await fetch(`${BACKEND}/feedback/visual`, {
@@ -961,6 +1006,7 @@ export default function Home() {
             onCancelAction={(id) => postAction("cancel", id)}
             onUndoAction={(id) => postAction("undo", id)}
             onPrepareWrite={postPrepareWrite}
+            onPrepareDownloaderPush={postPrepareDownloaderPush}
             onVisualFeedback={postVisualFeedback}
             onVisualCorrectionSearch={searchVisualCorrection}
           />

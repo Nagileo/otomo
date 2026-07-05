@@ -524,6 +524,7 @@ class ConfigureWeeklyDigestTool(Tool):
             webhook_format=args.webhook_format or mem.weekly_digest_subscription.webhook_format,
             last_delivery=mem.weekly_digest_subscription.last_delivery,
             last_run_key=mem.weekly_digest_subscription.last_run_key,
+            daily_last_run_key=mem.weekly_digest_subscription.daily_last_run_key,
             updated_at=now_iso(),
         )
         self.ltm.save_user(mem)
