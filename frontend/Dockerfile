@@ -5,7 +5,11 @@ RUN npm ci
 
 FROM node:20-alpine AS builder
 WORKDIR /app
-ENV NEXT_TELEMETRY_DISABLED=1
+# NEXT_PUBLIC_* 是 build 期内联进 client bundle 的，必须在这里注入；
+# runner 阶段再设 environment 无效（会退回代码里的 localhost fallback）。
+ARG NEXT_PUBLIC_BACKEND=/api
+ENV NEXT_TELEMETRY_DISABLED=1 \
+    NEXT_PUBLIC_BACKEND=$NEXT_PUBLIC_BACKEND
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN mkdir -p public && npm run build

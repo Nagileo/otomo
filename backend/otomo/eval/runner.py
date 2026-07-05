@@ -11,18 +11,19 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 from pathlib import Path
 
 import yaml
 
-from ..agent.contracts import FinalEvent, ObservationEvent, ToolCallEvent
+from ..agent.contracts import AgentState, FinalEvent, ObservationEvent, ToolCallEvent
 from ..config import settings
 from ..factory import build_runner
 from ..llm import get_llm
 from ..tools.bangumi.client import BangumiClient
 from ..tools.moegirl.client import MoegirlClient
-from .verifier import CaseResult, GoldenCase, ToolStep, verify
+from .verifier import CaseResult, Check, GoldenCase, ToolStep, verify
 
 for _stream in (sys.stdout, sys.stderr):  # Windows GBK 兜底
     try:
@@ -39,12 +40,12 @@ def load_cases(path: Path) -> list[GoldenCase]:
     return [GoldenCase.model_validate(d) for d in data]
 
 
-async def run_one(runner, case: GoldenCase, llm, model: str, client: BangumiClient) -> CaseResult:
-    """跑一条 case，收集结构化 trace（ToolCall 配对 Observation 的返回实体）→ 图谱级 verify。"""
+async def _run_turn(runner, question: str, state: AgentState | None = None) -> tuple[str, list[ToolStep]]:
+    """跑一轮，收集结构化 trace（ToolCall 配对 Observation 的返回实体）。"""
     answer = ""
     trace: list[ToolStep] = []
     pending: ToolStep | None = None
-    async for ev in runner.stream(case.question):
+    async for ev in runner.stream(question, state):
         if isinstance(ev, ToolCallEvent):
             pending = ToolStep(name=ev.name, args=ev.args)
         elif isinstance(ev, ObservationEvent):
@@ -55,6 +56,52 @@ async def run_one(runner, case: GoldenCase, llm, model: str, client: BangumiClie
                 pending = None
         elif isinstance(ev, FinalEvent):
             answer = ev.answer
+    return answer, trace
+
+
+async def run_one(runner, case: GoldenCase, llm, model: str, client: BangumiClient) -> CaseResult:
+    """跑一条 case；支持单轮与同 session 多轮 turns。"""
+    if case.turns:
+        state = AgentState()
+        turn_payloads: list[dict] = []
+        all_tools: list[str] = []
+        aggregate_checks: list[Check] = []
+        last_answer = ""
+        all_passed = True
+        for idx, turn in enumerate(case.turns, start=1):
+            answer, trace = await _run_turn(runner, turn.question, state)
+            last_answer = answer
+            all_tools.extend(step.name for step in trace)
+            turn_case = GoldenCase(
+                id=f"{case.id}#turn{idx}",
+                question=turn.question,
+                kind=case.kind,
+                expect_contains=turn.expect_contains,
+                expect_any=turn.expect_any,
+                expect_absent=turn.expect_absent,
+                expect_tools=turn.expect_tools,
+                forbid_tools=turn.forbid_tools,
+                expect_panels=turn.expect_panels,
+                min_tools=turn.min_tools,
+                note=turn.note,
+                truth_entities=turn.truth_entities,
+                truth_path=turn.truth_path,
+            )
+            turn_result = await verify(turn_case, answer, trace, llm, model, client)
+            all_passed = all_passed and turn_result.passed
+            aggregate_checks.append(Check(label=f"turn {idx} passed", passed=turn_result.passed))
+            turn_payloads.append(turn_result.model_dump(mode="json"))
+        return CaseResult(
+            id=case.id,
+            kind=case.kind,
+            passed=all_passed,
+            checks=aggregate_checks,
+            answer=last_answer,
+            tools_called=all_tools,
+            turns=turn_payloads,
+        )
+
+    answer, trace = await _run_turn(runner, case.question)
     return await verify(case, answer, trace, llm, model, client)
 
 
@@ -73,7 +120,8 @@ async def main_async(args: argparse.Namespace) -> int:
     results: list[CaseResult] = []
     try:
         for case in cases:
-            print(f"{DIM}[{case.kind}] {case.id}{RESET}  {case.question}")
+            headline = case.question or f"{len(case.turns)} turns"
+            print(f"{DIM}[{case.kind}] {case.id}{RESET}  {headline}")
             res = await run_one(runner, case, llm, model, client)
             results.append(res)
             mark = f"{GREEN}PASS{RESET}" if res.passed else f"{RED}FAIL{RESET}"
@@ -87,6 +135,10 @@ async def main_async(args: argparse.Namespace) -> int:
             for c in res.checks:
                 if not c.passed:
                     print(f"    {RED}✗ {c.label}{RESET}")
+            if res.turns:
+                for turn in res.turns:
+                    status = "PASS" if turn.get("passed") else "FAIL"
+                    print(f"    {DIM}{turn.get('id')}: {status} tools={turn.get('tools_called', [])}{RESET}")
             print(f"  {DIM}答：{res.answer[:120].replace(chr(10), ' ')}…{RESET}\n")
     finally:
         await client.aclose()
@@ -109,6 +161,13 @@ async def main_async(args: argparse.Namespace) -> int:
         print(f"  {BOLD}平均 set-F1{RESET}: {sum(f1s) / len(f1s):.3f}  （{len(f1s)} 条图谱级）")
     if pvs:
         print(f"  {BOLD}路径有效率{RESET}: {sum(pvs) / len(pvs) * 100:.0f}%  （{len(pvs)} 条）")
+    if args.json_report:
+        report_path = Path(args.json_report)
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(
+            json.dumps([r.model_dump(mode="json") for r in results], ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
     return 0 if passed == total else 1
 
 
@@ -118,6 +177,7 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--id", default="")
     ap.add_argument("--runner", choices=["react", "plan", "adaptive", "langgraph"], default="react")
+    ap.add_argument("--json-report", default="", help="可选：把 CaseResult 列表写入 JSON，供 CI artifact 使用")
     args = ap.parse_args()
     raise SystemExit(asyncio.run(main_async(args)))
 

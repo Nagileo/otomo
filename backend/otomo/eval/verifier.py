@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 import json
-from typing import Literal
+from typing import Any, Literal
 
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 from ..agent.contracts import EntityRef
 from ..tools.bangumi.client import BangumiClient
 
-CaseKind = Literal["single_hop", "two_hop", "filter", "refusal"]
+CaseKind = Literal["single_hop", "two_hop", "filter", "refusal", "multi_turn"]
 _ETYPE_CN = {"subject": "作品", "person": "人物（声优/制作人员）", "character": "角色"}
 _ARG_TYPE = {"subject_id": "subject", "person_id": "person", "character_id": "character"}
 _LEAK_MARKERS = ("dsml", "tool_calls", "invoke name", "<｜")
@@ -37,10 +37,25 @@ class ToolStep(BaseModel):
     has_data: bool = False  # 该步 ObservationEvent 是否带结构化面板 data（Phase 1）
 
 
+class TurnSpec(BaseModel):
+    question: str
+    expect_contains: list[str] = Field(default_factory=list)
+    expect_any: list[str] = Field(default_factory=list)
+    expect_absent: list[str] = Field(default_factory=list)
+    expect_tools: list[str] = Field(default_factory=list)
+    forbid_tools: list[str] = Field(default_factory=list)
+    expect_panels: list[str] = Field(default_factory=list)
+    min_tools: int = 0
+    note: str = ""
+    truth_entities: list[EntityRef] = Field(default_factory=list)
+    truth_path: list[tuple[str, int]] = Field(default_factory=list)
+
+
 class GoldenCase(BaseModel):
     id: str
-    question: str
+    question: str = ""
     kind: CaseKind = "two_hop"
+    turns: list[TurnSpec] = Field(default_factory=list)
     # —— 子串/工具级（向后兼容）——
     expect_contains: list[str] = Field(default_factory=list)
     expect_any: list[str] = Field(default_factory=list)
@@ -76,6 +91,7 @@ class CaseResult(BaseModel):
     answer: str
     tools_called: list[str]
     metrics: Metrics = Field(default_factory=Metrics)
+    turns: list[dict[str, Any]] = Field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #

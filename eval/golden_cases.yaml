@@ -165,8 +165,25 @@
   expect_tools: ["recommend_subjects"]
   note: galgame 应出现三源圈层对比（中文圈/日本 gal 圈/国际 VN 圈）
 - id: rec_critique_shorter
-  question: 这些太长了，换几部短一点的。
-  note: 应识别 critiquing → exclude_ids/niche/集数约束重推（多轮，承接上一条 rec 结果）
+  kind: multi_turn
+  turns:
+    - question: 根据我的 Bangumi 口味推荐几部动画。
+      expect_tools: ["recommend_subjects"]
+      expect_panels: ["recommend_subjects"]
+    - question: 这些太长了，换几部短一点的。
+      expect_tools: ["recommend_subjects"]
+      expect_any: ["短", "集", "换"]
+  note: 应识别 critiquing → 同 session 承接上一轮结果，用 exclude_ids/max_episodes 等约束重推
+
+- id: spoiler_persist_across_turns
+  kind: multi_turn
+  turns:
+    - question: 我正在看《摇曳露营△》第一季，到第5集为止，后面请默认别剧透。
+      expect_any: ["不剧透", "无剧透", "第5", "第 5"]
+    - question: 那后面还值得继续看吗？评价一下但别剧透。
+      expect_absent: ["结局", "真相", "最终", "最后死"]
+      forbid_tools: ["get_episode_comments"]
+  note: 同 session 中自然语言进度/无剧透偏好应延续到下一轮
 
 # —— 收口 cases（探索网络 / 评分预测 / 萌点检索 / 分集雷达）——
 - id: explore_cv_network

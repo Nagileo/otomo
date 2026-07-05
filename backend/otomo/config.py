@@ -114,5 +114,25 @@ class Settings(BaseSettings):
     saucenao_api_key: str = ""
     serpapi_api_key: str = ""  # 可选付费兜底：Google Reverse Image（只处理可公开访问图片 URL）
 
+    # ---- B站 ASR（可选；默认 off，不影响普通字幕/弹幕/评论读取）----
+    asr_provider: str = "off"  # off | local | dashscope(预留)
+    asr_model: str = "small"
+    asr_device: str = "cpu"
+    asr_compute_type: str = "int8"
+    asr_language: str = "zh"
+    asr_max_video_seconds: int = 1800
+    asr_cache_ttl: float = 60 * 60 * 24 * 7
+    # B站对无登录态的 yt-dlp 下载常返回 412 风控（2026-07 实测），二选一解除：
+    # ① cookies_from_browser 直读浏览器 cookie 库（推荐 firefox；Windows 上
+    #    Chrome/Edge 因 app-bound 加密可能读不出来）② 插件导出 cookies.txt 填路径。
+    asr_cookies_from_browser: str = ""  # firefox | chrome | edge，留空不用
+    asr_cookies_file: str = ""
+
+    # ---- Pixiv（可选；无官方公开 API，默认关闭，本地 demo 建议小号 refresh_token）----
+    pixiv_enabled: bool = False
+    pixiv_refresh_token: str = ""
+    pixiv_proxy: str = ""
+    pixiv_cache_ttl: float = 60 * 60 * 6
+
 
 settings = Settings()

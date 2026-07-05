@@ -246,6 +246,9 @@ def _staff_target(text: str) -> str:
 
 
 def _canonical_contradiction(claim: str, docs: list[EvidenceDoc]) -> str:
+    # 矛盾（→ block → auto revision）只看当轮证据（turn is None）：
+    # 历史池的旧评分/旧数值只作支持性弱证据，不能反过来"纠正"本轮刚查到的新数据。
+    docs = [d for d in docs if d.turn is None]
     target = _staff_target(claim)
     if target:
         staff_docs = [d for d in docs if d.role == "canonical" and "制作" in d.text]

@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from ...agent.contracts import Citation, Tool, ToolResult
 from ...config import settings
 from .._cache import acached
+from .._concurrency import gather_limited
 from ..comments.tool import EpisodeCommentsArgs, GetEpisodeCommentsTool
 from ..bangumi.client import SUBJECT_TYPE, BangumiClient
 from ..review.tool import AspectOpinion, AspectSummary, CommentEvidence, _build_aspect_summary, _extract_aspect_opinions
@@ -635,8 +636,14 @@ class CompareUserTasteTool(Tool):
     async def run(self, args: TasteCompareArgs) -> ToolResult[TasteCompareResult]:
         username = await _username(self.client, args.username)
         stype = SUBJECT_TYPE[args.subject_type]
-        own = await self.client.get_all_user_collections(username, stype, None, max_items=_MAX_ITEMS)
-        peer = await self.client.get_all_user_collections(args.peer_username, stype, None, max_items=_MAX_ITEMS)
+        own, peer = await gather_limited(
+            [
+                self.client.get_all_user_collections(username, stype, None, max_items=_MAX_ITEMS),
+                self.client.get_all_user_collections(args.peer_username, stype, None, max_items=_MAX_ITEMS),
+            ],
+            host="bangumi",
+            return_exceptions=False,
+        )
         affinity = _build_affinity(args.peer_username, own, peer)
         return ToolResult(
             ok=True,
@@ -697,8 +704,14 @@ class SyncRecommendTool(Tool):
         candidates: dict[int, dict] = {}
         overlap: dict[str, int] = {}
         affinities: list[PeerAffinity] = []
-        for peer in peer_usernames:
-            peer_items = await self.client.get_all_user_collections(peer, stype, None, max_items=_MAX_ITEMS)
+        peer_results = await gather_limited(
+            [self.client.get_all_user_collections(peer, stype, None, max_items=_MAX_ITEMS) for peer in peer_usernames],
+            host="bangumi",
+        )
+        for peer, peer_items in zip(peer_usernames, peer_results, strict=False):
+            if isinstance(peer_items, Exception):
+                caveats.append(f"peer @{peer} 收藏读取失败，已跳过：{type(peer_items).__name__}")
+                continue
             affinity = _build_affinity(peer, own, peer_items)
             affinities.append(affinity)
             overlap[peer] = affinity.common_collections
@@ -804,29 +817,55 @@ class AbandonAnalysisTool(Tool):
                 return res.data.comments
             return []
 
-        return await comments(cur), await comments(nxt)
+        # 不走 gather_limited：本方法在 run() 的 bangumi 信号量槽内执行，
+        # 嵌套申请同 host 信号量会在弃坑条目 ≥ 并发上限(6)时全员互等而死锁。
+        cur_comments, next_comments = await asyncio.gather(comments(cur), comments(nxt), return_exceptions=True)
+        return (
+            [] if isinstance(cur_comments, BaseException) else cur_comments,
+            [] if isinstance(next_comments, BaseException) else next_comments,
+        )
 
     async def run(self, args: AbandonAnalysisArgs) -> ToolResult[AbandonAnalysisResult]:
         username = await _username(self.client, args.username)
         stype = SUBJECT_TYPE[args.subject_type]
         status_types = [5] + ([4] if args.include_on_hold else [])
         all_items: list[tuple[str, dict]] = []
-        for ctype in status_types:
+        status_results = await gather_limited(
+            [
+                self.client.get_all_user_collections(username, stype, collection_type=ctype, max_items=args.limit)
+                for ctype in status_types
+            ],
+            host="bangumi",
+        )
+        for ctype, rows in zip(status_types, status_results, strict=False):
+            if isinstance(rows, Exception):
+                continue
             label = "抛弃" if ctype == 5 else "搁置"
-            rows = await self.client.get_all_user_collections(username, stype, collection_type=ctype, max_items=args.limit)
             all_items.extend((label, r) for r in rows)
         tag_counter: Counter[str] = Counter()
+        selected = all_items[: args.limit]
+
+        async def load_context(status: str, item: dict) -> tuple[str, dict, list[str], list[str]]:
+            subj = item.get("subject") or {}
+            sid = subj.get("id")
+            ep_status = item.get("ep_status") if isinstance(item.get("ep_status"), int) else None
+            if sid and args.subject_type == "anime" and ep_status:
+                ep_discussion, next_discussion = await self._episode_context(sid, ep_status)
+                return status, item, ep_discussion, next_discussion
+            return status, item, [], []
+
+        context_results = await gather_limited([load_context(status, item) for status, item in selected], host="bangumi")
         out: list[AbandonItem] = []
-        for status, item in all_items[: args.limit]:
+        for packed in context_results:
+            if isinstance(packed, Exception):
+                continue
+            status, item, ep_discussion, next_discussion = packed
             subj = item.get("subject") or {}
             sid = subj.get("id")
             tags = _tags(item)
             tag_counter.update(tags)
             comment = _comment_of(item)
             ep_status = item.get("ep_status") if isinstance(item.get("ep_status"), int) else None
-            ep_discussion, next_discussion = ([], [])
-            if sid and args.subject_type == "anime" and ep_status:
-                ep_discussion, next_discussion = await self._episode_context(sid, ep_status)
             reasons: list[str] = []
             if comment:
                 if _sentiment(comment) < 0:

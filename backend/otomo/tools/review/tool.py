@@ -5,12 +5,14 @@
 """
 from __future__ import annotations
 
+import asyncio
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from ...agent._common import emit_tool_progress
 from ...agent.contracts import Citation, Tool, ToolResult
+from .._concurrency import gather_limited
 from ..anilist.tool import AniListArgs, SearchAniListTool
 from ..bangumi.client import BangumiClient
 from ..bangumi.models import SUBJECT_TYPE_NAME, SubjectDetail
@@ -463,6 +465,7 @@ class ReviewSubjectTool(Tool):
             )
 
         comments: list[CommentEvidence] = []
+        async_jobs: list[tuple[str, str, object]] = []
         if args.include_comments:
             await emit_tool_progress(tool=self.name, summary="处理短评与剧透边界", current=2, total=4)
             if args.spoiler_level == "none":
@@ -478,12 +481,49 @@ class ReviewSubjectTool(Tool):
                     SourceAvailability(source="Bangumi 短评", role="话语/口碑样本", status="hidden", note="无剧透模式隐藏原文")
                 )
             else:
-                cres = await self.comments.run(CommentsArgs(subject_id=detail.id, query=args.focus, limit=8))
-                if cres.ok and cres.data:
+                async_jobs.append(("comments", "bangumi", self.comments.run(CommentsArgs(subject_id=detail.id, query=args.focus, limit=8))))
+
+        await emit_tool_progress(tool=self.name, summary="补充外部评价源", current=3, total=4)
+        if detail.type == 2:  # anime
+            async_jobs.append(("anilist_anime", "anilist", self.anilist.run(AniListArgs(keyword=detail.name or title, type="anime", limit=3))))
+
+        if detail.type == 1:  # book / manga / novel
+            async_jobs.append(("anilist_manga", "anilist", self.anilist.run(AniListArgs(keyword=detail.name or title, type="manga", limit=3))))
+
+        if detail.type == 4:  # game / galgame
+            async_jobs.append(("egs", "egs", self.egs.run(EGSArgs(keyword=title, limit=3))))
+            async_jobs.append(("vndb", "vndb", self.vndb.run(VNSearchArgs(keyword=title, limit=3))))
+
+        if detail.type == 3:
+            async_jobs.append(("musicbrainz", "musicbrainz", self.musicbrainz.run(MusicBrainzArgs(keyword=detail.name or title, limit=3))))
+            source_matrix.append(SourceAvailability(source="音乐平台评论", role="音乐评论/歌单口碑", status="link_only", note="当前仅导航，不抓评论"))
+        if detail.type == 6:
+            source_matrix.append(SourceAvailability(source="Web/官方信息", role="三次元补充信息", status="link_only", note="当前以 Bangumi 和 web_search 兜底"))
+
+        async def run_limited(label: str, host: str, coro):
+            result = await gather_limited([coro], host=host)
+            return label, result[0] if result else None
+
+        if async_jobs:
+            results = await asyncio.gather(
+                *(run_limited(label, host, coro) for label, host, coro in async_jobs),
+                return_exceptions=True,
+            )
+        else:
+            results = []
+
+        for packed in results:
+            if isinstance(packed, Exception):
+                continue
+            label, data = packed
+            if isinstance(data, Exception) or data is None:
+                continue
+            if label == "comments":
+                if data.ok and data.data:
                     comments.append(
                         CommentEvidence(
                             source="Bangumi 短评",
-                            samples=cres.data.comments,
+                            samples=data.data.comments,
                             note="用户短评样本，适合提炼夸点/吐槽点。",
                             url=f"https://bgm.tv/subject/{detail.id}/comments",
                         )
@@ -491,104 +531,88 @@ class ReviewSubjectTool(Tool):
                     source_matrix.append(
                         SourceAvailability(source="Bangumi 短评", role="话语/口碑样本", status="used")
                     )
-
-        await emit_tool_progress(tool=self.name, summary="补充外部评价源", current=3, total=4)
-        if detail.type == 2:  # anime
-            anilist = await self.anilist.run(AniListArgs(keyword=detail.name or title, type="anime", limit=3))
-            if anilist.ok and anilist.data and anilist.data.results:
-                item = anilist.data.results[0]
-                ratings.append(
-                    RatingEvidence(
-                        source="AniList",
-                        score=item.score,
-                        scale=100,
-                        count=None,
-                        signal=_score_signal(item.score, None, 100),
-                        note="英文圈动画评分，满分 100；用 Bangumi 日文原名检索。",
-                        url=f"https://anilist.co/anime/{item.id}",
+            elif label in {"anilist_anime", "anilist_manga"}:
+                if data.ok and data.data and data.data.results:
+                    item = data.data.results[0]
+                    is_anime = label == "anilist_anime"
+                    ratings.append(
+                        RatingEvidence(
+                            source="AniList",
+                            score=item.score,
+                            scale=100,
+                            count=None,
+                            signal=_score_signal(item.score, None, 100),
+                            note=(
+                                "英文圈动画评分，满分 100；用 Bangumi 日文原名检索。"
+                                if is_anime else
+                                "英文圈漫画/书籍条目评分，满分 100；轻小说可能覆盖不完整。"
+                            ),
+                            url=f"https://anilist.co/{'anime' if is_anime else 'manga'}/{item.id}",
+                        )
                     )
-                )
-                source_matrix.append(SourceAvailability(source="AniList", role="英文圈动画评分/别名", status="used"))
-
-        if detail.type == 1:  # book / manga / novel
-            anilist = await self.anilist.run(AniListArgs(keyword=detail.name or title, type="manga", limit=3))
-            if anilist.ok and anilist.data and anilist.data.results:
-                item = anilist.data.results[0]
-                ratings.append(
-                    RatingEvidence(
-                        source="AniList",
-                        score=item.score,
-                        scale=100,
-                        count=None,
-                        signal=_score_signal(item.score, None, 100),
-                        note="英文圈漫画/书籍条目评分，满分 100；轻小说可能覆盖不完整。",
-                        url=f"https://anilist.co/manga/{item.id}",
+                    source_matrix.append(
+                        SourceAvailability(
+                            source="AniList",
+                            role="英文圈动画评分/别名" if is_anime else "英文圈漫画/书籍评分/别名",
+                            status="used",
+                        )
                     )
-                )
-                source_matrix.append(SourceAvailability(source="AniList", role="英文圈漫画/书籍评分/别名", status="used"))
-
-        if detail.type == 4:  # game / galgame
-            egs = await self.egs.run(EGSArgs(keyword=title, limit=3))
-            if egs.ok and egs.data and egs.data.results:
-                item = egs.data.results[0]
-                ratings.append(
-                    RatingEvidence(
-                        source="ErogameScape/批判空间",
-                        score=item.median,
-                        scale=100,
-                        count=item.vote_count,
-                        signal=_score_signal(item.median, item.vote_count, 100),
-                        note=f"日本 galgame 圈中央值；品牌 {item.brand or '未知'}。",
-                        url=item.url,
+            elif label == "egs":
+                if data.ok and data.data and data.data.results:
+                    item = data.data.results[0]
+                    ratings.append(
+                        RatingEvidence(
+                            source="ErogameScape/批判空间",
+                            score=item.median,
+                            scale=100,
+                            count=item.vote_count,
+                            signal=_score_signal(item.median, item.vote_count, 100),
+                            note=f"日本 galgame 圈中央值；品牌 {item.brand or '未知'}。",
+                            url=item.url,
+                        )
                     )
-                )
-                source_matrix.append(SourceAvailability(source="ErogameScape/批判空间", role="日本 gal 圈评分", status="used"))
-            vn = await self.vndb.run(VNSearchArgs(keyword=title, limit=3))
-            if vn.ok and vn.data and vn.data.results:
-                item = vn.data.results[0]
-                ratings.append(
-                    RatingEvidence(
-                        source="VNDB",
-                        score=item.rating,
-                        scale=100,
-                        count=item.votecount,
-                        signal=_score_signal(item.rating, item.votecount, 100),
-                        note="国际 VN 圈评分，满分 100。",
-                        url=f"https://vndb.org/{item.id}",
+                    source_matrix.append(SourceAvailability(source="ErogameScape/批判空间", role="日本 gal 圈评分", status="used"))
+            elif label == "vndb":
+                if data.ok and data.data and data.data.results:
+                    item = data.data.results[0]
+                    ratings.append(
+                        RatingEvidence(
+                            source="VNDB",
+                            score=item.rating,
+                            scale=100,
+                            count=item.votecount,
+                            signal=_score_signal(item.rating, item.votecount, 100),
+                            note="国际 VN 圈评分，满分 100。",
+                            url=f"https://vndb.org/{item.id}",
+                        )
                     )
-                )
-                source_matrix.append(SourceAvailability(source="VNDB", role="国际 VN 圈评分/别名/发售日", status="used"))
-
-        if detail.type == 3:
-            mb = await self.musicbrainz.run(MusicBrainzArgs(keyword=detail.name or title, limit=3))
-            extra_sources.extend(mb.sources)
-            if mb.ok and mb.data and mb.data.results:
-                first = mb.data.results[0]
-                note_bits = [first.title]
-                if first.artist:
-                    note_bits.append(first.artist)
-                if first.first_release_date:
-                    note_bits.append(first.first_release_date)
-                source_matrix.append(
-                    SourceAvailability(
-                        source="MusicBrainz",
-                        role="音乐元数据/发行信息",
-                        status="used",
-                        note=" / ".join(note_bits),
+                    source_matrix.append(SourceAvailability(source="VNDB", role="国际 VN 圈评分/别名/发售日", status="used"))
+            elif label == "musicbrainz":
+                extra_sources.extend(data.sources)
+                if data.ok and data.data and data.data.results:
+                    first = data.data.results[0]
+                    note_bits = [first.title]
+                    if first.artist:
+                        note_bits.append(first.artist)
+                    if first.first_release_date:
+                        note_bits.append(first.first_release_date)
+                    source_matrix.append(
+                        SourceAvailability(
+                            source="MusicBrainz",
+                            role="音乐元数据/发行信息",
+                            status="used",
+                            note=" / ".join(note_bits),
+                        )
                     )
-                )
-            else:
-                source_matrix.append(
-                    SourceAvailability(
-                        source="MusicBrainz",
-                        role="音乐元数据/发行信息",
-                        status="unavailable",
-                        note=mb.error or "未检索到匹配条目",
+                else:
+                    source_matrix.append(
+                        SourceAvailability(
+                            source="MusicBrainz",
+                            role="音乐元数据/发行信息",
+                            status="unavailable",
+                            note=data.error or "未检索到匹配条目",
+                        )
                     )
-                )
-            source_matrix.append(SourceAvailability(source="音乐平台评论", role="音乐评论/歌单口碑", status="link_only", note="当前仅导航，不抓评论"))
-        if detail.type == 6:
-            source_matrix.append(SourceAvailability(source="Web/官方信息", role="三次元补充信息", status="link_only", note="当前以 Bangumi 和 web_search 兜底"))
 
         caveats = []
         if args.spoiler_level == "none":

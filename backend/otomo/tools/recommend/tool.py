@@ -26,9 +26,10 @@ from ...config import settings
 from ...memory import LongTermMemory
 from ...memory.models import UserAspectProfile
 from ...profile import compute_taste_profile
+from .._concurrency import gather_limited
 from ..bangumi.client import SUBJECT_TYPE, BangumiClient
 from ..erogamescape.tool import EGSRankArgs, RankErogameScapeTool
-from ..review.tool import ReviewSubjectArgs, ReviewSubjectTool, _ASPECT_HINTS, _ASPECT_LABELS
+from ..review.tool import ReviewSubjectArgs, ReviewSubjectTool, _ASPECT_HINTS
 
 _RECALL_PER_TAG = 50
 _MAX_RECALL_TAGS = 8
@@ -446,14 +447,19 @@ class RecommendTool(Tool):
 
     async def _cross_media_recall(self, cand: dict, target_stype: int, source_items: list[dict], seen: set[int]) -> None:
         seeds = sorted(source_items, key=lambda it: -(it.get("rate") or 0))[:_CF_SEEDS]
+        jobs = []
+        meta: list[tuple[int, str]] = []
         for item in seeds:
             sid = (item.get("subject") or {}).get("id")
             src_name = (item.get("subject") or {}).get("name_cn") or (item.get("subject") or {}).get("name")
             if not sid:
                 continue
-            try:
-                rels = await self.client.get_subject_relations(sid)
-            except Exception:  # noqa: BLE001
+            meta.append((sid, src_name or str(sid)))
+            jobs.append(self.client.get_subject_relations(sid))
+        if not jobs:
+            return
+        for (_sid, src_name), rels in zip(meta, await gather_limited(jobs, host="bangumi"), strict=False):
+            if isinstance(rels, Exception):
                 continue
             for rel in rels or []:
                 rid = rel.get("id")
@@ -463,7 +469,7 @@ class RecommendTool(Tool):
                 if relation and not any(k in relation for k in _CROSS_MEDIA_REL):
                     continue
                 c = cand.setdefault(rid, _blank(rel))
-                c["graph"].add(f"跨媒体关系：从《{src_name or sid}》到{relation or '相关条目'}")
+                c["graph"].add(f"跨媒体关系：从《{src_name or _sid}》到{relation or '相关条目'}")
 
     async def _external_game_recall(self, cand: dict, seen: set[int], limit: int) -> list[str]:
         """Use EGS ranking as a front recall source, then anchor candidates back to Bangumi IDs.
@@ -476,12 +482,20 @@ class RecommendTool(Tool):
         )
         if not res.ok or not res.data:
             return warnings
-        for egs in res.data.results[: min(limit * 3, 18)]:
+
+        async def search_egs(egs):
             try:
                 raw = await self.client.search_subjects(egs.title, SUBJECT_TYPE["game"], limit=5)
             except Exception:  # noqa: BLE001
+                return egs, []
+            return egs, (raw.get("data") or [])
+
+        egs_items = res.data.results[: min(limit * 3, 18)]
+        search_results = await gather_limited([search_egs(egs) for egs in egs_items], host="bangumi")
+        for pair in search_results:
+            if isinstance(pair, Exception):
                 continue
-            subjects = raw.get("data") or []
+            egs, subjects = pair
             matches: list[tuple[float, str, dict]] = []
             for s in subjects:
                 conf, matched_by = _egs_mapping_confidence(egs.title, s)
@@ -530,24 +544,27 @@ class RecommendTool(Tool):
 
     async def _enrich(self, ranked_ids: list[tuple[int, dict]]) -> None:
         """对前 N 个信息不全（缺评分或缺名，多来自图谱/协同召回）的候选按需补 get_subject。"""
-        n = 0
+        jobs = []
+        targets: list[tuple[int, dict]] = []
         for sid, c in ranked_ids:
-            if n >= _ENRICH_TOP:
+            if len(targets) >= _ENRICH_TOP:
                 break
             if c["name"] and c["rating"].get("score"):
                 continue
-            n += 1
-            try:
-                raw = await self.client.get_subject(sid)
-                if not c["name"]:
-                    c["name"] = raw.get("name_cn") or raw.get("name")
-                    img = raw.get("images") or {}
-                    c["image"] = c["image"] or img.get("common") or img.get("medium") or img.get("grid")
-                c["rating"] = raw.get("rating") or c["rating"]
-                c["eps"] = c.get("eps") or _eps_value(raw.get("eps") or raw.get("total_episodes"))
-                c["tags"].update(_tag_names(raw))
-            except Exception:  # noqa: BLE001
-                pass
+            targets.append((sid, c))
+            jobs.append(self.client.get_subject(sid))
+        if not jobs:
+            return
+        for (_sid, c), raw in zip(targets, await gather_limited(jobs, host="bangumi"), strict=False):
+            if isinstance(raw, Exception):
+                continue
+            if not c["name"]:
+                c["name"] = raw.get("name_cn") or raw.get("name")
+                img = raw.get("images") or {}
+                c["image"] = c["image"] or img.get("common") or img.get("medium") or img.get("grid")
+            c["rating"] = raw.get("rating") or c["rating"]
+            c["eps"] = c.get("eps") or _eps_value(raw.get("eps") or raw.get("total_episodes"))
+            c["tags"].update(_tag_names(raw))
 
     async def _series_context(self, sid: int, stype: int, seen: set[int]):
         """一次查 relations，同时拿：①续集→回溯入口（顺序关系，要替换） ②同 IP 旁支（平行关系，只提示）。
@@ -859,6 +876,21 @@ class RecommendTool(Tool):
         seen_series: set[str] = set()
         seen_ids: set[int] = set()
         pool_limit = min(args.limit * 2, 20) if args.enrich_evidence else args.limit
+        series_contexts: dict[int, tuple] = {}
+        if args.use_series:
+            series_targets = [
+                (sid, c)
+                for sid, c in ranked[: max(pool_limit * 2, args.limit)]
+                if c.get("name")
+            ][:30]
+            if series_targets:
+                series_results = await gather_limited(
+                    [self._series_context(sid, stype, seen) for sid, _c in series_targets],
+                    host="bangumi",
+                )
+                for (sid, _c), res in zip(series_targets, series_results, strict=False):
+                    if not isinstance(res, Exception):
+                        series_contexts[sid] = res
         for sid, c in ranked:
             if not c["name"]:
                 continue  # 协同召回候选未被 enrich 补到名，跳过
@@ -867,7 +899,7 @@ class RecommendTool(Tool):
                 continue
             r_id, r_name, r_img, r_rating, extra = sid, c["name"], c.get("image"), c["rating"], []
             if args.use_series:
-                entry, siblings = await self._series_context(sid, stype, seen)
+                entry, siblings = series_contexts.get(sid) or await self._series_context(sid, stype, seen)
                 if entry:  # 续集且前作未看 → 换成入口作（顺序关系）
                     r_id, r_name, r_img, r_rating = entry
                     extra.append(f"系列入口（《{c['name']}》的前作，建议从这部入坑）")
@@ -999,7 +1031,7 @@ class RecommendTool(Tool):
         aspect_profile: UserAspectProfile | None = None,
         subject_type: str = "anime",
     ) -> None:
-        for item in items:
+        async def fetch_review(item: RecItem):
             try:
                 res = await self.reviewer.run(
                     ReviewSubjectArgs(
@@ -1010,6 +1042,15 @@ class RecommendTool(Tool):
                     )
                 )
             except Exception:  # noqa: BLE001
+                return item, None
+            return item, res
+
+        pairs = await gather_limited([fetch_review(item) for item in items], host="bangumi")
+        for pair in pairs:
+            if isinstance(pair, Exception) or pair is None:
+                continue
+            item, res = pair
+            if res is None:
                 continue
             if not res.ok or not res.data:
                 continue

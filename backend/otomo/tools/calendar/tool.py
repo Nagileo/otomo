@@ -254,6 +254,8 @@ class BroadcastCalendarTool(Tool):
         coll = await _collection_map(self.client, username, include_wishlist=args.include_wishlist) if args.only_mine else {}
         if args.only_mine:
             await emit_tool_progress(tool=self.name, summary=f"对齐 @{username} 的在看/想看收藏", current=2, total=3)
+        # 收藏读不到（未登录/私有）时降级为全量表并显式警告，避免空表被误读成"你没有番在更新"
+        only_mine = args.only_mine and bool(coll)
         raw_days = await self.client.get_calendar()
         days: list[BroadcastCalendarDay] = []
         for raw_day in raw_days or []:
@@ -265,13 +267,13 @@ class BroadcastCalendarTool(Tool):
             items: list[BroadcastCalendarItem] = []
             for raw in raw_day.get("items") or []:
                 sid = _subject_id(raw)
-                if args.only_mine and sid not in coll:
+                if only_mine and sid not in coll:
                     continue
                 item = _calendar_item(raw, weekday_cn, coll.get(sid) if sid else None)
                 if item:
                     items.append(item)
             items.sort(key=lambda x: (0 if x.my_collection == "watching" else 1, -(x.doing or 0), x.name_cn))
-            if items or not args.only_mine:
+            if items or not only_mine:
                 days.append(BroadcastCalendarDay(
                     weekday_id=wid,
                     weekday_cn=weekday_cn,
@@ -284,11 +286,16 @@ class BroadcastCalendarTool(Tool):
             "Bangumi /calendar 是当季放送表，日期以日本放送日为主。",
             "only_mine 只 join 当前可见的在看/想看收藏；收藏私有或未登录会导致命中为空。",
         ]
+        if args.only_mine and not only_mine:
+            notes.insert(
+                0,
+                "警告：未能读取在看/想看收藏（未登录或收藏私有），已降级为全量放送表——结果不代表用户没有在追的更新。",
+            )
         data = BroadcastCalendarResult(
             scope=args.day,
             today=today.isoformat(),
             days=days,
-            only_mine=args.only_mine,
+            only_mine=only_mine,
             username=username or "",
             count=count,
             notes=notes,
@@ -347,6 +354,20 @@ class AiringProgressTool(Tool):
         episodes = raw.get("data") if isinstance(raw, dict) else raw
         if not isinstance(episodes, list):
             episodes = []
+        # 长寿番（>200集）首页只覆盖最早 200 集，aired_ep 会封顶在 200 → 误报"不落后"；补拉尾页
+        total = raw.get("total") if isinstance(raw, dict) else None
+        try:
+            total_i = int(total or 0)
+        except (TypeError, ValueError):
+            total_i = 0
+        if total_i > len(episodes):
+            try:
+                tail = await self.client.get_episodes(sid, ep_type=0, limit=200, offset=max(0, total_i - 200))
+                tail_rows = tail.get("data") if isinstance(tail, dict) else tail
+                if isinstance(tail_rows, list):
+                    episodes = episodes + tail_rows
+            except Exception:  # noqa: BLE001
+                pass
         today = _today()
         aired, next_air, next_sort = _aired_episode_count(episodes, today)
         my_ep = _ep_status(row) if status == "watching" else 0

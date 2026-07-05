@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 from typing import Literal
 from urllib.parse import quote
 
@@ -13,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ...agent.contracts import Citation, Tool, ToolResult
 from ...profile import compute_taste_profile
+from .._concurrency import gather_limited
 from ..bangumi.client import SUBJECT_TYPE, BangumiClient
 from ..bangumi.models import SubjectBrief
 from ..videos.tool import (
@@ -249,10 +251,11 @@ class ListYearAnimeTool(Tool):
         self._season_tool = ListSeasonAnimeTool(client)
 
     async def run(self, args: YearAnimeArgs) -> ToolResult[YearAnimeResult]:
-        seasons = [
-            await self._season_tool._fetch_season(args.year, month, args.limit_per_season)
-            for month in (1, 4, 7, 10)
-        ]
+        seasons = await gather_limited(
+            [self._season_tool._fetch_season(args.year, month, args.limit_per_season) for month in (1, 4, 7, 10)],
+            host="bangumi",
+            return_exceptions=False,
+        )
         anime = [s for season in seasons for s in season.anime]
         return ToolResult(
             ok=True,
@@ -321,12 +324,18 @@ class SeasonGuideBriefTool(Tool):
         if not search.ok or not search.data:
             return []
         digests: list[GuideCommentDigest] = []
-        for video in search.data.videos:
-            if not video.aid:
+        videos = [video for video in search.data.videos if video.aid][: max(video_limit * 2, video_limit)]
+        comment_results = await gather_limited(
+            [
+                self._bili_comments_tool.run(BiliVideoCommentsArgs(aid=video.aid, query=guide_query, limit=comment_limit))
+                for video in videos
+                if video.aid
+            ],
+            host="bilibili",
+        )
+        for video, comments in zip(videos, comment_results, strict=False):
+            if isinstance(comments, Exception):
                 continue
-            comments = await self._bili_comments_tool.run(
-                BiliVideoCommentsArgs(aid=video.aid, query=guide_query, limit=comment_limit)
-            )
             if not comments.ok or not comments.data:
                 continue
             digests.append(
@@ -345,14 +354,15 @@ class SeasonGuideBriefTool(Tool):
         return digests
 
     async def run(self, args: SeasonGuideBriefArgs) -> ToolResult[SeasonGuideBriefResult]:
-        season = await self._season_tool._fetch_season(args.year, args.month, args.limit)
-        yuc_res = await self._yuc_tool.run(YucSeasonArgs(year=args.year, month=args.month, limit=80))
+        season, yuc_res = await asyncio.gather(
+            self._season_tool._fetch_season(args.year, args.month, args.limit),
+            self._yuc_tool.run(YucSeasonArgs(year=args.year, month=args.month, limit=80)),
+        )
         yuc_items = yuc_res.data.anime if yuc_res.ok and yuc_res.data else []
         personalized, profile_tags = await self._profile_tags(args.username)
         wanted = list(dict.fromkeys((args.focus_tags or []) + profile_tags))
 
-        items: list[SeasonGuideItem] = []
-        for subject in season.anime[: args.limit]:
+        async def build_item(subject: SubjectBrief) -> SeasonGuideItem:
             yuc, match_confidence, matched_by = _match_yuc(subject, yuc_items)
             match_confidence, matched_by = await self._verify_yuc_match(subject, yuc, match_confidence, matched_by)
             bangumi_tags: list[str] = []
@@ -365,31 +375,32 @@ class SeasonGuideBriefTool(Tool):
             tags = _unique((yuc.tags if yuc else []) + bangumi_tags)
             fit, match_tags, reason, fit_score = _fit_item(tags, subject.score, wanted)
             item_guides = _guide_links(subject.name_cn or subject.name, "review", 3, tags)
-            items.append(
-                SeasonGuideItem(
-                    subject_id=subject.id,
-                    title=subject.name_cn or subject.name,
-                    title_jp=subject.name,
-                    yuc_title=yuc.title_cn if yuc else None,
-                    match_confidence=match_confidence,
-                    matched_by=matched_by,
-                    bangumi_score=subject.score,
-                    rank=subject.rank,
-                    air_date=subject.date,
-                    broadcast=yuc.broadcast if yuc else None,
-                    studio=yuc.studio if yuc else None,
-                    tags=tags,
-                    match_tags=match_tags,
-                    fit_score=fit_score,
-                    fit=fit,
-                    reason=reason,
-                    evidence=_evidence(subject, yuc, match_tags, fit, match_confidence),
-                    guide_videos=item_guides,
-                    official_url=yuc.official_url if yuc else None,
-                    pv_url=yuc.pv_url if yuc else None,
-                    image=subject.image or (yuc.image if yuc else None),
-                )
+            return SeasonGuideItem(
+                subject_id=subject.id,
+                title=subject.name_cn or subject.name,
+                title_jp=subject.name,
+                yuc_title=yuc.title_cn if yuc else None,
+                match_confidence=match_confidence,
+                matched_by=matched_by,
+                bangumi_score=subject.score,
+                rank=subject.rank,
+                air_date=subject.date,
+                broadcast=yuc.broadcast if yuc else None,
+                studio=yuc.studio if yuc else None,
+                tags=tags,
+                match_tags=match_tags,
+                fit_score=fit_score,
+                fit=fit,
+                reason=reason,
+                evidence=_evidence(subject, yuc, match_tags, fit, match_confidence),
+                guide_videos=item_guides,
+                official_url=yuc.official_url if yuc else None,
+                pv_url=yuc.pv_url if yuc else None,
+                image=subject.image or (yuc.image if yuc else None),
             )
+        item_results = await gather_limited([build_item(subject) for subject in season.anime[: args.limit]], host="bangumi")
+        items = [item for item in item_results if isinstance(item, SeasonGuideItem)]
+        dropped = len(item_results) - len(items)
         items.sort(key=lambda x: (-_fit_rank(x.fit), -x.fit_score, -(x.bangumi_score or 0)))
 
         guide_query = f"{args.year}年{args.month}月 新番导视"
@@ -416,6 +427,10 @@ class SeasonGuideBriefTool(Tool):
                     "B站导视评论已抽样读取；它们是话语源，不是事实源，且可能包含剧透/玩梗。"
                     if guide_comment_digests else
                     "B站导视默认仅返回白名单 UP 搜索入口；需要观众期待/担心点时可启用 include_video_comments。"
+                ),
+                *(
+                    [f"有 {dropped} 部条目在并发补全时失败被跳过，本季清单可能不完整。"]
+                    if dropped else []
                 ),
             ],
         )

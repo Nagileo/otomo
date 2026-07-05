@@ -483,6 +483,9 @@ _PANEL_TOOLS = {
     "route_image_source",
     "analyze_video_frames",
     "summarize_bilibili_video_content",
+    "get_pixiv_ranking",
+    "search_pixiv_illusts",
+    "get_pixiv_artist_portfolio",
     "build_aspect_profile",
     "plan_watch_copilot",
     "build_taste_report",
@@ -1018,6 +1021,24 @@ def _safe_bili_video_content_payload(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _safe_pixiv_payload(data: dict[str, Any]) -> dict[str, Any]:
+    results = []
+    for item in _trim_dicts(data.get("results"), limit=16):
+        copied = dict(item)
+        copied["title"] = _trim_text(copied.get("title"), 120)
+        copied["artist"] = _trim_text(copied.get("artist"), 80)
+        copied["tags"] = _trim_strings(copied.get("tags"), limit=10, text_limit=40)
+        results.append(copied)
+    return {
+        "query": _trim_text(data.get("query"), 120),
+        "mode": data.get("mode"),
+        "count": data.get("count"),
+        "source": "pixiv",
+        "results": results,
+        "caveats": _trim_strings(data.get("caveats"), limit=6, text_limit=180),
+    }
+
+
 def panel_data_from_payload(name: str, payload: dict[str, Any] | None) -> dict[str, Any] | None:
     """Return UI-safe structured payload for tools that have dedicated evidence panels."""
     if name not in _PANEL_TOOLS or not isinstance(payload, dict):
@@ -1065,6 +1086,8 @@ def panel_data_from_payload(name: str, payload: dict[str, Any] | None) -> dict[s
         return _safe_video_frames_payload(data)
     if name == "summarize_bilibili_video_content":
         return _safe_bili_video_content_payload(data)
+    if name in {"get_pixiv_ranking", "search_pixiv_illusts", "get_pixiv_artist_portfolio"}:
+        return _safe_pixiv_payload(data)
     if name in _MEMORY_TOOLS:
         return _safe_memory_payload(data)
     return None

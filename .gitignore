@@ -61,3 +61,7 @@ Thumbs.db
 
 # 记录
 logs/
+
+# 浏览器导出的登录态 cookie（B站 SESSDATA 等，等同密码，绝不提交）
+cookies.txt
+*_cookies.txt

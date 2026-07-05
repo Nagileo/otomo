@@ -9,6 +9,10 @@ import asyncio
 import urllib.parse
 import html
 import re
+import tempfile
+import threading
+from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 import xml.etree.ElementTree as ET
 
@@ -140,6 +144,7 @@ class BiliVideoSubtitleResult(BaseModel):
     bvid: str | None = None
     cid: int | None = None
     subtitle_url: str = ""
+    source: Literal["bili_public_subtitle", "bili_asr"] = "bili_public_subtitle"
     count: int = 0
     segments: list[BiliSubtitleSegment] = Field(default_factory=list)
     rough_summary: list[str] = Field(default_factory=list)
@@ -170,7 +175,7 @@ class BiliVideoContentResult(BaseModel):
     cid: int | None = None
     title: str = ""
     source_url: str = ""
-    access_level: Literal["multi", "subtitle", "danmaku", "comments", "metadata", "unavailable"] = "unavailable"
+    access_level: Literal["multi", "subtitle", "asr", "danmaku", "comments", "metadata", "unavailable"] = "unavailable"
     read_layers: list[str] = Field(default_factory=list)
     content_summary: list[str] = Field(default_factory=list)
     audience_summary: list[str] = Field(default_factory=list)
@@ -565,6 +570,110 @@ async def _resolve_video_ref(url: str | None, aid: int | None, bvid: str | None)
     return aid, bvid, notes
 
 
+@lru_cache(maxsize=2)
+def _whisper_model(model_name: str, device: str, compute_type: str):
+    try:
+        from faster_whisper import WhisperModel
+    except ImportError as e:  # pragma: no cover - optional dependency
+        raise RuntimeError("未安装 faster-whisper；请执行 pip install -e \".[asr]\"") from e
+    # 项目惯例（同 _rag._resolve_model）：模型走 modelscope 下到 otomo/models/ 本地优先，
+    # HF 直连在国内网络常失败。例：
+    #   modelscope download --model gpustack/faster-whisper-small --local_dir otomo/models/faster-whisper-small
+    from .._rag import _LOCAL_MODELS  # 单一事实源，避免再算错目录层级
+
+    local = _LOCAL_MODELS / f"faster-whisper-{model_name}"
+    return WhisperModel(str(local) if local.is_dir() else model_name, device=device, compute_type=compute_type)
+
+
+# 单发闸门：whisper CPU 推理单跑就吃满核，并发只会互相拖慢并把内存翻倍。
+# threading 信号量在 to_thread 的 worker 线程里阻塞等待，不占 event loop，也无跨 loop 问题。
+_ASR_GATE = threading.BoundedSemaphore(1)
+
+
+def _sync_local_bili_asr(source_url: str, max_segments: int) -> list[BiliSubtitleSegment]:
+    """Download public Bilibili audio to a temp dir and transcribe it locally."""
+    try:
+        import yt_dlp
+    except ImportError as e:  # pragma: no cover - optional dependency
+        raise RuntimeError("未安装 yt-dlp；请执行 pip install -e \".[asr]\"") from e
+
+    with _ASR_GATE, tempfile.TemporaryDirectory(prefix="otomo_bili_asr_") as tmp:
+        tmp_path = Path(tmp)
+        ydl_opts = {
+            "format": "bestaudio/best",
+            "outtmpl": str(tmp_path / "audio.%(ext)s"),
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+            "socket_timeout": settings.http_timeout,
+            "http_headers": {
+                "User-Agent": _BROWSER_UA,
+                "Referer": "https://www.bilibili.com/",
+            },
+        }
+        if settings.asr_cookies_from_browser:
+            ydl_opts["cookiesfrombrowser"] = (settings.asr_cookies_from_browser.strip().lower(),)
+        elif settings.asr_cookies_file:
+            ydl_opts["cookiefile"] = settings.asr_cookies_file
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(source_url, download=False)
+            duration = float(info.get("duration") or 0)
+            if duration and duration > settings.asr_max_video_seconds:
+                raise RuntimeError(
+                    f"视频时长 {duration:.0f}s 超过 ASR_MAX_VIDEO_SECONDS={settings.asr_max_video_seconds}"
+                )
+            info = ydl.extract_info(source_url, download=True)
+            filename = Path(ydl.prepare_filename(info))
+        if not filename.exists():
+            files = [p for p in tmp_path.glob("audio.*") if p.is_file()]
+            if not files:
+                raise RuntimeError("yt-dlp 未产出音频文件")
+            filename = files[0]
+        model = _whisper_model(settings.asr_model, settings.asr_device, settings.asr_compute_type)
+        segments_iter, _info = model.transcribe(
+            str(filename),
+            language=settings.asr_language or None,
+            vad_filter=True,
+        )
+        segments: list[BiliSubtitleSegment] = []
+        for seg in segments_iter:
+            text_value = str(getattr(seg, "text", "") or "").strip()
+            if text_value:
+                segments.append(
+                    BiliSubtitleSegment(
+                        start=float(getattr(seg, "start", 0.0) or 0.0),
+                        end=float(getattr(seg, "end", 0.0) or 0.0),
+                        text=text_value[:220],
+                    )
+                )
+            if len(segments) >= max_segments:
+                break
+        return segments
+
+
+@acached(ttl=settings.asr_cache_ttl)
+async def _local_bili_asr(source_url: str, max_segments: int) -> list[BiliSubtitleSegment]:
+    return await asyncio.to_thread(_sync_local_bili_asr, source_url, max_segments)
+
+
+async def _maybe_asr_segments(source_url: str, max_segments: int) -> tuple[list[BiliSubtitleSegment], list[str], str | None]:
+    provider = (settings.asr_provider or "off").strip().lower()
+    if provider in {"", "off", "none", "false"}:
+        return [], ["ASR_PROVIDER=off，未启用本地转写。"], None
+    if provider != "local":
+        return [], [f"ASR_PROVIDER={settings.asr_provider} 暂未接入；当前仅支持 local。"], None
+    try:
+        segments = await _local_bili_asr(source_url, max_segments)
+    except Exception as e:  # noqa: BLE001
+        hint = "（B站 412 风控：导出浏览器 cookies.txt 并配置 ASR_COOKIES_FILE 可解除）" if "412" in str(e) else ""
+        return [], [f"本地 ASR 转写失败：{type(e).__name__}: {e}{hint}"], str(e)
+    caveats = [
+        "本地 ASR 由 faster-whisper 识别公开视频音频，可能漏字、错字或错分段。",
+        "B站 ASR 是视频话语源，不是 canonical 事实源；事实需回到 Bangumi/yuc 等源核验。",
+    ]
+    return segments, caveats, None
+
+
 class FindVideosTool(Tool):
     name = "find_related_videos"
     description = (
@@ -585,7 +694,7 @@ class FindVideosTool(Tool):
         return ToolResult(
             ok=True,
             data=VideosResult(query=q, links=links),
-            sources=[Citation(title=l.label, url=l.url, source="bilibili") for l in links],
+            sources=[Citation(title=link.label, url=link.url, source="bilibili") for link in links],
         )
 
 
@@ -604,7 +713,7 @@ class FindGuideVideosTool(Tool):
         return ToolResult(
             ok=True,
             data=GuideVideosResult(query=q, intent=args.intent, links=links),
-            sources=[Citation(title=l.label, url=l.url, source="bilibili") for l in links],
+            sources=[Citation(title=link.label, url=link.url, source="bilibili") for link in links],
         )
 
 
@@ -758,10 +867,29 @@ class GetBiliVideoSubtitlesTool(Tool):
         except (httpx.HTTPError, httpx.TransportError, ValueError) as e:
             return ToolResult(ok=False, error=f"B站字幕元数据读取失败：{type(e).__name__}")
         subtitles = (((player.get("data") or {}).get("subtitle") or {}).get("subtitles") or [])
+        video_id = args.bvid or (f"av{args.aid}" if args.aid else "")
+        source_url = f"https://www.bilibili.com/video/{video_id}" if video_id else "https://www.bilibili.com/"
         if not subtitles:
+            asr_segments, asr_caveats, asr_error = await _maybe_asr_segments(source_url, args.max_segments)
+            if not asr_segments:
+                return ToolResult(
+                    ok=False,
+                    error=asr_error or "该视频未暴露公开字幕，且 ASR 未启用；可回退到标题、简介、弹幕或评论区摘要。",
+                )
             return ToolResult(
-                ok=False,
-                error="该视频未暴露公开字幕/ASR；可回退到标题、简介或评论区摘要。",
+                ok=True,
+                data=BiliVideoSubtitleResult(
+                    aid=args.aid,
+                    bvid=args.bvid,
+                    cid=int(cid),
+                    subtitle_url="",
+                    source="bili_asr",
+                    count=len(asr_segments),
+                    segments=asr_segments,
+                    rough_summary=_rough_subtitle_summary(asr_segments),
+                    caveats=asr_caveats,
+                ),
+                sources=[Citation(title=f"Bilibili ASR {video_id}", url=source_url, source="bilibili")],
             )
         sub = subtitles[0]
         url = sub.get("subtitle_url") or ""
@@ -782,8 +910,6 @@ class GetBiliVideoSubtitlesTool(Tool):
                         text=text_value[:220],
                     )
                 )
-        video_id = args.bvid or (f"av{args.aid}" if args.aid else "")
-        source_url = f"https://www.bilibili.com/video/{video_id}" if video_id else "https://www.bilibili.com/"
         return ToolResult(
             ok=True,
             data=BiliVideoSubtitleResult(
@@ -791,6 +917,7 @@ class GetBiliVideoSubtitlesTool(Tool):
                 bvid=args.bvid,
                 cid=int(cid),
                 subtitle_url=url,
+                source="bili_public_subtitle",
                 count=len(segments),
                 segments=segments,
                 rough_summary=_rough_subtitle_summary(segments),
@@ -906,7 +1033,8 @@ class SummarizeBiliVideoContentTool(Tool):
         comment_samples: list[str] = []
 
         if subtitles.ok and subtitles.data is not None and subtitles.data.count:
-            read_layers.append("subtitle")
+            subtitle_layer = "asr" if subtitles.data.source == "bili_asr" else "subtitle"
+            read_layers.append(subtitle_layer)
             cid = subtitles.data.cid or cid
             subtitle_summary = subtitles.data.rough_summary
             subtitle_segments = subtitles.data.segments[:12]
@@ -941,11 +1069,11 @@ class SummarizeBiliVideoContentTool(Tool):
         for item in [*danmaku_summary[:5], *comment_summary[:5]]:
             if item and item not in audience_summary:
                 audience_summary.append(item)
-        access_level: Literal["multi", "subtitle", "danmaku", "comments", "metadata", "unavailable"]
+        access_level: Literal["multi", "subtitle", "asr", "danmaku", "comments", "metadata", "unavailable"]
         if subtitle_summary and (danmaku_summary or comment_summary):
             access_level = "multi"
         elif subtitle_summary:
-            access_level = "subtitle"
+            access_level = "asr" if "asr" in read_layers else "subtitle"
         elif danmaku_summary:
             access_level = "danmaku"
         elif comment_summary:

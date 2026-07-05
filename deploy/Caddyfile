@@ -4,7 +4,10 @@
 	@api path /api/* /auth/* /uploads/* /sessions* /sessions/* /weekly/* /actions/* /feedback/* /health
 	handle @api {
 		uri strip_prefix /api
-		reverse_proxy backend:8000
+		reverse_proxy backend:8000 {
+			# 覆盖（而非默认的追加）客户端预置的 XFF 链，防伪造 IP 绕过后端限流
+			header_up X-Forwarded-For {client_ip}
+		}
 	}
 
 	handle {

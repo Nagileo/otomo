@@ -42,6 +42,15 @@ browser = [
     # 动态网页摘要：pip install -e ".[browser]" && playwright install chromium
     "playwright>=1.45",
 ]
+asr = [
+    # B站无公开字幕时的本地 ASR 兜底；系统需 ffmpeg。
+    "yt-dlp>=2024.8.6",
+    "faster-whisper>=1.0",
+]
+pixiv = [
+    # Pixiv 非官方登录 API；需 PIXIV_REFRESH_TOKEN，公网部署默认关闭。
+    "PixivPy-Async>=1.2.14",
+]
 
 [project.scripts]
 otomo = "otomo.cli:main"

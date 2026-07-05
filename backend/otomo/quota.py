@@ -6,6 +6,7 @@ later be swapped for Redis/Postgres without touching the FastAPI route logic.
 """
 from __future__ import annotations
 
+import contextvars
 from dataclasses import dataclass
 import json
 import time
@@ -28,10 +29,46 @@ def estimate_tokens(*texts: str) -> int:
     return max(1, int(chars / 2.4) + 8)
 
 
+# 请求级 LLM/VLM 真实用量累加器。值是可变 list——SSE generator 与工具子 task 的
+# context fork 拷贝的是同一 list 引用，所以任意深度的调用都记到同一账本上。
+_USAGE_LEDGER: contextvars.ContextVar[list[int] | None] = contextvars.ContextVar(
+    "otomo_llm_usage_ledger",
+    default=None,
+)
+
+
+def begin_usage_ledger() -> None:
+    """在请求入口开一本新账；不在请求上下文里时其余函数均为 no-op。"""
+    _USAGE_LEDGER.set([])
+
+
+def add_usage(prompt_tokens: int, completion_tokens: int) -> None:
+    ledger = _USAGE_LEDGER.get()
+    if ledger is None:
+        return
+    total = max(0, int(prompt_tokens or 0)) + max(0, int(completion_tokens or 0))
+    if total:
+        ledger.append(total)
+
+
+def add_usage_from_response(resp: Any) -> None:
+    usage = getattr(resp, "usage", None)
+    if usage is None:
+        return
+    add_usage(getattr(usage, "prompt_tokens", 0) or 0, getattr(usage, "completion_tokens", 0) or 0)
+
+
+def collected_usage() -> int:
+    ledger = _USAGE_LEDGER.get()
+    return sum(ledger) if ledger else 0
+
+
 def client_ip(request: Request) -> str:
+    # 反代（Caddy）已把 X-Forwarded-For 覆盖为真实 client ip；即便上游漏配，
+    # 取最右值也只信任离服务最近的一跳，客户端预置的伪造链排在左侧不采信。
     forwarded = request.headers.get("x-forwarded-for") or ""
     if forwarded:
-        return forwarded.split(",")[0].strip()
+        return forwarded.split(",")[-1].strip()
     return request.client.host if request.client else "unknown"
 
 

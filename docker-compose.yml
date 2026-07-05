@@ -13,6 +13,12 @@ services:
       - ./models:/app/models
     expose:
       - "8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     restart: unless-stopped
 
   weekly:
@@ -28,18 +34,21 @@ services:
       - ./logs:/app/logs
       - ./models:/app/models
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     restart: unless-stopped
 
   frontend:
     build:
       context: ./frontend
-    environment:
-      NEXT_PUBLIC_BACKEND: "${NEXT_PUBLIC_BACKEND:-/api}"
+      args:
+        # NEXT_PUBLIC_* 在 build 期内联进 client bundle，必须走 build args 而非 runtime env
+        NEXT_PUBLIC_BACKEND: "${NEXT_PUBLIC_BACKEND:-/api}"
     expose:
       - "3000"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     restart: unless-stopped
 
   caddy:

@@ -24,6 +24,7 @@ from .tools.moegirl.client import MoegirlClient
 from .tools.memory import build_memory_tools
 from .tools.musicbrainz import build_musicbrainz_tools
 from .tools.multimodal import build_multimodal_tools
+from .tools.pixiv import build_pixiv_tools
 from .tools.profile import build_profile_tools
 from .tools.recommend import build_recommend_tools
 from .tools.review import build_review_tools
@@ -72,6 +73,8 @@ def build_registry(
     for tool in build_anilist_tools():
         registry.register(tool)
     for tool in build_multimodal_tools(client):
+        registry.register(tool)
+    for tool in build_pixiv_tools():
         registry.register(tool)
     for tool in build_memory_tools(client, shared_ltm):
         registry.register(tool)

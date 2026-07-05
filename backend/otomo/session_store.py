@@ -74,31 +74,25 @@ class SessionStore:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id, id)")
 
     def ensure_session(self, session_id: str, auth_session_id: str, title: str = "") -> dict[str, Any]:
+        # auth_session_id 存的是"归属键"：匿名=cookie 会话 id，OAuth 登录后=user:<username>
+        # （登录时由 migrate_owner 迁移，同一账号跨设备可见）。
         now = _now()
         clean_title = title.strip()[:80]
         with self._connect() as conn:
-            row = conn.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
-            if row:
-                if row["auth_session_id"] != auth_session_id:
-                    raise PermissionError("session owner mismatch")
-                if clean_title and not row["title"]:
-                    conn.execute(
-                        "UPDATE sessions SET title=?, updated_at=? WHERE id=?",
-                        (clean_title, now, session_id),
-                    )
-                return dict(row)
+            # INSERT OR IGNORE 先行：并发首写同一 session_id 时 SELECT-then-INSERT 会撞 UNIQUE
             conn.execute(
-                "INSERT INTO sessions(id, auth_session_id, title, state_json, created_at, updated_at) VALUES(?,?,?,?,?,?)",
+                "INSERT OR IGNORE INTO sessions(id, auth_session_id, title, state_json, created_at, updated_at) VALUES(?,?,?,?,?,?)",
                 (session_id, auth_session_id, clean_title or "新对话", "{}", now, now),
             )
-        return {
-            "id": session_id,
-            "auth_session_id": auth_session_id,
-            "title": clean_title or "新对话",
-            "state_json": "{}",
-            "created_at": now,
-            "updated_at": now,
-        }
+            row = conn.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
+            if row["auth_session_id"] != auth_session_id:
+                raise PermissionError("session owner mismatch")
+            if clean_title and not row["title"]:
+                conn.execute(
+                    "UPDATE sessions SET title=?, updated_at=? WHERE id=?",
+                    (clean_title, now, session_id),
+                )
+            return dict(row)
 
     def _existing_session(self, session_id: str, auth_session_id: str) -> sqlite3.Row:
         with self._connect() as conn:
@@ -252,6 +246,17 @@ class SessionStore:
             "evidence": evidence,
             "sources": sources[-12:],
         }
+
+    def migrate_owner(self, old_owner: str, new_owner: str) -> int:
+        """把匿名归属迁给登录身份（cookie 会话 id → user:<username>）。"""
+        if not old_owner or not new_owner or old_owner == new_owner:
+            return 0
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE sessions SET auth_session_id=?, updated_at=? WHERE auth_session_id=?",
+                (new_owner, _now(), old_owner),
+            )
+        return int(cur.rowcount or 0)
 
     def cleanup_expired(self, ttl_seconds: int | None = None) -> int:
         ttl = ttl_seconds or settings.session_ttl_seconds

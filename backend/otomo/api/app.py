@@ -26,7 +26,14 @@ from ..memory.consolidate import now_iso
 from ..memory.models import VisualFeedbackItem, VisualFeedbackSignal, memory_summary
 from ..obs import append_visual_feedback, traced_stream
 from ..factory import build_registry
-from ..quota import RateLimiter, TokenQuotaStore, client_ip, estimate_tokens
+from ..quota import (
+    RateLimiter,
+    TokenQuotaStore,
+    begin_usage_ledger,
+    client_ip,
+    collected_usage,
+    estimate_tokens,
+)
 from ..session_store import SessionStore
 from ..uploads import upload_store
 from ..weekly import WeeklyDigestService
@@ -51,9 +58,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.rate_limiter = RateLimiter()
     app.state.quota_store = TokenQuotaStore()
     app.state.sessions: dict[str, AgentState] = {}  # 短期记忆：session_id -> 会话状态
+
+    async def _session_cleanup_loop() -> None:
+        while True:
+            try:
+                app.state.session_store.cleanup_expired()
+            except Exception:  # noqa: BLE001 - 清理失败不影响服务
+                pass
+            await asyncio.sleep(24 * 3600)
+
+    app.state.session_cleanup_task = asyncio.create_task(_session_cleanup_loop())
     try:
         yield
     finally:
+        app.state.session_cleanup_task.cancel()
+        try:
+            await app.state.session_cleanup_task
+        except asyncio.CancelledError:
+            pass
         if app.state.weekly_task is not None:
             await app.state.weekly_service.stop()
             app.state.weekly_task.cancel()
@@ -218,6 +240,14 @@ def _quota_key(auth_session_id: str, request: Request) -> str:
     return f"anon:{auth_session_id or client_ip(request)}"
 
 
+def _session_owner(auth_session_id: str) -> str:
+    """会话归属键：登录用户绑 user:<username>（跨设备/换浏览器可见），匿名沿用 cookie 会话 id。"""
+    identity = app.state.auth.identity(auth_session_id)
+    if identity.authenticated and identity.username:
+        return f"user:{identity.username}"
+    return auth_session_id
+
+
 def _check_chat_limits(request: Request, auth_session_id: str) -> None:
     limiter: RateLimiter = app.state.rate_limiter
     ip = client_ip(request)
@@ -296,6 +326,9 @@ async def dev_token_login(req: dict[str, str], request: Request, response: Respo
         username=str(me.get("username") or ""),
     )
     app.state.auth.save_token(token)
+    if token.username:
+        # 登录前的匿名会话迁给账号归属，跨设备/换浏览器仍可见
+        app.state.session_store.migrate_owner(session.auth_session_id, f"user:{token.username}")
     identity = app.state.auth.identity(session.auth_session_id).model_dump(mode="json")
     identity["csrf_token"] = session.csrf_token
     return {"ok": True, "identity": identity}
@@ -310,6 +343,8 @@ async def bangumi_callback(code: str = "", state: str = "") -> RedirectResponse:
         token = await exchange_oauth_code(app.state.auth, code, state)
         session_id = token.auth_session_id
         params["user"] = token.username
+        if token.username:
+            app.state.session_store.migrate_owner(session_id, f"user:{token.username}")
     except Exception as e:  # noqa: BLE001
         status = "error"
         params["error"] = f"{type(e).__name__}: {str(e)[:180]}"
@@ -363,14 +398,14 @@ async def preview_image(image_id: str) -> Response:
 @app.get("/sessions")
 async def list_sessions(request: Request, response: Response, limit: int = 40) -> dict[str, Any]:
     session = _ensure_auth_session(request, response)
-    return {"ok": True, "sessions": app.state.session_store.list_sessions(session.auth_session_id, limit)}
+    return {"ok": True, "sessions": app.state.session_store.list_sessions(_session_owner(session.auth_session_id), limit)}
 
 
 @app.get("/sessions/{session_id}/messages")
 async def get_session_messages(session_id: str, request: Request, response: Response) -> dict[str, Any]:
     session = _ensure_auth_session(request, response)
     try:
-        payload = app.state.session_store.load_messages(session_id, session.auth_session_id)
+        payload = app.state.session_store.load_messages(session_id, _session_owner(session.auth_session_id))
     except PermissionError as e:
         raise HTTPException(status_code=403, detail="无权访问该会话") from e
     except FileNotFoundError as e:
@@ -388,7 +423,7 @@ async def rename_session(
     session = _ensure_auth_session(request, response, req.auth_session_id)
     _require_csrf(request, session.auth_session_id)
     try:
-        payload = app.state.session_store.rename_session(session_id, session.auth_session_id, req.title)
+        payload = app.state.session_store.rename_session(session_id, _session_owner(session.auth_session_id), req.title)
     except PermissionError as e:
         raise HTTPException(status_code=403, detail="无权修改该会话") from e
     except FileNotFoundError as e:
@@ -401,7 +436,7 @@ async def delete_session(session_id: str, request: Request, response: Response) 
     session = _ensure_auth_session(request, response)
     _require_csrf(request, session.auth_session_id)
     try:
-        app.state.session_store.delete_session(session_id, session.auth_session_id)
+        app.state.session_store.delete_session(session_id, _session_owner(session.auth_session_id))
     except PermissionError as e:
         raise HTTPException(status_code=403, detail="无权删除该会话") from e
     except FileNotFoundError as e:
@@ -625,6 +660,7 @@ async def chat(req: ChatRequest, request: Request):
     _check_chat_limits(request, session.auth_session_id)
     quota_key = _quota_key(session.auth_session_id, request)
     app.state.quota_store.check(quota_key)
+    begin_usage_ledger()  # 本请求所有 LLM/VLM 调用的真实 token 记到这本账
     authenticated = app.state.auth.identity(session.auth_session_id).authenticated
     if req.attachments and not authenticated:
         raise HTTPException(status_code=401, detail="多模态上传需要先绑定 Bangumi 账号")
@@ -632,11 +668,12 @@ async def chat(req: ChatRequest, request: Request):
     registry = build_registry(client, app.state.moegirl, app.state.ltm)
     runner = _runner_from_registry(req.runner, registry)
     chat_session_id = req.session_id or uuid.uuid4().hex
+    session_owner = _session_owner(session.auth_session_id)
     # 短期记忆：有 session_id 就复用既有状态，否则新建
-    state = _session_state(app, chat_session_id, session.auth_session_id)
+    state = _session_state(app, chat_session_id, session_owner)
     if not authenticated and settings.anonymous_session_turn_limit > 0:
         try:
-            message_count = app.state.session_store.message_count(chat_session_id, session.auth_session_id)
+            message_count = app.state.session_store.message_count(chat_session_id, session_owner)
         except FileNotFoundError:
             message_count = 0
         if message_count >= settings.anonymous_session_turn_limit * 2:
@@ -683,7 +720,7 @@ async def chat(req: ChatRequest, request: Request):
     ]
     app.state.session_store.append_message(
         chat_session_id,
-        session.auth_session_id,
+        session_owner,
         role="user",
         content=req.message,
         attachments=stored_attachments,
@@ -714,17 +751,19 @@ async def chat(req: ChatRequest, request: Request):
             if final_answer:
                 app.state.session_store.append_message(
                     chat_session_id,
-                    session.auth_session_id,
+                    session_owner,
                     role="assistant",
                     content=final_answer,
                     evidence=evidence,
                     sources=sources,
                 )
-                try:
-                    app.state.quota_store.record(quota_key, estimate_tokens(req.message, final_answer))
-                except Exception:  # noqa: BLE001 - quota 落盘失败不能吞掉已完成回答
-                    pass
-            app.state.session_store.save_state(chat_session_id, session.auth_session_id, state)
+            try:
+                # 真实 usage 优先（llm.py 代理逐次累加）；provider 不回报时退回字符估算
+                tokens = collected_usage() or estimate_tokens(req.message, final_answer)
+                app.state.quota_store.record(quota_key, tokens)
+            except Exception:  # noqa: BLE001 - quota 落盘失败不能吞掉已完成回答
+                pass
+            app.state.session_store.save_state(chat_session_id, session_owner, state)
             await client.aclose()
 
     response = EventSourceResponse(event_gen())

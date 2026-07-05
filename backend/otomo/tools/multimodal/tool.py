@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 
 from ...agent.contracts import Citation, Tool, ToolResult
 from ...config import settings
+from ...quota import add_usage_from_response
 from ...uploads import upload_store
 from .._cache import TTLCache
 from ..bangumi.client import SUBJECT_TYPE, BangumiClient
@@ -230,6 +231,7 @@ async def _call_vlm_with_prompt(image_url: str, system_prompt: str, question: st
             },
         ],
     )
+    add_usage_from_response(resp)
     return resp.choices[0].message.content or ""
 
 
@@ -597,6 +599,7 @@ class ImageSourceMatch(BaseModel):
     confidence: float = Field(0.0, ge=0.0, le=1.0)
     thumbnail: str | None = None
     anilist_id: int | None = None
+    external_id: str = ""
     episode: str | int | None = None
     timestamp: str = ""
     note: str = ""
@@ -730,7 +733,7 @@ class ImageSourceSearchTool(Tool):
     name = "search_image_source"
     description = (
         "以图搜图/溯源：trace.moe 查动画截图，SauceNAO 查插画/同人/Pixiv 外链；"
-        "ascii2d/Pixiv 仅给导航或外链，不后台抓取。"
+        "ascii2d 给导航；Pixiv 若已配置可再用 get_pixiv_artist_portfolio 读取画师元数据。"
     )
     args_model = ImageSourceSearchArgs
     result_model = ImageSourceSearchResult
@@ -793,6 +796,7 @@ class ImageSourceSearchTool(Tool):
                                     source_site=str(header.get("index_name") or "SauceNAO"),
                                     source_type=source_type,
                                     author=str(data.get("member_name") or data.get("author_name") or data.get("creator") or ""),
+                                    external_id=str(data.get("member_id") or data.get("pixiv_id") or ""),
                                     similarity=sim,
                                     confidence=min(max(sim / 100.0, 0.0), 0.99),
                                     thumbnail=header.get("thumbnail"),
@@ -808,7 +812,7 @@ class ImageSourceSearchTool(Tool):
             if pixiv_links:
                 links.extend({"title": "Pixiv 来源候选", "url": url, "source": "pixiv"} for url in pixiv_links[:5])
             else:
-                caveats.append("Pixiv 没有稳定公开官方搜索 API；Otomo 不后台抓取 Pixiv，仅使用 SauceNAO 返回的 Pixiv 外链。")
+                caveats.append("Pixiv 没有稳定公开官方搜索 API；未命中 SauceNAO Pixiv 外链时只提供导航。")
         matches.sort(key=lambda x: x.confidence, reverse=True)
         data = ImageSourceSearchResult(matches=matches[: args.limit], navigation_links=links[:8], caveats=caveats)
         return ToolResult(
