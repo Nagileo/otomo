@@ -11,6 +11,7 @@ from ...agent._common import emit_tool_progress
 from ...agent.contracts import Citation, Tool, ToolResult
 from .._concurrency import gather_limited
 from ..bangumi.client import SUBJECT_TYPE, BangumiClient
+from ..yuc.tool import ListYucSeasonTool, YucSeasonArgs
 
 
 _COLLECTION_STATUS = {
@@ -51,6 +52,7 @@ class BroadcastCalendarItem(BaseModel):
     my_collection: str = ""
     my_collection_label: str = ""
     ep_status: int | None = None
+    broadcast: str = ""  # yuc 放送档期文本（如 "7/9周四深夜"）；Bangumi 侧只有日期无时刻
     url: str = ""
     note: str = ""
 
@@ -209,12 +211,44 @@ async def _collection_map(
     return out
 
 
-def _calendar_item(raw: dict[str, Any], weekday_cn: str, coll: dict[str, Any] | None) -> BroadcastCalendarItem | None:
+def _norm_match(value: str | None) -> str:
+    return "".join(ch.lower() for ch in str(value or "") if ch.isalnum())
+
+
+async def _yuc_broadcast_map(today: date) -> dict[str, str]:
+    """当季 yuc 放送档期（"7/9周四深夜"）按归一标题索引；失败返回空不影响日历主体。"""
+    month = 1 if today.month <= 3 else 4 if today.month <= 6 else 7 if today.month <= 9 else 10
+    try:
+        res = await ListYucSeasonTool().run(YucSeasonArgs(year=today.year, month=month, limit=80))
+    except Exception:  # noqa: BLE001
+        return {}
+    out: dict[str, str] = {}
+    for a in (res.data.anime if res.ok and res.data else []):
+        if not a.broadcast:
+            continue
+        for key in (_norm_match(a.title_cn), _norm_match(a.title_jp)):
+            if key:
+                out.setdefault(key, a.broadcast)
+    return out
+
+
+def _calendar_item(
+    raw: dict[str, Any],
+    weekday_cn: str,
+    coll: dict[str, Any] | None,
+    broadcast_map: dict[str, str] | None = None,
+) -> BroadcastCalendarItem | None:
     sid = _subject_id(raw)
     if not sid:
         return None
     score, rank = _score(raw)
     collection = raw.get("collection") or {}
+    broadcast = ""
+    if broadcast_map:
+        for key in (_norm_match(raw.get("name_cn")), _norm_match(raw.get("name"))):
+            if key and key in broadcast_map:
+                broadcast = broadcast_map[key]
+                break
     return BroadcastCalendarItem(
         id=sid,
         name=str(raw.get("name") or ""),
@@ -229,6 +263,7 @@ def _calendar_item(raw: dict[str, Any], weekday_cn: str, coll: dict[str, Any] | 
         my_collection=str((coll or {}).get("status") or ""),
         my_collection_label=str((coll or {}).get("label") or ""),
         ep_status=(coll or {}).get("ep_status"),
+        broadcast=broadcast,
         url=f"https://bgm.tv/subject/{sid}",
         note="日本放送日；国内平台上架时间可能有时差。",
     )
@@ -257,6 +292,7 @@ class BroadcastCalendarTool(Tool):
         # 收藏读不到（未登录/私有）时降级为全量表并显式警告，避免空表被误读成"你没有番在更新"
         only_mine = args.only_mine and bool(coll)
         raw_days = await self.client.get_calendar()
+        broadcast_map = await _yuc_broadcast_map(today)
         days: list[BroadcastCalendarDay] = []
         for raw_day in raw_days or []:
             weekday = raw_day.get("weekday") or {}
@@ -269,7 +305,7 @@ class BroadcastCalendarTool(Tool):
                 sid = _subject_id(raw)
                 if only_mine and sid not in coll:
                     continue
-                item = _calendar_item(raw, weekday_cn, coll.get(sid) if sid else None)
+                item = _calendar_item(raw, weekday_cn, coll.get(sid) if sid else None, broadcast_map)
                 if item:
                     items.append(item)
             items.sort(key=lambda x: (0 if x.my_collection == "watching" else 1, -(x.doing or 0), x.name_cn))

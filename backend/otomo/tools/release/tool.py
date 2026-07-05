@@ -5,8 +5,11 @@ download, host, seed, or play any release content.
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
+from difflib import SequenceMatcher
 from email.utils import parsedate_to_datetime
+import html as html_lib
 import json
 from pathlib import Path
 import re
@@ -34,7 +37,17 @@ _MIKAN_MAP_URLS = [
     "https://cdn.jsdelivr.net/gh/xiaoyvyv/bangumi-data@main/data/mikan/bangumi-mikan.json",
 ]
 _MIKAN_RSS = "https://mikanani.me/RSS/Bangumi?bangumiId={id}"
+_MIKAN_RSS_SUB = "https://mikanani.me/RSS/Bangumi?bangumiId={id}&subgroupid={sub}"
 _MIKAN_SEARCH = "https://mikanani.me/Home/Search?searchstr={q}"
+# 站内搜索 RSS（2026-07-05 实测）：新番蜜柑常先有发布记录、后建番组页，
+# 番组路径全 miss 时用它兜底，URL 本身即可订阅
+_MIKAN_SEARCH_RSS = "https://mikanani.me/RSS/Search?searchstr={q}"
+_MIKAN_BANGUMI_PAGE = "https://mikanani.me/Home/Bangumi/{id}"
+# 搜索页：Home/Bangumi/{id} 链接与 an-text 标题之间隔着封面 <span>（2026-07-05 实测），
+# 用 0~600 字符的非贪婪窗口跨过去，同时防止吞到下一张卡片的标题
+_MIKAN_SEARCH_RE = re.compile(r'Home/Bangumi/(\d+)"[^>]*>.{0,600}?<div class="an-text"[^>]*title="([^"]+)"', re.S)
+# 番剧页：subgroup-text" id="1230" ...>字幕组名（同日实测；页内自带 subgroupid RSS 链接）
+_MIKAN_SUBGROUP_RE = re.compile(r'class="subgroup-text"\s+id="(\d+)"[^>]*>\s*<a[^>]*>([^<]+)</a>', re.S)
 _DMHY_RSS = "https://share.dmhy.org/topics/rss/rss.xml?keyword={q}"
 _DMHY_SEARCH = "https://share.dmhy.org/topics/list?keyword={q}"
 _ACGNX_RSS = "https://share.acgnx.se/rss.xml?keyword={q}"
@@ -168,17 +181,19 @@ def _iter_mapping_rows(raw: Any) -> list[dict[str, Any]]:
             value = raw.get(key)
             if isinstance(value, list):
                 return [x for x in value if isinstance(x, dict)]
+        # 平面 dict 的方向是 {mikan_id: bangumi_subject_id}（2026-07-05 实测：
+        # key 全部为 183~4042 的 mikan 番剧 id，value 为万~几十万级的 subject_id）。
         rows: list[dict[str, Any]] = []
-        for bgm_id, value in raw.items():
+        for mikan_id, value in raw.items():
             if isinstance(value, dict):
                 row = dict(value)
-                row.setdefault("bangumi_id", bgm_id)
+                row.setdefault("mikan_id", mikan_id)
                 rows.append(row)
             elif isinstance(value, list):
-                for mid in value:
-                    rows.append({"bangumi_id": bgm_id, "mikan_id": mid})
+                for bid in value:
+                    rows.append({"mikan_id": mikan_id, "bangumi_id": bid})
             elif isinstance(value, (str, int)):
-                rows.append({"bangumi_id": bgm_id, "mikan_id": value})
+                rows.append({"mikan_id": mikan_id, "bangumi_id": value})
         return rows
     return []
 
@@ -213,13 +228,10 @@ def _reverse_mikan_map(raw: Any) -> dict[int, list[int]]:
             or row.get("mikan")
             or row.get("id")
             or row.get("ids")
-            or row.get("bangumiId")
         )
         bgm_ids = _int_values(bgm)
         mikan_ids = _int_values(mids)
         for bid in bgm_ids:
-            if bid in mikan_ids and len(mikan_ids) == 1 and row.get("bangumiId") == row.get("mikanId"):
-                continue
             out.setdefault(bid, [])
             for mid in mikan_ids:
                 if mid not in out[bid]:
@@ -264,8 +276,11 @@ async def _fetch_text(url: str, host: str) -> str:
 
 
 def _subgroup(title: str) -> str:
-    m = re.match(r"\s*\[([^\]]+)\]", title)
-    return m.group(1).strip() if m else ""
+    # 字幕组前缀有半角 [喵萌奶茶屋] 和全角 【TSDM字幕组】 两种惯例
+    m = re.match(r"\s*(?:\[([^\]]+)\]|【([^】]+)】)", title)
+    if not m:
+        return ""
+    return (m.group(1) or m.group(2) or "").strip()
 
 
 def _quality(title: str) -> str:
@@ -366,6 +381,60 @@ def _group_items(items: list[ReleaseItem], source: str, rss_url: str) -> list[Re
     return sorted(groups.values(), key=lambda g: (g.quality != "bd", g.subgroup))[:12]
 
 
+def _norm_cmp(value: str) -> str:
+    return "".join(ch.lower() for ch in html_lib.unescape(value or "") if ch.isalnum())
+
+
+async def _search_mikan_ids(title: str, limit: int = 2) -> list[tuple[int, str, float]]:
+    """映射表 miss 时的实时兜底：蜜柑站内搜索 → 标题相似度匹配 → (mikan_id, 命中标题, 相似度)。
+
+    映射表只覆盖挂了 bangumi 链接的番剧（实测 3120/约3900，缺口 ~19%），
+    实时搜索能把这部分找回来，而不是直接退到搜索页外链。"""
+    query = _norm_cmp(title)
+    if not query:
+        return []
+    html = await _fetch_text(_MIKAN_SEARCH.format(q=quote(title)), "mikan")
+    scored: dict[int, tuple[str, float]] = {}
+    for mid_str, raw_title in _MIKAN_SEARCH_RE.findall(html):
+        mid = int(mid_str)
+        cand = html_lib.unescape(raw_title).strip()
+        score = SequenceMatcher(None, query, _norm_cmp(cand)).ratio()
+        if mid not in scored or score > scored[mid][1]:
+            scored[mid] = (cand, score)
+    ranked = sorted(
+        ((mid, name, score) for mid, (name, score) in scored.items() if score >= 0.5),
+        key=lambda x: -x[2],
+    )
+    return ranked[:limit]
+
+
+async def _subgroup_rss_map(mikan_id: int) -> dict[str, str]:
+    """番剧页解析字幕组 → 精确 RSS（页内自带 bangumiId+subgroupid 链接结构）。"""
+    try:
+        html = await _fetch_text(_MIKAN_BANGUMI_PAGE.format(id=mikan_id), "mikan")
+    except Exception:  # noqa: BLE001
+        return {}
+    out: dict[str, str] = {}
+    for sid, name in _MIKAN_SUBGROUP_RE.findall(html):
+        clean = html_lib.unescape(name).strip()
+        if clean:
+            out[clean] = _MIKAN_RSS_SUB.format(id=mikan_id, sub=sid)
+    return out
+
+
+def _attach_precise_rss(groups: list[ReleaseGroup], subgroup_rss: dict[str, str]) -> None:
+    """把条目级混合 RSS 升级为字幕组精确 RSS：组名与番剧页字幕组名互相包含即命中。"""
+    for group in groups:
+        gname = _norm_cmp(group.subgroup)
+        if not gname or group.source != "mikan":
+            continue
+        for name, rss in subgroup_rss.items():
+            n = _norm_cmp(name)
+            if n and (gname in n or n in gname):
+                group.rss_url = rss
+                break
+
+
 async def _resolve_subject(client: BangumiClient, subject_id: int | None, title: str) -> tuple[int | None, str, str | None]:
     if subject_id:
         raw = await client.get_subject(subject_id)
@@ -402,30 +471,61 @@ class GetAnimeReleaseFeedsTool(Tool):
         mikan_ids: list[int] = []
         mapping_confidence = 0.0
         await emit_tool_progress(tool=self.name, summary="读取 Mikan 映射与 RSS", current=2, total=4)
-        if subject_id and args.prefer in {"auto", "mikan"}:
+        search_matched = ""
+        if args.prefer in {"auto", "mikan"}:
             try:
-                mapping = await load_mikan_mapping()
-                mikan_ids = mapping.get(subject_id, [])[:5]
-                mapping_confidence = 0.95 if mikan_ids else 0.0
+                if subject_id:
+                    mapping = await load_mikan_mapping()
+                    mikan_ids = mapping.get(subject_id, [])[:5]
+                    mapping_confidence = 0.95 if mikan_ids else 0.0
+                if not mikan_ids:
+                    # 映射表缺口 ~19%：实时搜索蜜柑站内找回，标低置信
+                    matches = await _search_mikan_ids(title)
+                    mikan_ids = [mid for mid, _name, _score in matches]
+                    if matches:
+                        mapping_confidence = round(0.6 * matches[0][2] + 0.3, 2)
+                        search_matched = matches[0][1]
                 jobs = [fetch_release_items_from_url(_MIKAN_RSS.format(id=mid), "mikan") for mid in mikan_ids]
-                rss_results = await gather_limited(jobs, host="mikan") if jobs else []
+                # 外层用普通 gather：内层 _fetch_text 已按 host 信号量限流，
+                # 这里再套 gather_limited(host="mikan") 会在 mikan_ids >= 上限(2)时嵌套死锁。
+                rss_results = await asyncio.gather(*jobs, return_exceptions=True) if jobs else []
                 for mid, rows in zip(mikan_ids, rss_results, strict=False):
-                    if isinstance(rows, Exception):
+                    if isinstance(rows, BaseException):
                         continue
                     rss_url = _MIKAN_RSS.format(id=mid)
                     items = _filter_items(rows, args.subgroup_filter, args.limit)
                     groups.extend(_group_items(items, "mikan", rss_url))
+                if groups and mikan_ids:
+                    # 条目级混合 RSS → 字幕组精确 RSS（番剧页自带 subgroupid 链接）
+                    subgroup_rss = await _subgroup_rss_map(mikan_ids[0])
+                    _attach_precise_rss(groups, subgroup_rss)
+                if not groups:
+                    # 第三级：番组页还没建（新番常见）但站内已有发布记录 → 搜索 RSS
+                    search_rss_url = _MIKAN_SEARCH_RSS.format(q=q)
+                    rows = await fetch_release_items_from_url(search_rss_url, "mikan")
+                    items = _filter_items(rows, args.subgroup_filter, args.limit)
+                    if items:
+                        groups.extend(_group_items(items, "mikan", search_rss_url))
+                        mapping_confidence = max(mapping_confidence, 0.5)
+                        search_matched = search_matched or f"站内搜索 RSS（{len(items)} 条发布记录）"
             except Exception:  # noqa: BLE001
-                mapping_confidence = 0.0
+                mapping_confidence = mapping_confidence or 0.0
         await emit_tool_progress(tool=self.name, summary="读取 DMHY / ACGNX RSS 兜底", current=3, total=4)
-        if args.prefer in {"auto", "bt"} or not groups:
-            for source, url in (("dmhy", _DMHY_RSS.format(q=q)), ("acgnx", _ACGNX_RSS.format(q=q))):
-                try:
-                    rows = await fetch_release_items_from_url(url, source)
-                except Exception:  # noqa: BLE001
-                    continue
-                fallback_items.extend(_filter_items(rows, args.subgroup_filter, args.limit))
-        if args.prefer == "bd" or any(k in title.lower() for k in ("bd", "blu-ray", "bluray", "收藏", "高清", "蓝光")):
+        if args.prefer in {"auto", "bt", "bd"} or not groups:
+            # BD 收藏意图：VCB-Studio 的发布本来就走 dmhy/acgnx 等 BT 站（2026-07-05 实测
+            # acgnx 搜 "VCB K-ON" 直接命中），带前缀检索即可磁力直出；无果再退 BDRip 通用词。
+            bt_queries = [f"VCB-Studio {title}", f"{title} BDRip"] if args.prefer == "bd" else [title]
+            for bt_query in bt_queries:
+                bt_q = quote(bt_query)
+                for source, url in (("dmhy", _DMHY_RSS.format(q=bt_q)), ("acgnx", _ACGNX_RSS.format(q=bt_q))):
+                    try:
+                        rows = await fetch_release_items_from_url(url, source)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    fallback_items.extend(_filter_items(rows, args.subgroup_filter, args.limit))
+                if fallback_items:
+                    break
+        if args.prefer == "bd":
             vcb_q = quote(f"VCB-Studio {title}")
             groups.append(
                 ReleaseGroup(
@@ -450,8 +550,13 @@ class GetAnimeReleaseFeedsTool(Tool):
             ReleaseSearchLink(label="末日资源库搜索", url=_ACGNX_SEARCH.format(q=q), source="acgnx", note="BT/RSS 兜底"),
             ReleaseSearchLink(label="VCB-Studio 搜索", url=_VCB_SEARCH.format(q=quote(title)), source="vcb", note="BD/收藏版入口"),
         ]
-        fallback_items.sort(key=lambda x: x.pub_date, reverse=True)
-        fallback_items = fallback_items[: args.limit]
+        # dmhy 与 acgnx 内容高度重叠（互相搬运），按磁力 btih / 标题去重
+        deduped: dict[str, ReleaseItem] = {}
+        for item in fallback_items:
+            m = re.search(r"btih:([0-9a-zA-Z]+)", item.magnet)
+            key = m.group(1).lower() if m else item.title.strip().lower()
+            deduped.setdefault(key, item)
+        fallback_items = sorted(deduped.values(), key=lambda x: x.pub_date, reverse=True)[: args.limit]
         await emit_tool_progress(tool=self.name, summary=f"资源聚合完成：{len(groups)} 组 / {len(fallback_items)} 条兜底", current=4, total=4)
         result = AnimeReleaseFeedsResult(
             subject_id=subject_id,
@@ -466,6 +571,14 @@ class GetAnimeReleaseFeedsTool(Tool):
                 "Otomo 只聚合公开 RSS/搜索链接，不代理、不下载、不托管、不播放任何资源内容。",
                 "字幕组标题和资源质量来自 RSS 标题启发式解析，最终以源站页面为准。",
                 "BD/VCB-Studio 入口默认只给搜索链接；用户自行确认版权、地区和个人使用合规性。",
+                *(
+                    [
+                        f"蜜柑番组页暂未收录该番，结果来自{search_matched}；此 RSS 按标题检索，可能混入同名条目。"
+                        if search_matched.startswith("站内搜索 RSS")
+                        else f"蜜柑映射表未收录，已用站内搜索匹配到《{search_matched}》（弱关联，请确认是同一部作品）。"
+                    ]
+                    if search_matched else []
+                ),
             ],
         )
         sources = [Citation(title=title, url=f"https://bgm.tv/subject/{subject_id}", source="bangumi", image=image)] if subject_id else []

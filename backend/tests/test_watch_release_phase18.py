@@ -187,3 +187,59 @@ def test_daily_airing_service_writes_once_and_updates_rss(monkeypatch, tmp_path)
     assert second == 0
     assert saved.inbox[-1].kind == "daily_airing"
     assert saved.watch_plan[0].last_seen_pub_date
+
+
+def test_reverse_mikan_map_real_direction():
+    """实测数据方向是 {mikan_id: bangumi_subject_id}（key 为 183~4042 的小数字）。
+
+    曾把 key 当成 bangumi_id 解析，导致反查表 key 全是 mikan id、
+    mapping.get(subject_id) 永远 miss、蜜柑主路静默失效。"""
+    from otomo.tools.release.tool import _reverse_mikan_map
+
+    real_shape = {"183": "139317", "3644": "425998"}
+    reversed_map = _reverse_mikan_map(real_shape)
+    assert reversed_map == {139317: [183], 425998: [3644]}
+
+
+def test_release_tool_multi_mikan_ids_no_nested_deadlock(monkeypatch):
+    """外层曾对 jobs 再套 gather_limited(host='mikan')：mikan 上限 2，
+    mikan_ids >= 2 时外层占满槽、内层 _fetch_text 永远等待 → 死锁。
+    本用例保留内层真实的 gather_limited 路径，修复前会 10s 超时。"""
+    from otomo.tools.release import tool as release_tool
+
+    async def fake_mapping():
+        return {207195: [11, 22, 33]}
+
+    async def fake_fetch_text(url: str, host: str) -> str:
+        from otomo.tools._concurrency import gather_limited
+
+        async def one() -> str:
+            await asyncio.sleep(0.01)
+            return """<rss><channel><item>
+              <title>[喵萌] 摇曳露营△ - 01 [1080p]</title>
+              <link>https://mikanani.me/Home/Episode/1</link>
+              <pubDate>Sun, 05 Jul 2026 12:00:00 GMT</pubDate>
+              <enclosure url="https://mikanani.me/Download/1.torrent" />
+            </item></channel></rss>"""
+
+        result = await gather_limited([one()], host=host)
+        first = result[0]
+        if isinstance(first, BaseException):
+            raise first
+        return first
+
+    monkeypatch.setattr(release_tool, "load_mikan_mapping", fake_mapping)
+    monkeypatch.setattr(release_tool, "_fetch_text", fake_fetch_text)
+
+    async def scenario():
+        return await asyncio.wait_for(
+            GetAnimeReleaseFeedsTool(FakeBangumi()).run(
+                AnimeReleaseFeedsArgs(subject_id=207195, prefer="mikan")
+            ),
+            timeout=10,
+        )
+
+    res = asyncio.run(scenario())
+    assert res.ok and res.data is not None
+    assert res.data.mikan_ids == [11, 22, 33]
+    assert res.data.groups

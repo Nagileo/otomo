@@ -1,15 +1,19 @@
-"""发现 / 预测工具（收口早期 backlog）：评分预测 + 萌点检索 + 分集口碑雷达。
+"""发现 / 预测工具（收口早期 backlog）：评分预测 + 萌点检索 + 分集口碑雷达 + 全站热门。
 
-都复用现有 Bangumi client 方法，不新增数据源。
+前三个复用现有 Bangumi client 方法；全站热门走 next.bgm.tv 的 p1 端点（网页版同源数据）。
 """
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+import httpx
+from pydantic import BaseModel, ConfigDict, Field
 
 from ...agent.contracts import Citation, Tool, ToolResult
+from ...config import settings
 from ...profile import compute_taste_profile
+from .._cache import acached
+from .._concurrency import gather_limited
 from ..bangumi.client import SUBJECT_TYPE, BangumiClient
 from ..comments.tool import EpisodeCommentsArgs, GetEpisodeCommentsTool
 
@@ -312,5 +316,108 @@ class EpisodeBuzzRadarTool(Tool):
         )
 
 
+_TRENDING_API = "https://next.bgm.tv/p1/trending/subjects"
+
+
+class TrendingArgs(BaseModel):
+    subject_type: _SUBJECT_T = Field("anime", description="条目类型；全站热门以 anime 数据最全")
+    limit: int = Field(12, ge=1, le=24)
+    offset: int = Field(0, ge=0, le=200)
+
+
+class TrendingItem(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: int
+    name: str
+    name_cn: str = ""
+    score: float | None = None
+    rank: int | None = None
+    collects: int | None = None
+    meta_tags: list[str] = Field(default_factory=list)
+    info: str = ""
+    image: str | None = None
+    url: str = ""
+
+
+class TrendingResult(BaseModel):
+    subject_type: str
+    count: int = 0
+    items: list[TrendingItem] = Field(default_factory=list)
+    caveats: list[str] = Field(default_factory=list)
+
+
+@acached(ttl=settings.cache_ttl * 12)  # 热门榜变化慢，1 小时级缓存足够
+async def _fetch_trending(type_id: int, limit: int, offset: int) -> list[dict[str, Any]]:
+    async def fetch() -> list[dict[str, Any]]:
+        async with httpx.AsyncClient(
+            timeout=settings.http_timeout,
+            headers={"User-Agent": settings.bangumi_user_agent},
+        ) as client:
+            res = await client.get(_TRENDING_API, params={"type": type_id, "limit": limit, "offset": offset})
+            res.raise_for_status()
+            payload = res.json()
+        rows = payload.get("data") if isinstance(payload, dict) else payload
+        return [x for x in rows or [] if isinstance(x, dict)]
+
+    result = await gather_limited([fetch()], host="bangumi")
+    first = result[0]
+    if isinstance(first, BaseException):
+        raise first
+    return first
+
+
+class GetTrendingSubjectsTool(Tool):
+    name = "get_trending_subjects"
+    description = (
+        "查询 Bangumi 全站当前热门条目（与网页版『热门』同源）。用于『最近什么番火 / 全站热门 / 大家都在看什么』。"
+        "这是站点私有端点数据，结构可能变动；结果带缓存。"
+    )
+    args_model = TrendingArgs
+    result_model = TrendingResult
+
+    async def run(self, args: TrendingArgs) -> ToolResult[TrendingResult]:
+        type_id = SUBJECT_TYPE[args.subject_type]
+        try:
+            rows = await _fetch_trending(type_id, args.limit, args.offset)
+        except Exception as e:  # noqa: BLE001
+            return ToolResult(ok=False, error=f"热门数据暂不可用（非正式端点）：{type(e).__name__}")
+        items: list[TrendingItem] = []
+        for row in rows:
+            subj = row.get("subject") if isinstance(row.get("subject"), dict) else row
+            sid = subj.get("id")
+            if not sid:
+                continue
+            rating = subj.get("rating") or {}
+            images = subj.get("images") or {}
+            items.append(
+                TrendingItem(
+                    id=int(sid),
+                    name=str(subj.get("name") or ""),
+                    name_cn=str(subj.get("nameCN") or subj.get("name_cn") or subj.get("name") or ""),
+                    score=rating.get("score"),
+                    rank=rating.get("rank"),
+                    collects=row.get("count") or subj.get("collects"),
+                    meta_tags=[str(t) for t in (subj.get("metaTags") or [])][:8],
+                    info=str(subj.get("info") or "")[:120],
+                    image=images.get("common") or images.get("medium") or images.get("large"),
+                    url=f"https://bgm.tv/subject/{sid}",
+                )
+            )
+        result = TrendingResult(
+            subject_type=args.subject_type,
+            count=len(items),
+            items=items,
+            caveats=[
+                "数据来自 next.bgm.tv 的非正式 trending 端点（网页版同源），结构可能随站点更新变动。",
+                "热门反映当前收藏/讨论热度，不等于质量评价；结果有 1 小时级缓存。",
+            ],
+        )
+        sources = [
+            Citation(title=x.name_cn or x.name, url=x.url, source="bangumi", image=x.image)
+            for x in items[:6]
+        ]
+        return ToolResult(ok=True, data=result, sources=sources)
+
+
 def build_discovery_tools(client: BangumiClient) -> list[Tool]:
-    return [PredictMyRatingTool(client), SearchByTraitsTool(client), EpisodeBuzzRadarTool(client)]
+    return [PredictMyRatingTool(client), SearchByTraitsTool(client), EpisodeBuzzRadarTool(client), GetTrendingSubjectsTool()]

@@ -493,6 +493,7 @@ _PANEL_TOOLS = {
     "get_pixiv_ranking",
     "search_pixiv_illusts",
     "get_pixiv_artist_portfolio",
+    "get_trending_subjects",
     "where_to_watch",
     "get_anime_release_feeds",
     "get_bangumi_index",
@@ -1085,6 +1086,21 @@ def _safe_bili_video_content_payload(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _safe_trending_payload(data: dict[str, Any]) -> dict[str, Any]:
+    items = []
+    for item in _trim_dicts(data.get("items"), limit=24):
+        copied = dict(item)
+        copied["info"] = _trim_text(copied.get("info"), 100)
+        copied["meta_tags"] = _trim_strings(copied.get("meta_tags"), limit=6, text_limit=24)
+        items.append(copied)
+    return {
+        "subject_type": data.get("subject_type"),
+        "count": data.get("count"),
+        "items": items,
+        "caveats": _trim_strings(data.get("caveats"), limit=4, text_limit=160),
+    }
+
+
 def _safe_pixiv_payload(data: dict[str, Any]) -> dict[str, Any]:
     results = []
     for item in _trim_dicts(data.get("results"), limit=16):
@@ -1158,6 +1174,8 @@ def panel_data_from_payload(name: str, payload: dict[str, Any] | None) -> dict[s
         return _safe_bili_video_content_payload(data)
     if name in {"get_pixiv_ranking", "search_pixiv_illusts", "get_pixiv_artist_portfolio"}:
         return _safe_pixiv_payload(data)
+    if name == "get_trending_subjects":
+        return _safe_trending_payload(data)
     if name in _MEMORY_TOOLS:
         return _safe_memory_payload(data)
     return None

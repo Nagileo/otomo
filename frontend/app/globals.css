@@ -480,3 +480,84 @@ a.card-title:hover { color: var(--accent); }
   .action-card { grid-template-columns: 1fr; }
   .action-buttons { justify-content: flex-start; }
 }
+
+/* ---- panels/visual.tsx · Pixiv ---- */
+.pixiv-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px; margin-top: 8px;
+}
+.pixiv-card {
+  display: flex; flex-direction: column; border: 1px solid var(--line);
+  border-radius: 10px; overflow: hidden; text-decoration: none; color: inherit;
+  background: rgba(255, 255, 255, .02); transition: border-color .15s;
+}
+.pixiv-card:hover { border-color: var(--accent); }
+.pixiv-card img { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; }
+.pixiv-meta { padding: 7px 9px; }
+.pixiv-title {
+  font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.pixiv-artist { font-size: 11px; color: var(--dim); margin-top: 2px; }
+.pixiv-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+
+/* ---- panels/media.tsx · Trending ---- */
+.trending-list { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.trending-card {
+  display: grid; grid-template-columns: 26px 46px 1fr; gap: 10px; align-items: center;
+  border: 1px solid var(--line); border-radius: 10px; padding: 7px 10px;
+  text-decoration: none; color: inherit; transition: border-color .15s;
+}
+.trending-card:hover { border-color: var(--accent); }
+.trending-rank { font-size: 15px; font-weight: 700; color: var(--accent); text-align: center; }
+.trending-card img { width: 46px; height: 62px; object-fit: cover; border-radius: 6px; }
+.trending-meta { min-width: 0; }
+.trending-title {
+  font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.trending-sub { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 4px; }
+
+/* ---- panels/memory.tsx · Inbox ---- */
+.inbox-list { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.inbox-item {
+  border: 1px solid var(--line); border-radius: 10px; padding: 8px 11px;
+}
+.inbox-item.unread { border-color: rgba(224, 175, 104, .5); background: rgba(224, 175, 104, .05); }
+.inbox-head { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.inbox-title { font-size: 13px; font-weight: 600; }
+.inbox-time { font-size: 11px; color: var(--dim); margin-left: auto; }
+.inbox-section { margin-top: 6px; }
+.inbox-section-title { font-size: 12px; color: var(--dim); }
+.inbox-section ul { margin: 4px 0 0; padding-left: 18px; }
+.inbox-section li { font-size: 12.5px; margin: 2px 0; }
+
+/* ---- 移动端补充（配合既有 820px 主栅格 / 520px 面板断点）---- */
+@media (max-width: 640px) {
+  .wrap { padding: 12px 10px; }
+  input[type="text"] { font-size: 16px; }  /* iOS 聚焦防自动缩放 */
+  .pixiv-grid { grid-template-columns: repeat(2, 1fr); }
+  .trending-card { grid-template-columns: 22px 40px 1fr; }
+  .trending-card img { width: 40px; height: 54px; }
+  .badge { font-size: 10.5px; }
+  .evidence-panel { padding: 10px; }
+}
+
+/* ---- ReleaseFeedsPanel · 结构化资源卡（替换裸链接列表）---- */
+.release-group-head { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.release-list { display: flex; flex-direction: column; gap: 6px; margin-top: 7px; }
+.release-item {
+  border: 1px solid var(--line); border-radius: 9px; padding: 7px 10px;
+  background: rgba(255, 255, 255, .015);
+}
+.release-item-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.release-date { font-size: 11px; color: var(--dim); margin-left: auto; }
+.release-item-title {
+  font-size: 12.5px; margin-top: 5px; line-height: 1.45;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  color: var(--fg);
+}
+.release-item-actions { display: flex; gap: 10px; margin-top: 6px; align-items: center; }
+.release-item-actions a {
+  font-size: 12px; color: var(--accent); text-decoration: none;
+  border: 1px solid rgba(122, 162, 247, .25); border-radius: 999px; padding: 2px 10px;
+}
+.release-item-actions a:hover { border-color: var(--accent); }

@@ -2,7 +2,13 @@
 
 import { useState, type ReactNode } from "react";
 
-type AnyRecord = Record<string, any>;
+import { TrendingPanel } from "./panels/media";
+import { InboxPanel } from "./panels/memory";
+import { PixivPanel } from "./panels/visual";
+
+// 公共原语已 export，供 panels/ 域文件复用（新面板一律写进 panels/<域>.tsx，
+// 本文件的旧面板逐步搬迁，不再新增）。
+export type AnyRecord = Record<string, any>;
 type EvidenceMap = Record<string, AnyRecord[]>;
 type EvidenceMode = "user" | "dev";
 type SpoilerState = {
@@ -32,11 +38,11 @@ type MemoryState = {
   updated_at?: string;
 };
 
-function list<T = AnyRecord>(value: any): T[] {
+export function list<T = AnyRecord>(value: any): T[] {
   return Array.isArray(value) ? value : [];
 }
 
-function text(value: any, fallback = "未知") {
+export function text(value: any, fallback = "未知") {
   const s = String(value ?? "").trim();
   return s || fallback;
 }
@@ -85,11 +91,11 @@ function hasActionableMemory(data: AnyRecord) {
   );
 }
 
-function Badge({ children, tone = "dim" }: { children: ReactNode; tone?: string }) {
+export function Badge({ children, tone = "dim" }: { children: ReactNode; tone?: string }) {
   return <span className={`badge ${tone}`}>{children}</span>;
 }
 
-function Panel({
+export function Panel({
   title,
   subtitle,
   children,
@@ -330,12 +336,56 @@ function WhereToWatchPanel({ data }: { data: AnyRecord }) {
         </>
       )}
       {list<string>(data.mapping_notes).length > 0 && (
-        <div className="compact-list">{list<string>(data.mapping_notes).map((n, i) => <span key={i}>{n}</span>)}</div>
+        <p className="card-note">{list<string>(data.mapping_notes).join(" · ")}</p>
       )}
       {list<string>(data.caveats).length > 0 && (
         <div className="caveats">{list<string>(data.caveats).map((c, i) => <span key={i}>{c}</span>)}</div>
       )}
     </Panel>
+  );
+}
+
+function ReleaseItemCard({
+  item,
+  subjectId,
+  subjectName,
+  onPrepareDownloaderPush,
+}: {
+  item: AnyRecord;
+  subjectId?: number;
+  subjectName: string;
+  onPrepareDownloaderPush?: PrepareDownloaderHandler;
+}) {
+  return (
+    <div className="release-item">
+      <div className="release-item-head">
+        {item.subgroup && <Badge tone="good">{text(item.subgroup)}</Badge>}
+        <Badge tone="dim">{text(item.source)}</Badge>
+        {item.quality && item.quality !== "tv" && <Badge tone="warn">{text(item.quality)}</Badge>}
+        {item.pub_date && <span className="release-date">{String(item.pub_date).slice(0, 10)}</span>}
+      </div>
+      <div className="release-item-title" title={text(item.title)}>{text(item.title)}</div>
+      <div className="release-item-actions">
+        {item.page_url && <a href={item.page_url} target="_blank" rel="noreferrer">页面</a>}
+        {item.torrent_url && <a href={item.torrent_url} target="_blank" rel="noreferrer">种子</a>}
+        {item.magnet && <a href={item.magnet}>磁力</a>}
+        {onPrepareDownloaderPush && (item.torrent_url || item.magnet) && (
+          <button
+            type="button"
+            className="inline-action"
+            onClick={() => onPrepareDownloaderPush({
+              torrent_url: item.torrent_url || "",
+              magnet: item.magnet || "",
+              title: item.title,
+              subject_id: subjectId,
+              subject_name: subjectName,
+            })}
+          >
+            推送下载器
+          </button>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -357,68 +407,52 @@ function ReleaseFeedsPanel({ data, onPrepareDownloaderPush }: { data: AnyRecord;
         <div className="digest-list">
           {groups.map((group, i) => (
             <div className="digest-card" key={`${group.source}-${group.subgroup}-${i}`}>
-              <div className="digest-title">
-                {text(group.subgroup)} · {text(group.source)} · {text(group.quality)}
+              <div className="release-group-head">
+                <span className="digest-title">{text(group.subgroup)}</span>
+                <Badge tone="dim">{text(group.source)}</Badge>
+                {group.quality && group.quality !== "tv" && <Badge tone="warn">{text(group.quality)}</Badge>}
+                {group.rss_url && (
+                  <>
+                    <a href={group.rss_url} target="_blank" rel="noreferrer" className="inline-link">RSS</a>
+                    <button
+                      type="button"
+                      className="inline-action"
+                      onClick={() => navigator.clipboard?.writeText(group.rss_url)}
+                    >
+                      复制 RSS
+                    </button>
+                  </>
+                )}
               </div>
-              {group.rss_url && (
-                <a href={group.rss_url} target="_blank" rel="noreferrer" className="inline-link">RSS</a>
-              )}
-              <div className="compact-list">
-                {list(group.latest_items).map((item, idx) => (
-                  <span key={`${item.title}-${idx}`}>
-                    <a href={item.page_url || item.torrent_url || item.magnet || "#"} target="_blank" rel="noreferrer">
-                      {text(item.title)}
-                    </a>
-                    <small> · {text(item.pub_date, "no date")} · {text(item.quality)}</small>
-                    {onPrepareDownloaderPush && (item.torrent_url || item.magnet) && (
-                      <button
-                        type="button"
-                        className="inline-action"
-                        onClick={() => onPrepareDownloaderPush({
-                          torrent_url: item.torrent_url || "",
-                          magnet: item.magnet || "",
-                          title: item.title,
-                          subject_id: subjectId,
-                          subject_name: data.title,
-                        })}
-                      >
-                        推送
-                      </button>
-                    )}
-                  </span>
+              <div className="release-list">
+                {list(group.latest_items).slice(0, 4).map((item, idx) => (
+                  <ReleaseItemCard
+                    item={item}
+                    subjectId={subjectId}
+                    subjectName={text(data.title)}
+                    onPrepareDownloaderPush={onPrepareDownloaderPush}
+                    key={`${item.title}-${idx}`}
+                  />
                 ))}
               </div>
             </div>
           ))}
         </div>
       ) : (
-        <EmptyHint text="没有查到 Mikan 分组 RSS；可看下方搜索兜底。" />
+        <EmptyHint text="没有查到 Mikan 分组 RSS；可看下方兜底结果。" />
       )}
       {fallback.length > 0 && (
         <>
-          <div className="section-title">RSS 兜底结果</div>
-          <div className="compact-list">
+          <div className="section-title">DMHY / ACGNX 兜底</div>
+          <div className="release-list">
             {fallback.map((item, i) => (
-              <span key={`${item.title}-${i}`}>
-                <a href={item.page_url || item.torrent_url || item.magnet || "#"} target="_blank" rel="noreferrer">
-                  {text(item.source)} · {text(item.title)}
-                </a>
-                {onPrepareDownloaderPush && (item.torrent_url || item.magnet) && (
-                  <button
-                    type="button"
-                    className="inline-action"
-                    onClick={() => onPrepareDownloaderPush({
-                      torrent_url: item.torrent_url || "",
-                      magnet: item.magnet || "",
-                      title: item.title,
-                      subject_id: subjectId,
-                      subject_name: data.title,
-                    })}
-                  >
-                    推送
-                  </button>
-                )}
-              </span>
+              <ReleaseItemCard
+                item={item}
+                subjectId={subjectId}
+                subjectName={text(data.title)}
+                onPrepareDownloaderPush={onPrepareDownloaderPush}
+                key={`${item.title}-${i}`}
+              />
             ))}
           </div>
         </>
@@ -2408,6 +2442,13 @@ export function EvidencePanels({
   const imageSource = list(evidence.search_image_source);
   const biliVideo = list(evidence.summarize_bilibili_video_content);
   const videoFrames = list(evidence.analyze_video_frames);
+  const pixiv = [
+    ...list(evidence.get_pixiv_ranking),
+    ...list(evidence.search_pixiv_illusts),
+    ...list(evidence.get_pixiv_artist_portfolio),
+  ];
+  const trending = list(evidence.get_trending_subjects);
+  const inbox = list(evidence.list_weekly_digest_inbox);
   const claimChecks = devMode ? list(evidence.claim_check) : [];
   const memoryEvidence = [
     ...list(evidence.get_user_memory),
@@ -2429,6 +2470,7 @@ export function EvidencePanels({
     && !aspect.length && !watchCopilot.length && !weeklyDigest.length && !tasteReport.length && !dashboard.length && !explorer.length
     && !episodeRadar.length && !routeImage.length && !visualText.length && !visualStyle.length && !imageSource.length
     && !biliVideo.length && !videoFrames.length && !claimChecks.length
+    && !pixiv.length && !trending.length && !inbox.length
   ) return null;
   return (
     <div className={`evidence-stack ${devMode ? "dev-mode" : "user-mode"}`}>
@@ -2445,6 +2487,9 @@ export function EvidencePanels({
       {imageSource.map((data, i) => <ImageSourcePanel data={data} key={`image-source-${i}`} />)}
       {biliVideo.map((data, i) => <BiliVideoContentPanel data={data} key={`bili-video-${i}`} />)}
       {videoFrames.map((data, i) => <VideoFramePanel data={data} key={`video-frames-${i}`} />)}
+      {pixiv.map((data, i) => <PixivPanel data={data} key={`pixiv-${i}`} />)}
+      {trending.map((data, i) => <TrendingPanel data={data} key={`trending-${i}`} />)}
+      {inbox.map((data, i) => <InboxPanel data={data} key={`inbox-${i}`} />)}
       {broadcastCalendar.map((data, i) => <BroadcastCalendarPanel data={data} onPrepareWrite={onPrepareWrite} key={`broadcast-${i}`} />)}
       {airingProgress.map((data, i) => <AiringProgressPanel data={data} key={`airing-progress-${i}`} />)}
       {whereToWatch.map((data, i) => <WhereToWatchPanel data={data} key={`watch-${i}`} />)}

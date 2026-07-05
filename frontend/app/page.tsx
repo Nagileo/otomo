@@ -336,6 +336,16 @@ export default function Home() {
     };
   }
 
+  async function httpErrorMessage(res: Response) {
+    const retryAfter = res.headers.get("retry-after");
+    const suffix = retryAfter ? `（${retryAfter} 秒后可重试）` : "";
+    const payload = await res.clone().json().catch(() => null);
+    const detail = payload?.detail || payload?.error;
+    if (detail) return `${detail}${suffix}`;
+    const text = await res.text().catch(() => "");
+    return `${res.status} ${res.statusText || "request failed"}${text ? `: ${text.slice(0, 160)}` : ""}${suffix}`;
+  }
+
   async function refreshAuthSession() {
     try {
       const res = await fetch(`${BACKEND}/auth/session`, { credentials: "include" });
@@ -382,7 +392,14 @@ export default function Home() {
     try {
       const res = await fetch(`${BACKEND}/sessions/${encodeURIComponent(id)}/messages`, { credentials: "include" });
       const payload = await res.json().catch(() => ({}));
-      if (!res.ok || !payload.ok) return;
+      if (!res.ok || !payload.ok) {
+        if (res.status === 404 && window.localStorage.getItem("otomo.activeSessionId") === id) {
+          sessionId.current = "";
+          setActiveSessionId("");
+          window.localStorage.removeItem("otomo.activeSessionId");
+        }
+        return;
+      }
       sessionId.current = id;
       setActiveSessionId(id);
       window.localStorage.setItem("otomo.activeSessionId", id);
@@ -545,6 +562,7 @@ export default function Home() {
           ...(spoilerMode ? { spoiler_mode: spoilerMode } : {}),
         }),
       });
+      if (!res.ok) throw new Error(await httpErrorMessage(res));
       if (!res.body) throw new Error("no response body");
 
       const reader = res.body.getReader();
@@ -569,8 +587,9 @@ export default function Home() {
         }
       }
     } catch (e) {
-      setTrace((t) => [...t, { kind: "obs", name: "error", ok: false, summary: String(e) }]);
-      setUploadNotice({ tone: "bad", text: String(e) });
+      const message = e instanceof Error ? e.message : String(e);
+      setTrace((t) => [...t, { kind: "obs", name: "error", ok: false, summary: message }]);
+      setUploadNotice({ tone: "bad", text: message });
     } finally {
       const final = answerRef.current;
       if (final) setMessages((m) => [...m, { role: "assistant", content: final }]);
