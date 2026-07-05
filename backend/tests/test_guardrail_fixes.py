@@ -187,3 +187,16 @@ def test_airing_progress_fetches_tail_page_for_long_shows(monkeypatch):
     item = res.data.items[0]
     assert item.aired_ep == 240  # 没有尾页时会错误地封顶在 200
     assert item.behind == 10
+
+
+def test_pilgrimage_city_match_prefix_not_substring():
+    """"东京都"包含子串"京都"——朴素 in 匹配会让东京作品穿透京都过滤（用户实测踩坑）。"""
+    from otomo.tools.pilgrimage.tool import _city_match
+
+    assert _city_match("京都", "京都府")
+    assert _city_match("京都", "京都市")
+    assert not _city_match("京都", "东京都")  # 关键：子串命中但前缀不命中
+    assert _city_match("东京", "东京都")
+    assert _city_match("秩父", "秩父市")
+    assert _city_match("京都市", "京都")  # 双向前缀：查询比标注更具体
+    assert not _city_match("大阪", "东京都")

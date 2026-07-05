@@ -51,8 +51,8 @@ class PilgrimageResult(BaseModel):
 
 class PilgrimageTripArgs(BaseModel):
     username: str | None = Field(None, description="Bangumi 用户名；不传用当前账号")
-    city: str = Field("", description="可选：目的地城市关键词（如 东京/京都），过滤有该城市圣地的作品")
-    max_subjects: int = Field(40, ge=5, le=80, description="最多检查多少部看过/在看的作品")
+    city: str = Field("", description="可选：目的地城市简名（如 东京/京都/大阪），前缀匹配过滤")
+    max_subjects: int = Field(40, ge=5, le=80, description="最多检查多少部（按用户评分从高到低截断，最爱优先）")
 
 
 class PilgrimageTripEntry(BaseModel):
@@ -78,6 +78,17 @@ def _gmaps(lat: Any, lng: Any) -> str:
         return f"https://www.google.com/maps?q={float(lat)},{float(lng)}"
     except (TypeError, ValueError):
         return ""
+
+
+def _city_match(query: str, city: str) -> bool:
+    """城市过滤用双向前缀匹配，不能用子串——"东京都"包含子串"京都"，
+    朴素 `in` 会让东京作品穿透京都过滤（2026-07-05 用户实测踩坑）。
+    前缀语义下："京都府/京都市".startswith("京都")=True，"东京都".startswith("京都")=False。"""
+    q = query.strip()
+    c = city.strip()
+    if not q or not c:
+        return False
+    return c.startswith(q) or q.startswith(c)
 
 
 @acached(ttl=settings.cache_ttl * 24)
@@ -209,6 +220,9 @@ class PlanPilgrimageTripTool(Tool):
                 rows.extend(part)
             except Exception:  # noqa: BLE001
                 continue
+        # 按用户自己的评分从高到低排（无评分垫底），让截断留下的是"最爱的番"
+        # 而不是"收藏最晚的番"（API 默认按收藏时间倒序返回）
+        rows.sort(key=lambda r: -(r.get("rate") or 0))
         subjects: list[tuple[int, str]] = []
         seen: set[int] = set()
         for row in rows:
@@ -230,7 +244,7 @@ class PlanPilgrimageTripTool(Tool):
             if isinstance(lite, BaseException) or not lite:
                 continue
             city = str(lite.get("city") or "")
-            if city_key and city_key not in city:
+            if city_key and not _city_match(city_key, city):
                 continue
             pts = lite.get("litePoints") or []
             entries.append(
@@ -252,7 +266,7 @@ class PlanPilgrimageTripTool(Tool):
             entries=entries[:20],
             checked=len(subjects),
             caveats=[
-                "城市字段为 anitabi 标注的主要取景城市；跨城作品可能未被城市过滤命中，可去掉过滤重查。",
+                "候选按你的评分从高到低检查（最爱优先）；城市为 anitabi 标注的主要取景城市（前缀匹配），跨城作品可能未命中，可去掉过滤重查。",
                 "数据来自 anitabi.cn 社区共建；实地探访请遵守当地秩序。",
             ],
         )
