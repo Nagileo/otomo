@@ -78,11 +78,59 @@ def _subject_title(raw: dict) -> str:
     return str(raw.get("name_cn") or raw.get("name") or "").strip()
 
 
+def _media_channels(subject_type: int, platform: str, title: str) -> tuple[list[WatchSource], list[WatchSource], list[str]]:
+    """anime 之外的媒介渠道（2026-07-05 与用户核定的现实图景）：
+
+    - galgame：正版购买 = DLsite / Steam / Fanza；讨论与补丁 = 批评空间 / KF绯月。
+    - comic：简中正版 = B漫；资源站（拷贝/再漫画）明确标注非正版。
+    - novel/LN：正版 = BOOK☆WALKER 台湾 / 日亚（web 连载正版基本只有购买渠道）；
+      真白萌（web 社区翻译）/ 轻之国度（文库）是社区资源，标注"支持正版请购买"。
+    """
+    q = quote(title)
+    buy: list[WatchSource] = []
+    community: list[WatchSource] = []
+    notes: list[str] = []
+    if subject_type == SUBJECT_TYPE["game"]:
+        buy = [
+            WatchSource(label="DLsite", url=f"https://www.dlsite.com/maniax/fsr/=/keyword/{q}", source="channel", site="dlsite", regions=["JP"], official=True, confidence=0.4, note="购买渠道搜索入口（同人/商业 galgame 主站）"),
+            WatchSource(label="Steam", url=f"https://store.steampowered.com/search/?term={q}", source="channel", site="steam", official=True, confidence=0.4, note="购买渠道搜索入口（全年龄/国际版常在此）"),
+            WatchSource(label="Fanza (DMM)", url=f"https://dlsoft.dmm.co.jp/search/?searchstr={q}", source="channel", site="fanza", regions=["JP"], official=True, confidence=0.35, note="购买渠道搜索入口（需日区网络）"),
+        ]
+        community = [
+            WatchSource(label="批评空间", url=f"https://erogamescape.dyndns.org/~ap2/ero/toukei_kaiseki/kensaku.php?category=game&word_category=name&word={q}", source="channel", site="egs", official=False, confidence=0.4, note="日本 gal 圈评价检索（review_subject 也能查）"),
+            WatchSource(label="绯月 KF", url="https://bbs.kfpromax.com/", source="channel", site="kf", official=False, confidence=0.3, note="galgame 社区讨论/补丁；站内搜索作品名"),
+        ]
+        notes.append("galgame 无流媒体概念：正版=购买渠道，讨论/补丁走社区。")
+    elif subject_type == SUBJECT_TYPE["book"]:
+        is_comic = "漫画" in platform
+        if is_comic:
+            buy = [
+                WatchSource(label="哔哩哔哩漫画", url=f"https://manga.bilibili.com/search?keyword={q}", source="channel", site="bilibili_manga", regions=["CN"], official=True, confidence=0.5, note="简中正版平台搜索入口（收录看版权）"),
+            ]
+            community = [
+                WatchSource(label="拷贝漫画", url=f"https://www.mangacopy.com/search?q={q}", source="channel", site="copymanga", official=False, confidence=0.3, note="资源站（非正版，域名常变更）；支持正版请优先 B漫"),
+                WatchSource(label="再漫画", url="https://zaimanhua.com/", source="channel", site="zaimanhua", official=False, confidence=0.25, note="资源站（非正版）；站内搜索作品名"),
+            ]
+            notes.append("简中漫画正版以 B漫 为主，未收录时资源站兜底（已标注非正版性质）。")
+        else:
+            buy = [
+                WatchSource(label="BOOK☆WALKER 台湾", url=f"https://www.bookwalker.com.tw/search?w={q}", source="channel", site="bookwalker", regions=["TW"], official=True, confidence=0.45, note="繁中电子书正版购买"),
+                WatchSource(label="Amazon.co.jp", url=f"https://www.amazon.co.jp/s?k={q}", source="channel", site="amazon_jp", regions=["JP"], official=True, confidence=0.4, note="日文原版（Kindle/文库）购买"),
+            ]
+            community = [
+                WatchSource(label="真白萌", url="https://masiro.me/", source="channel", site="masiro", official=False, confidence=0.3, note="web 小说社区翻译（站内搜索）；支持正版请购买"),
+                WatchSource(label="轻之国度", url="https://www.lightnovel.us/", source="channel", site="lightnovel", official=False, confidence=0.3, note="文库社区资源（站内搜索）；支持正版请购买"),
+            ]
+            notes.append("轻小说没有『正版在线看』渠道：正版=购买电子书/实体，web 连载翻译属社区资源。")
+    return buy, community, notes
+
+
 class WhereToWatchTool(Tool):
     name = "where_to_watch"
     description = (
-        "查询某动画的正版观看入口：Bangumi 条目 → bangumi-data 官方 onair 站点 → yuc B站配信链接 → B站搜索兜底。"
-        "用于『在哪看 / B站有吗 / 正版平台 / 播放入口』；只返回外链，不抓取/播放内容。"
+        "查询作品的观看/购买渠道。anime：bangumi-data 官方 onair 站点 → yuc B站配信 → B站搜索兜底；"
+        "galgame：DLsite/Steam/Fanza 购买 + 批评空间/绯月KF 社区；comic/轻小说：B漫/BOOK☆WALKER 正版 + 资源站（标注性质）。"
+        "用于『在哪看 / 在哪买 / B站有吗 / 正版平台』；只返回外链，不抓取/播放内容。"
     )
     args_model = WhereToWatchArgs
     result_model = WhereToWatchResult
@@ -96,7 +144,8 @@ class WhereToWatchTool(Tool):
             return await self.client.get_subject(args.subject_id)
         if not args.title.strip():
             return {}
-        raw = await self.client.search_subjects(args.title, SUBJECT_TYPE["anime"], limit=5)
+        # 不限定 anime：game/book 也走同一入口分流
+        raw = await self.client.search_subjects(args.title, None, limit=5)
         rows = raw.get("data") or []
         if not rows:
             return {}
@@ -128,12 +177,35 @@ class WhereToWatchTool(Tool):
         return sources, [f"yuc 匹配 {matched_by} confidence={confidence:.2f}"]
 
     async def run(self, args: WhereToWatchArgs) -> ToolResult[WhereToWatchResult]:
-        await emit_tool_progress(tool=self.name, summary="解析 Bangumi 动画条目", current=1, total=4)
+        await emit_tool_progress(tool=self.name, summary="解析 Bangumi 条目", current=1, total=4)
         raw = await self._resolve(args)
         if not raw:
-            return ToolResult(ok=False, error="需要 subject_id 或可解析的动画标题")
+            return ToolResult(ok=False, error="需要 subject_id 或可解析的作品标题")
         subject = SubjectBrief.from_raw(raw)
         title = subject.name_cn or subject.name or args.title
+        stype = int(raw.get("type") or 2)
+        if stype in {SUBJECT_TYPE["game"], SUBJECT_TYPE["book"]}:
+            # galgame / comic / 轻小说：无流媒体路径，走购买+社区渠道分流
+            buy, community, media_notes = _media_channels(stype, str(raw.get("platform") or ""), title)
+            await emit_tool_progress(tool=self.name, summary=f"渠道入口完成：{len(buy)} 购买 / {len(community)} 社区", current=4, total=4)
+            result = WhereToWatchResult(
+                subject_id=subject.id,
+                title=title,
+                title_jp=subject.name,
+                air_date=subject.date or "",
+                image=subject.image,
+                official_sources=buy,
+                search_fallbacks=community,
+                offline_hint=stype == SUBJECT_TYPE["book"],
+                mapping_notes=media_notes,
+                caveats=[
+                    "购买/资源入口均为搜索链接，收录与价格以站内为准；资源站已标注非正版性质，支持正版请优先购买渠道。",
+                    "Otomo 只提供外链，不代理、不抓取、不下载任何内容。",
+                ],
+            )
+            sources = [Citation(title=title, url=f"https://bgm.tv/subject/{subject.id}", source="bangumi", image=subject.image)]
+            sources.extend(Citation(title=s.label, url=s.url, source="channel") for s in [*buy, *community][:5])
+            return ToolResult(ok=True, data=result, sources=sources[:8])
         year = args.year or _year(subject.date)
         month = args.month or _quarter_month(subject.date)
         notes: list[str] = []

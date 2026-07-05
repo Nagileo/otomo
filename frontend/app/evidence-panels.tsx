@@ -2,7 +2,7 @@
 
 import { useState, type ReactNode } from "react";
 
-import { TrendingPanel } from "./panels/media";
+import { BirthdayPanel, ComparePanel, TrendingPanel } from "./panels/media";
 import { InboxPanel } from "./panels/memory";
 import { PixivPanel } from "./panels/visual";
 
@@ -599,8 +599,60 @@ function SeasonGuidePanel({ data, onPrepareWrite }: { data: AnyRecord; onPrepare
   );
 }
 
+function WeekGrid({ days }: { days: AnyRecord[] }) {
+  // 周视图：周一~周日 7 列时间表（追追日历/B站追番日历的形态），今天高亮
+  return (
+    <div className="week-grid">
+      {days.map((day, i) => {
+        const items = list(day.items);
+        return (
+          <div className={`week-col ${day.is_today ? "today" : ""}`} key={`${day.weekday_id}-${i}`}>
+            <div className="week-col-head">
+              {text(day.weekday_cn)}
+              {day.is_today ? <Badge tone="good">今天</Badge> : null}
+            </div>
+            {items.map((item, idx) => (
+              <a
+                className={`week-cell${item.my_collection === "watching" ? " mine" : ""}`}
+                href={item.url || `https://bgm.tv/subject/${item.id}`}
+                target="_blank"
+                rel="noreferrer"
+                key={`${item.id}-${idx}`}
+                title={text(item.name_cn || item.name)}
+              >
+                {item.image ? <img src={item.image} alt="" loading="lazy" /> : null}
+                <div className="week-cell-meta">
+                  <div className="week-cell-name">{text(item.name_cn || item.name)}</div>
+                  <div className="week-cell-sub">
+                    {item.broadcast ? <span className="week-slot">{text(item.broadcast)}</span> : null}
+                    {item.my_collection_label ? <Badge tone={item.my_collection === "watching" ? "good" : "dim"}>{text(item.my_collection_label)}</Badge> : null}
+                  </div>
+                </div>
+              </a>
+            ))}
+            {items.length === 0 && <div className="week-empty">—</div>}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function BroadcastCalendarPanel({ data, onPrepareWrite }: { data: AnyRecord; onPrepareWrite?: PrepareWriteHandler }) {
   const days = list(data.days);
+  if (data.scope === "week" && days.length > 1) {
+    return (
+      <Panel
+        title="本周放送时间表"
+        subtitle={`${text(data.today)} · ${data.count ?? 0} 部${data.only_mine ? ` · @${text(data.username)}` : ""} · 档期来自 yuc（日本时间）`}
+      >
+        <WeekGrid days={days} />
+        {list<string>(data.notes).length > 0 && (
+          <p className="card-note">{list<string>(data.notes)[0]}</p>
+        )}
+      </Panel>
+    );
+  }
   return (
     <Panel
       title={data.scope === "today" ? "今日放送" : "本周放送日历"}
@@ -625,7 +677,7 @@ function BroadcastCalendarPanel({ data, onPrepareWrite }: { data: AnyRecord; onP
                         <div className="rec-body">
                           <div className="card-title">{text(item.name_cn || item.name)}</div>
                           <div className="card-meta">
-                            {item.air_date || "日期未定"}
+                            {item.broadcast || item.air_date || "日期未定"}
                             {item.score ? ` · BGM ${item.score}` : ""}
                             {item.doing ? ` · 在看 ${item.doing}` : ""}
                           </div>
@@ -2396,9 +2448,119 @@ function ClaimCheckPanel({ data }: { data: AnyRecord }) {
   );
 }
 
+export type PanelHandlers = {
+  devMode?: boolean;
+  onCritique?: (q: string) => void;
+  onConfirmAction?: (id: string) => void;
+  onCancelAction?: (id: string) => void;
+  onUndoAction?: (id: string) => void;
+  onPrepareWrite?: PrepareWriteHandler;
+  onPrepareDownloaderPush?: PrepareDownloaderHandler;
+  onVisualFeedback?: (payload: AnyRecord) => void;
+  onVisualCorrectionSearch?: (query: string, subjectType?: string) => Promise<AnyRecord[]>;
+};
+
+// 展示型面板注册表：name → 中文标签。顺序即底部区默认渲染顺序；
+// 也是 [[panel:name]] inline 锚定的合法名单（memory 聚合类不在此列）。
+export const PANEL_LABELS: Record<string, string> = {
+  route_image_source: "图片溯源",
+  extract_visual_text: "图内文字",
+  recommend_by_visual_style: "画风推荐",
+  search_image_source: "以图搜源",
+  summarize_bilibili_video_content: "视频内容",
+  analyze_video_frames: "视频抽帧",
+  get_pixiv_ranking: "Pixiv 榜单",
+  search_pixiv_illusts: "Pixiv 检索",
+  get_pixiv_artist_portfolio: "Pixiv 画师",
+  get_trending_subjects: "全站热门",
+  get_character_birthdays: "今日生日",
+  compare_subjects: "作品对比",
+  list_weekly_digest_inbox: "收件箱",
+  get_broadcast_calendar: "放送日历",
+  get_airing_progress: "追番进度",
+  where_to_watch: "观看/购买渠道",
+  get_anime_release_feeds: "离线资源",
+  get_bangumi_index: "目录清单",
+  recommend_subjects: "推荐候选",
+  season_guide_brief: "季番导视",
+  review_subject: "评价证据",
+  compare_user_taste: "口味同步率",
+  explore_voice_network: "声优网络",
+  episode_buzz_radar: "分集雷达",
+  plan_watch_copilot: "追番副驾",
+  build_weekly_digest: "周报",
+  build_collection_dashboard: "收藏仪表盘",
+  build_taste_report: "口味报告",
+  build_aspect_profile: "口味画像",
+  claim_check: "证据校验",
+};
+
+const DEV_ONLY_PANELS = new Set(["build_aspect_profile", "claim_check"]);
+
+const MEMORY_KEYS = [
+  "get_user_memory", "remember_user_preference", "forget_user_memory",
+  "record_recommendation_feedback", "prepare_bangumi_write_action", "prepare_downloader_push",
+  "cancel_bangumi_write_action", "upsert_watch_plan_item", "list_watch_plan",
+  "record_decision_log", "save_recommendation_list",
+];
+
+export function renderPanelByName(name: string, rows: AnyRecord[], h: PanelHandlers): ReactNode | null {
+  if (!rows.length) return null;
+  if (DEV_ONLY_PANELS.has(name) && !h.devMode) return null;
+  const render = (fn: (data: AnyRecord, i: number) => ReactNode) => <>{rows.map(fn)}</>;
+  switch (name) {
+    case "route_image_source":
+      return render((d, i) => (
+        <RouteImageSourcePanel data={d} onVisualFeedback={h.onVisualFeedback} onVisualCorrectionSearch={h.onVisualCorrectionSearch} key={`${name}-${i}`} />
+      ));
+    case "extract_visual_text": return render((d, i) => <VisualTextPanel data={d} key={`${name}-${i}`} />);
+    case "recommend_by_visual_style": return render((d, i) => <VisualStylePanel data={d} key={`${name}-${i}`} />);
+    case "search_image_source": return render((d, i) => <ImageSourcePanel data={d} key={`${name}-${i}`} />);
+    case "summarize_bilibili_video_content": return render((d, i) => <BiliVideoContentPanel data={d} key={`${name}-${i}`} />);
+    case "analyze_video_frames": return render((d, i) => <VideoFramePanel data={d} key={`${name}-${i}`} />);
+    case "get_pixiv_ranking":
+    case "search_pixiv_illusts":
+    case "get_pixiv_artist_portfolio":
+      return render((d, i) => <PixivPanel data={d} key={`${name}-${i}`} />);
+    case "get_trending_subjects": return render((d, i) => <TrendingPanel data={d} key={`${name}-${i}`} />);
+    case "get_character_birthdays": return render((d, i) => <BirthdayPanel data={d} key={`${name}-${i}`} />);
+    case "compare_subjects": return render((d, i) => <ComparePanel data={d} key={`${name}-${i}`} />);
+    case "list_weekly_digest_inbox": return render((d, i) => <InboxPanel data={d} key={`${name}-${i}`} />);
+    case "get_broadcast_calendar": return render((d, i) => <BroadcastCalendarPanel data={d} onPrepareWrite={h.onPrepareWrite} key={`${name}-${i}`} />);
+    case "get_airing_progress": return render((d, i) => <AiringProgressPanel data={d} key={`${name}-${i}`} />);
+    case "where_to_watch": return render((d, i) => <WhereToWatchPanel data={d} key={`${name}-${i}`} />);
+    case "get_anime_release_feeds": return render((d, i) => <ReleaseFeedsPanel data={d} onPrepareDownloaderPush={h.onPrepareDownloaderPush} key={`${name}-${i}`} />);
+    case "get_bangumi_index": return render((d, i) => <BangumiIndexPanel data={d} onPrepareWrite={h.onPrepareWrite} key={`${name}-${i}`} />);
+    case "recommend_subjects": return render((d, i) => <RecommendPanel data={d} onCritique={h.onCritique} onPrepareWrite={h.onPrepareWrite} key={`${name}-${i}`} />);
+    case "season_guide_brief": return render((d, i) => <SeasonGuidePanel data={d} onPrepareWrite={h.onPrepareWrite} key={`${name}-${i}`} />);
+    case "review_subject": return render((d, i) => <ReviewEvidencePanel data={d} key={`${name}-${i}`} />);
+    case "compare_user_taste": return render((d, i) => <TasteAffinityPanel data={d} key={`${name}-${i}`} />);
+    case "explore_voice_network": return render((d, i) => <ExplorerPanel data={d} key={`${name}-${i}`} />);
+    case "episode_buzz_radar": return render((d, i) => <EpisodeRadarPanel data={d} key={`${name}-${i}`} />);
+    case "plan_watch_copilot": return render((d, i) => <WatchCopilotPanel data={d} key={`${name}-${i}`} />);
+    case "build_weekly_digest": return render((d, i) => <WeeklyDigestPanel data={d} key={`${name}-${i}`} />);
+    case "build_collection_dashboard": return render((d, i) => <CollectionDashboardPanel data={d} key={`${name}-${i}`} />);
+    case "build_taste_report": return render((d, i) => <TasteReportPanel data={d} key={`${name}-${i}`} />);
+    case "build_aspect_profile": return render((d, i) => <AspectProfilePanel data={d} key={`${name}-${i}`} />);
+    case "claim_check": return render((d, i) => <ClaimCheckPanel data={d} key={`${name}-${i}`} />);
+    default:
+      return null;
+  }
+}
+
+/** 该 evidence 下有数据、且允许在当前模式渲染的面板名（按注册表顺序）。 */
+export function availablePanelNames(evidence: EvidenceMap, devMode: boolean): string[] {
+  return Object.keys(PANEL_LABELS).filter((name) => {
+    if (DEV_ONLY_PANELS.has(name) && !devMode) return false;
+    return list(evidence[name]).length > 0;
+  });
+}
+
 export function EvidencePanels({
   evidence,
   mode = "user",
+  excludeNames = [],
+  collapsible = false,
   onCritique,
   onConfirmAction,
   onCancelAction,
@@ -2410,6 +2572,8 @@ export function EvidencePanels({
 }: {
   evidence: EvidenceMap;
   mode?: EvidenceMode;
+  excludeNames?: string[];
+  collapsible?: boolean;
   onCritique?: (q: string) => void;
   onConfirmAction?: (id: string) => void;
   onCancelAction?: (id: string) => void;
@@ -2420,104 +2584,44 @@ export function EvidencePanels({
   onVisualCorrectionSearch?: (query: string, subjectType?: string) => Promise<AnyRecord[]>;
 }) {
   const devMode = mode === "dev";
-  const review = list(evidence.review_subject);
-  const taste = list(evidence.compare_user_taste);
-  const season = list(evidence.season_guide_brief);
-  const whereToWatch = list(evidence.where_to_watch);
-  const releaseFeeds = list(evidence.get_anime_release_feeds);
-  const bangumiIndex = list(evidence.get_bangumi_index);
-  const recommend = list(evidence.recommend_subjects);
-  const broadcastCalendar = list(evidence.get_broadcast_calendar);
-  const airingProgress = list(evidence.get_airing_progress);
-  const aspect = devMode ? list(evidence.build_aspect_profile) : [];
-  const watchCopilot = list(evidence.plan_watch_copilot);
-  const weeklyDigest = list(evidence.build_weekly_digest);
-  const tasteReport = list(evidence.build_taste_report);
-  const dashboard = list(evidence.build_collection_dashboard);
-  const explorer = list(evidence.explore_voice_network);
-  const episodeRadar = list(evidence.episode_buzz_radar);
-  const routeImage = list(evidence.route_image_source);
-  const visualText = list(evidence.extract_visual_text);
-  const visualStyle = list(evidence.recommend_by_visual_style);
-  const imageSource = list(evidence.search_image_source);
-  const biliVideo = list(evidence.summarize_bilibili_video_content);
-  const videoFrames = list(evidence.analyze_video_frames);
-  const pixiv = [
-    ...list(evidence.get_pixiv_ranking),
-    ...list(evidence.search_pixiv_illusts),
-    ...list(evidence.get_pixiv_artist_portfolio),
-  ];
-  const trending = list(evidence.get_trending_subjects);
-  const inbox = list(evidence.list_weekly_digest_inbox);
-  const claimChecks = devMode ? list(evidence.claim_check) : [];
-  const memoryEvidence = [
-    ...list(evidence.get_user_memory),
-    ...list(evidence.remember_user_preference),
-    ...list(evidence.forget_user_memory),
-    ...list(evidence.record_recommendation_feedback),
-    ...list(evidence.prepare_bangumi_write_action),
-    ...list(evidence.prepare_downloader_push),
-    ...list(evidence.cancel_bangumi_write_action),
-    ...list(evidence.upsert_watch_plan_item),
-    ...list(evidence.list_watch_plan),
-    ...list(evidence.record_decision_log),
-    ...list(evidence.save_recommendation_list),
-  ];
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const handlers: PanelHandlers = {
+    devMode, onCritique, onConfirmAction, onCancelAction, onUndoAction,
+    onPrepareWrite, onPrepareDownloaderPush, onVisualFeedback, onVisualCorrectionSearch,
+  };
+  const exclude = new Set(excludeNames);
+  const names = availablePanelNames(evidence, devMode).filter((n) => !exclude.has(n));
+  const memoryEvidence = MEMORY_KEYS.flatMap((k) => list(evidence[k]));
   const memory = devMode ? memoryEvidence : memoryEvidence.filter(hasActionableMemory);
-  if (
-    !review.length && !taste.length && !season.length && !recommend.length && !broadcastCalendar.length && !airingProgress.length && !memory.length
-    && !whereToWatch.length && !releaseFeeds.length && !bangumiIndex.length
-    && !aspect.length && !watchCopilot.length && !weeklyDigest.length && !tasteReport.length && !dashboard.length && !explorer.length
-    && !episodeRadar.length && !routeImage.length && !visualText.length && !visualStyle.length && !imageSource.length
-    && !biliVideo.length && !videoFrames.length && !claimChecks.length
-    && !pixiv.length && !trending.length && !inbox.length
-  ) return null;
+  if (!names.length && !memory.length) return null;
+  const memoryNode = memory.map((data, i) => (
+    <MemoryPanel data={data} key={`memory-${i}`} onConfirmAction={onConfirmAction} onCancelAction={onCancelAction} onUndoAction={onUndoAction} />
+  ));
+  if (!collapsible) {
+    return (
+      <div className={`evidence-stack ${devMode ? "dev-mode" : "user-mode"}`}>
+        {names.map((n) => renderPanelByName(n, list(evidence[n]), handlers))}
+        {memoryNode}
+      </div>
+    );
+  }
+  // 折叠模式：未被 inline 锚定的面板收成 chips，点开才展开（方案 A）
   return (
-    <div className={`evidence-stack ${devMode ? "dev-mode" : "user-mode"}`}>
-      {routeImage.map((data, i) => (
-        <RouteImageSourcePanel
-          data={data}
-          onVisualFeedback={onVisualFeedback}
-          onVisualCorrectionSearch={onVisualCorrectionSearch}
-          key={`route-image-${i}`}
-        />
-      ))}
-      {visualText.map((data, i) => <VisualTextPanel data={data} key={`visual-text-${i}`} />)}
-      {visualStyle.map((data, i) => <VisualStylePanel data={data} key={`visual-style-${i}`} />)}
-      {imageSource.map((data, i) => <ImageSourcePanel data={data} key={`image-source-${i}`} />)}
-      {biliVideo.map((data, i) => <BiliVideoContentPanel data={data} key={`bili-video-${i}`} />)}
-      {videoFrames.map((data, i) => <VideoFramePanel data={data} key={`video-frames-${i}`} />)}
-      {pixiv.map((data, i) => <PixivPanel data={data} key={`pixiv-${i}`} />)}
-      {trending.map((data, i) => <TrendingPanel data={data} key={`trending-${i}`} />)}
-      {inbox.map((data, i) => <InboxPanel data={data} key={`inbox-${i}`} />)}
-      {broadcastCalendar.map((data, i) => <BroadcastCalendarPanel data={data} onPrepareWrite={onPrepareWrite} key={`broadcast-${i}`} />)}
-      {airingProgress.map((data, i) => <AiringProgressPanel data={data} key={`airing-progress-${i}`} />)}
-      {whereToWatch.map((data, i) => <WhereToWatchPanel data={data} key={`watch-${i}`} />)}
-      {releaseFeeds.map((data, i) => (
-        <ReleaseFeedsPanel data={data} onPrepareDownloaderPush={onPrepareDownloaderPush} key={`release-${i}`} />
-      ))}
-      {bangumiIndex.map((data, i) => <BangumiIndexPanel data={data} onPrepareWrite={onPrepareWrite} key={`index-${i}`} />)}
-      {recommend.map((data, i) => <RecommendPanel data={data} onCritique={onCritique} onPrepareWrite={onPrepareWrite} key={`recommend-${i}`} />)}
-      {season.map((data, i) => <SeasonGuidePanel data={data} onPrepareWrite={onPrepareWrite} key={`season-${i}`} />)}
-      {review.map((data, i) => <ReviewEvidencePanel data={data} key={`review-${i}`} />)}
-      {taste.map((data, i) => <TasteAffinityPanel data={data} key={`taste-${i}`} />)}
-      {explorer.map((data, i) => <ExplorerPanel data={data} key={`explorer-${i}`} />)}
-      {episodeRadar.map((data, i) => <EpisodeRadarPanel data={data} key={`ep-radar-${i}`} />)}
-      {watchCopilot.map((data, i) => <WatchCopilotPanel data={data} key={`watch-copilot-${i}`} />)}
-      {weeklyDigest.map((data, i) => <WeeklyDigestPanel data={data} key={`weekly-${i}`} />)}
-      {dashboard.map((data, i) => <CollectionDashboardPanel data={data} key={`dashboard-${i}`} />)}
-      {tasteReport.map((data, i) => <TasteReportPanel data={data} key={`taste-report-${i}`} />)}
-      {aspect.map((data, i) => <AspectProfilePanel data={data} key={`aspect-${i}`} />)}
-      {claimChecks.map((data, i) => <ClaimCheckPanel data={data} key={`claim-${i}`} />)}
-      {memory.map((data, i) => (
-        <MemoryPanel
-          data={data}
-          key={`memory-${i}`}
-          onConfirmAction={onConfirmAction}
-          onCancelAction={onCancelAction}
-          onUndoAction={onUndoAction}
-        />
-      ))}
+    <div className={`evidence-stack collapsed ${devMode ? "dev-mode" : "user-mode"}`}>
+      <div className="panel-chips">
+        {names.map((n) => (
+          <button
+            key={n}
+            type="button"
+            className={`chip panel-chip${expanded[n] ? " active" : ""}`}
+            onClick={() => setExpanded((prev) => ({ ...prev, [n]: !prev[n] }))}
+          >
+            {PANEL_LABELS[n] ?? n} · {list(evidence[n]).length}
+          </button>
+        ))}
+      </div>
+      {names.filter((n) => expanded[n]).map((n) => renderPanelByName(n, list(evidence[n]), handlers))}
+      {memoryNode}
     </div>
   );
 }

@@ -419,5 +419,308 @@ class GetTrendingSubjectsTool(Tool):
         return ToolResult(ok=True, data=result, sources=sources)
 
 
+_ANILIST_GQL = "https://graphql.anilist.co"
+_BIRTHDAY_QUERY = """
+{ Page(perPage: %d) { characters(isBirthday: true, sort: FAVOURITES_DESC) {
+    name { full native } image { medium } favourites siteUrl
+    dateOfBirth { month day }
+    media(perPage: 1, sort: POPULARITY_DESC) { nodes { title { native romaji } } }
+} } }
+"""
+
+
+class BirthdayArgs(BaseModel):
+    limit: int = Field(10, ge=1, le=20)
+    moegirl_limit: int = Field(24, ge=0, le=60, description="萌娘完整名单最多列多少位；0 关闭萌娘源")
+
+
+class BirthdayCharacter(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    name: str
+    name_native: str = ""
+    month: int | None = None
+    day: int | None = None
+    favourites: int | None = None
+    from_media: str = ""
+    image: str | None = None
+    anilist_url: str = ""
+    bangumi_search_url: str = ""
+
+
+class MoegirlBirthdayEntry(BaseModel):
+    name: str
+    from_media: str = ""
+    url: str
+
+
+class BirthdayResult(BaseModel):
+    date: str
+    count: int = 0
+    characters: list[BirthdayCharacter] = Field(default_factory=list)
+    moegirl_entries: list[MoegirlBirthdayEntry] = Field(default_factory=list)
+    moegirl_category_url: str = ""
+    caveats: list[str] = Field(default_factory=list)
+
+
+@acached(ttl=3600.0)
+async def _fetch_birthdays(limit: int) -> list[dict[str, Any]]:
+    async def fetch() -> list[dict[str, Any]]:
+        async with httpx.AsyncClient(timeout=settings.http_timeout) as client:
+            res = await client.post(_ANILIST_GQL, json={"query": _BIRTHDAY_QUERY % limit})
+            res.raise_for_status()
+            payload = res.json()
+        return ((payload.get("data") or {}).get("Page") or {}).get("characters") or []
+
+    result = await gather_limited([fetch()], host="anilist")
+    first = result[0]
+    if isinstance(first, BaseException):
+        raise first
+    return first
+
+
+# 萌娘「Category:M月D日」是生日分类（2026-07-05 实测：成员含游戏角色/声优/画师，
+# 覆盖比 AniList 广）。API 的 categorymembers 被站方禁用（action-notallowed），
+# 走 HTML 分类页；只取成员标题+链接（导航性元数据），不抓正文——ai-train 红线不碰。
+import re as _re
+
+_MOEGIRL_CAT_URL = "https://zh.moegirl.org.cn/Category:{mon}月{day}日"
+_MOEGIRL_MEMBER_RE = _re.compile(r'<a href="/([^"?#]+)" title="([^"]+)">')
+
+
+@acached(ttl=3600.0)
+async def _fetch_moegirl_birthdays(mon: int, day: int, limit: int) -> list[dict[str, str]]:
+    url = _MOEGIRL_CAT_URL.format(mon=mon, day=day)
+
+    async def fetch() -> str:
+        async with httpx.AsyncClient(
+            timeout=settings.http_timeout,
+            headers={"User-Agent": settings.moegirl_user_agent},
+            follow_redirects=True,
+        ) as client:
+            res = await client.get(url)
+            res.raise_for_status()
+            return res.text
+
+    result = await gather_limited([fetch()], host="moegirl")
+    html = result[0]
+    if isinstance(html, BaseException):
+        raise html
+    anchor = html.find("mw-category")
+    if anchor < 0:
+        return []
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for href, title in _MOEGIRL_MEMBER_RE.findall(html[anchor:]):
+        if title.startswith(("Category:", "分类:", "萌娘百科:", "User:", "Template:")):
+            continue
+        if title in seen:
+            continue
+        seen.add(title)
+        # 萌娘条目命名惯例「作品:角色」→ 拆出作品归属；无冒号的多为真人（声优/创作者）
+        media, _, char = title.partition(":")
+        name, from_media = (char, media) if char else (title, "")
+        out.append({"name": name, "from_media": from_media, "url": f"https://zh.moegirl.org.cn/{href}"})
+        if len(out) >= limit:
+            break
+    return out
+
+
+class GetCharacterBirthdaysTool(Tool):
+    name = "get_character_birthdays"
+    description = (
+        "查询今天过生日的 ACGN 角色（AniList isBirthday，按全站人气排序）。"
+        "用于『今天是谁的生日 / 生日角色 / 今天有什么角色过生日』。角色名以日文原名为准，可回锚 Bangumi 检索。"
+    )
+    args_model = BirthdayArgs
+    result_model = BirthdayResult
+
+    async def run(self, args: BirthdayArgs) -> ToolResult[BirthdayResult]:
+        from datetime import date as _date
+        from urllib.parse import quote as _quote
+
+        today = _date.today()
+        rows: list[dict[str, Any]] = []
+        moegirl_entries: list[MoegirlBirthdayEntry] = []
+        anilist_err = ""
+        try:
+            rows = await _fetch_birthdays(args.limit)
+        except Exception as e:  # noqa: BLE001
+            anilist_err = type(e).__name__
+        if args.moegirl_limit > 0:
+            try:
+                raw_entries = await _fetch_moegirl_birthdays(today.month, today.day, args.moegirl_limit)
+                moegirl_entries = [MoegirlBirthdayEntry(**x) for x in raw_entries]
+            except Exception:  # noqa: BLE001
+                pass
+        if not rows and not moegirl_entries:
+            return ToolResult(ok=False, error=f"生日数据暂不可用（AniList {anilist_err or 'empty'} / 萌娘不可达）")
+        characters: list[BirthdayCharacter] = []
+        for row in rows:
+            name = row.get("name") or {}
+            native = str(name.get("native") or "")
+            dob = row.get("dateOfBirth") or {}
+            media_nodes = ((row.get("media") or {}).get("nodes")) or []
+            media_title = ""
+            if media_nodes:
+                title = media_nodes[0].get("title") or {}
+                media_title = str(title.get("native") or title.get("romaji") or "")
+            anchor = native or str(name.get("full") or "")
+            characters.append(
+                BirthdayCharacter(
+                    name=str(name.get("full") or native or "未知角色"),
+                    name_native=native,
+                    month=dob.get("month"),
+                    day=dob.get("day"),
+                    favourites=row.get("favourites"),
+                    from_media=media_title,
+                    image=(row.get("image") or {}).get("medium"),
+                    anilist_url=str(row.get("siteUrl") or ""),
+                    bangumi_search_url=f"https://bgm.tv/mono_search/{_quote(anchor)}?cat=crt" if anchor else "",
+                )
+            )
+        result = BirthdayResult(
+            date=today.isoformat(),
+            count=len(characters) + len(moegirl_entries),
+            characters=characters,
+            moegirl_entries=moegirl_entries,
+            moegirl_category_url=_MOEGIRL_CAT_URL.format(mon=today.month, day=today.day),
+            caveats=[
+                "人气图卡来自 AniList（动画侧，按收藏人气排序）；完整名单来自萌娘百科生日分类（含游戏角色/声优/创作者，无排序）。",
+                "两源收录口径不同，同一角色可能重复出现；角色详情可用条目链接核对。",
+            ],
+        )
+        sources = [
+            Citation(title=f"{c.name_native or c.name}（{c.from_media}）", url=c.anilist_url or c.bangumi_search_url, source="anilist", image=c.image)
+            for c in characters[:5]
+        ]
+        if moegirl_entries:
+            sources.append(Citation(title=f"萌娘百科 — {today.month}月{today.day}日生日分类", url=result.moegirl_category_url, source="moegirl"))
+        return ToolResult(ok=True, data=result, sources=sources)
+
+
+class CompareSubjectsArgs(BaseModel):
+    subject_ids: list[int] = Field(default_factory=list, description="要对比的 Bangumi subject id，2~3 个")
+    titles: list[str] = Field(default_factory=list, description="subject_ids 为空时按标题解析，2~3 个")
+    subject_type: _SUBJECT_T = "anime"
+
+
+class CompareColumn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: int
+    name: str
+    name_cn: str = ""
+    date: str = ""
+    eps: int | None = None
+    score: float | None = None
+    rank: int | None = None
+    rating_total: int | None = None
+    doing: int | None = None
+    collect: int | None = None
+    dropped: int | None = None
+    top_tags: list[str] = Field(default_factory=list)
+    unique_tags: list[str] = Field(default_factory=list)
+    image: str | None = None
+    url: str = ""
+
+
+class CompareSubjectsResult(BaseModel):
+    columns: list[CompareColumn] = Field(default_factory=list)
+    shared_tags: list[str] = Field(default_factory=list)
+    highlights: list[str] = Field(default_factory=list)
+    caveats: list[str] = Field(default_factory=list)
+
+
+class CompareSubjectsTool(Tool):
+    name = "compare_subjects"
+    description = (
+        "并排对比 2~3 部作品的硬指标：评分/排名/评分人数/在看收视/弃番数/话数/年份/标签异同。"
+        "用于『A 和 B 哪个好看 / 对比一下 X 和 Y』。主观取舍仍需结合 review_subject 的口碑证据。"
+    )
+    args_model = CompareSubjectsArgs
+    result_model = CompareSubjectsResult
+
+    def __init__(self, client: BangumiClient) -> None:
+        self.client = client
+
+    async def _resolve_ids(self, args: CompareSubjectsArgs) -> list[int]:
+        if args.subject_ids:
+            return args.subject_ids[:3]
+        stype = SUBJECT_TYPE[args.subject_type]
+        ids: list[int] = []
+        for title in args.titles[:3]:
+            try:
+                raw = await self.client.search_subjects(title, stype, limit=3)
+                rows = raw.get("data") or []
+                if rows:
+                    ids.append(int(rows[0]["id"]))
+            except Exception:  # noqa: BLE001
+                continue
+        return ids
+
+    async def run(self, args: CompareSubjectsArgs) -> ToolResult[CompareSubjectsResult]:
+        ids = await self._resolve_ids(args)
+        if len(ids) < 2:
+            return ToolResult(ok=False, error="需要至少 2 个可解析的作品（subject_ids 或 titles）")
+        raws = await gather_limited([self.client.get_subject(sid) for sid in ids], host="bangumi")
+        columns: list[CompareColumn] = []
+        for sid, raw in zip(ids, raws, strict=False):
+            if isinstance(raw, BaseException):
+                continue
+            rating = raw.get("rating") or {}
+            collection = raw.get("collection") or {}
+            tags = [str(t.get("name")) for t in (raw.get("tags") or [])[:8] if isinstance(t, dict) and t.get("name")]
+            columns.append(
+                CompareColumn(
+                    id=sid,
+                    name=str(raw.get("name") or ""),
+                    name_cn=str(raw.get("name_cn") or raw.get("name") or ""),
+                    date=str(raw.get("date") or ""),
+                    eps=raw.get("eps") or raw.get("total_episodes"),
+                    score=rating.get("score"),
+                    rank=rating.get("rank"),
+                    rating_total=rating.get("total"),
+                    doing=collection.get("doing"),
+                    collect=collection.get("collect"),
+                    dropped=collection.get("dropped"),
+                    top_tags=tags,
+                    image=(raw.get("images") or {}).get("common"),
+                    url=f"https://bgm.tv/subject/{sid}",
+                )
+            )
+        if len(columns) < 2:
+            return ToolResult(ok=False, error="可对比的条目不足 2 个（部分条目获取失败）")
+        tag_sets = [set(c.top_tags) for c in columns]
+        shared = set.intersection(*tag_sets) if tag_sets else set()
+        for c in columns:
+            c.unique_tags = [t for t in c.top_tags if t not in shared][:5]
+        highlights: list[str] = []
+        by_score = max(columns, key=lambda c: c.score or 0)
+        if by_score.score:
+            highlights.append(f"评分更高：{by_score.name_cn}（{by_score.score}）")
+        by_hot = max(columns, key=lambda c: (c.doing or 0) + (c.collect or 0))
+        highlights.append(f"更热门（收藏+在看）：{by_hot.name_cn}")
+        drop_rates = [
+            (c, (c.dropped or 0) / max((c.collect or 0) + (c.dropped or 0), 1))
+            for c in columns
+        ]
+        low_drop = min(drop_rates, key=lambda x: x[1])
+        highlights.append(f"弃番率更低：{low_drop[0].name_cn}（{low_drop[1] * 100:.1f}%）")
+        result = CompareSubjectsResult(
+            columns=columns,
+            shared_tags=sorted(shared)[:8],
+            highlights=highlights,
+            caveats=["硬指标对比截至查询时；『哪个更适合你』还取决于口味画像与口碑证据（可再调 review_subject / recommend）。"],
+        )
+        sources = [Citation(title=c.name_cn or c.name, url=c.url, source="bangumi", image=c.image) for c in columns]
+        return ToolResult(ok=True, data=result, sources=sources)
+
+
 def build_discovery_tools(client: BangumiClient) -> list[Tool]:
-    return [PredictMyRatingTool(client), SearchByTraitsTool(client), EpisodeBuzzRadarTool(client), GetTrendingSubjectsTool()]
+    return [
+        PredictMyRatingTool(client),
+        SearchByTraitsTool(client),
+        EpisodeBuzzRadarTool(client),
+        GetTrendingSubjectsTool(),
+        GetCharacterBirthdaysTool(),
+        CompareSubjectsTool(client),
+    ]

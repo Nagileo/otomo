@@ -561,3 +561,84 @@ a.card-title:hover { color: var(--accent); }
   border: 1px solid rgba(122, 162, 247, .25); border-radius: 999px; padding: 2px 10px;
 }
 .release-item-actions a:hover { border-color: var(--accent); }
+
+/* ---- inline 锚定面板（[[panel:xxx]] 嵌进回答流）与折叠 chips ---- */
+.inline-panel { margin: 10px 0; }
+.inline-panel .evidence-panel { margin: 0; }
+.panel-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 4px; }
+.panel-chip { opacity: .85; }
+.panel-chip.active { border-color: var(--accent); color: var(--accent); opacity: 1; }
+.evidence-stack.collapsed { margin-top: 4px; }
+
+/* ---- panels/media.tsx · Birthday ---- */
+.birthday-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 8px; margin-top: 8px;
+}
+.birthday-card {
+  display: grid; grid-template-columns: 44px 1fr; gap: 9px; align-items: center;
+  border: 1px solid var(--line); border-radius: 10px; padding: 7px 9px;
+  text-decoration: none; color: inherit; transition: border-color .15s;
+}
+.birthday-card:hover { border-color: var(--accent); }
+.birthday-card img { width: 44px; height: 44px; object-fit: cover; border-radius: 50%; }
+.birthday-name { font-size: 13px; font-weight: 600; }
+.birthday-from {
+  font-size: 11px; color: var(--dim); margin: 2px 0 3px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* ---- panels/media.tsx · Compare ---- */
+.compare-table {
+  display: grid; gap: 1px; background: var(--line);
+  border: 1px solid var(--line); border-radius: 10px; overflow: hidden; margin-top: 8px;
+}
+.compare-cell { background: var(--bg, #101014); padding: 7px 9px; font-size: 12.5px; }
+.compare-cell.head { text-align: center; }
+.compare-cell.head a { text-decoration: none; color: inherit; }
+.compare-cell.head img { width: 56px; height: 76px; object-fit: cover; border-radius: 6px; }
+.compare-name { font-size: 12.5px; font-weight: 600; margin-top: 4px; }
+.compare-cell.label { color: var(--dim); font-size: 11.5px; }
+.compare-cell.tags { display: flex; flex-wrap: wrap; gap: 4px; }
+.compare-highlights { margin: 8px 0 0; padding-left: 18px; }
+.compare-highlights li { font-size: 12.5px; margin: 2px 0; }
+
+/* ---- 周视图追番表 ---- */
+.week-grid {
+  display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; margin-top: 8px;
+}
+.week-col { border: 1px solid var(--line); border-radius: 10px; padding: 6px; min-width: 0; }
+.week-col.today { border-color: rgba(158, 206, 106, .55); background: rgba(158, 206, 106, .04); }
+.week-col-head {
+  font-size: 12px; font-weight: 700; display: flex; align-items: center; gap: 5px;
+  padding: 2px 2px 6px; border-bottom: 1px solid var(--line); margin-bottom: 6px;
+}
+.week-cell {
+  display: block; text-decoration: none; color: inherit;
+  border-radius: 7px; padding: 4px; margin-bottom: 4px; transition: background .15s;
+}
+.week-cell:hover { background: rgba(122, 162, 247, .08); }
+.week-cell.mine { background: rgba(158, 206, 106, .08); }
+.week-cell img { width: 100%; aspect-ratio: 3/4; object-fit: cover; border-radius: 5px; display: block; }
+.week-cell-name {
+  font-size: 11.5px; line-height: 1.35; margin-top: 3px;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.week-cell-sub { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 2px; }
+.week-slot { font-size: 10.5px; color: var(--accent); }
+.week-empty { text-align: center; color: var(--dim); font-size: 12px; padding: 8px 0; }
+
+@media (max-width: 820px) {
+  .week-grid { grid-template-columns: repeat(2, 1fr); }
+  .compare-table { font-size: 12px; }
+}
+
+/* Birthday · 萌娘完整名单标签流 */
+.birthday-names { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
+.birthday-tag {
+  font-size: 12px; color: inherit; text-decoration: none;
+  border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px;
+  transition: border-color .15s;
+}
+.birthday-tag:hover { border-color: var(--accent); }
+.birthday-tag small { color: var(--dim); }

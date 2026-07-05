@@ -1,9 +1,16 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { EvidencePanels, MemoryBadge, SpoilerBadge } from "./evidence-panels";
+import {
+  EvidencePanels,
+  MemoryBadge,
+  SpoilerBadge,
+  PANEL_LABELS,
+  renderPanelByName,
+  type PanelHandlers,
+} from "./evidence-panels";
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND ?? "http://localhost:8000";
 
@@ -41,8 +48,53 @@ type ImageAttachment = {
   preview_url?: string;
 };
 type PendingImage = { id: string; file: File; preview: string };
-type Msg = { role: "user" | "assistant"; content: string; attachments?: ImageAttachment[] };
+type Msg = { role: "user" | "assistant"; content: string; attachments?: ImageAttachment[]; evidence?: EvidenceMap };
 type EvidenceMap = Record<string, Record<string, any>[]>;
+
+// [[panel:tool_name]]：LLM 在正文中锚定证据面板的位置（豆包/Gemini 式 inline 卡片）
+const PANEL_MARK = /\[\[panel:([a-z_]+)\]\]/g;
+
+function inlinePanelNames(content: string, evidence?: EvidenceMap): string[] {
+  const names: string[] = [];
+  for (const m of content.matchAll(PANEL_MARK)) {
+    const name = m[1];
+    if (!names.includes(name) && (evidence?.[name]?.length ?? 0) > 0 && PANEL_LABELS[name]) names.push(name);
+  }
+  return names;
+}
+
+/** assistant 正文：按 [[panel:xxx]] 把 markdown 切段，把对应面板嵌进文字流的相应位置。 */
+function AssistantContent({
+  content,
+  evidence,
+  handlers,
+}: {
+  content: string;
+  evidence?: EvidenceMap;
+  handlers: PanelHandlers;
+}) {
+  const parts = content.split(/\[\[panel:([a-z_]+)\]\]/);
+  const used = new Set<string>();
+  const nodes: ReactNode[] = [];
+  for (let i = 0; i < parts.length; i++) {
+    if (i % 2 === 0) {
+      if (parts[i].trim()) nodes.push(<Markdown text={parts[i]} key={`md-${i}`} />);
+      continue;
+    }
+    const name = parts[i];
+    const rows = evidence?.[name] ?? [];
+    if (!used.has(name) && rows.length && PANEL_LABELS[name]) {
+      used.add(name);
+      nodes.push(
+        <div className="inline-panel" key={`panel-${name}-${i}`}>
+          {renderPanelByName(name, rows, handlers)}
+        </div>,
+      );
+    }
+    // 无数据/重复的标记直接吞掉，不渲染
+  }
+  return <>{nodes}</>;
+}
 type SpoilerState = {
   mode?: string;
   memory_default?: string;
@@ -304,6 +356,7 @@ export default function Home() {
   const [activeSessionId, setActiveSessionId] = useState("");
   const [busy, setBusy] = useState(false);
   const answerRef = useRef("");
+  const evidenceRef = useRef<EvidenceMap>({});  // finally 定型消息时读（state 闭包会是旧值）
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const authSessionId = useRef("");
   const csrfToken = useRef("");
@@ -384,6 +437,8 @@ export default function Home() {
         ...img,
         preview_url: img.preview_url?.startsWith("/") ? `${BACKEND}${img.preview_url}` : img.preview_url,
       })),
+      // per-message evidence：恢复历史会话时 inline 面板照常锚定
+      evidence: row.evidence && typeof row.evidence === "object" ? row.evidence : undefined,
     }));
   }
 
@@ -537,6 +592,7 @@ export default function Home() {
     setTrace([]);
     setSources([]);
     setEvidence({});
+    evidenceRef.current = {};
     setFollowups([]);
     setAnswer("");
     answerRef.current = "";
@@ -592,7 +648,10 @@ export default function Home() {
       setUploadNotice({ tone: "bad", text: message });
     } finally {
       const final = answerRef.current;
-      if (final) setMessages((m) => [...m, { role: "assistant", content: final }]);
+      if (final) {
+        const turnEvidence = evidenceRef.current;
+        setMessages((m) => [...m, { role: "assistant", content: final, evidence: turnEvidence }]);
+      }
       setAnswer("");
       setBusy(false);
       void loadSessions();
@@ -785,10 +844,11 @@ export default function Home() {
       case "observation":
         setTrace((t) => [...t, { kind: "obs", name: ev.name, ok: ev.ok, summary: ev.summary }]);
         if (ev.data) {
-          setEvidence((prev) => ({
-            ...prev,
-            [ev.name]: [...(prev[ev.name] ?? []), ev.data],
-          }));
+          evidenceRef.current = {
+            ...evidenceRef.current,
+            [ev.name]: [...(evidenceRef.current[ev.name] ?? []), ev.data],
+          };
+          setEvidence(evidenceRef.current);
         }
         break;
       case "claim_check":
@@ -802,10 +862,11 @@ export default function Home() {
               : "证据校验：无强 canonical 硬事实需要自动回退",
           },
         ]);
-        setEvidence((prev) => ({
-          ...prev,
-          claim_check: [...(prev.claim_check ?? []), ev],
-        }));
+        evidenceRef.current = {
+          ...evidenceRef.current,
+          claim_check: [...(evidenceRef.current.claim_check ?? []), ev],
+        };
+        setEvidence(evidenceRef.current);
         break;
       case "state":
         if (ev.scope === "spoiler") setSpoiler(ev.snapshot ?? null);
@@ -839,6 +900,7 @@ export default function Home() {
     setTrace([]);
     setSources([]);
     setEvidence({});
+    evidenceRef.current = {};
     setSpoiler(null);
     setMemory(null);
     setFollowups([]);
@@ -906,6 +968,18 @@ export default function Home() {
   }
 
   const hasEvidence = Object.values(evidence).some((rows) => list(rows).length > 0);
+
+  const panelHandlerProps = {
+    onCritique: (q: string) => send(q),
+    onConfirmAction: (id: string) => postAction("confirm", id),
+    onCancelAction: (id: string) => postAction("cancel", id),
+    onUndoAction: (id: string) => postAction("undo", id),
+    onPrepareWrite: postPrepareWrite,
+    onPrepareDownloaderPush: postPrepareDownloaderPush,
+    onVisualFeedback: postVisualFeedback,
+    onVisualCorrectionSearch: searchVisualCorrection,
+  };
+  const panelHandlers: PanelHandlers = { ...panelHandlerProps, devMode: evidenceMode === "dev" };
 
   return (
     <div className="wrap">
@@ -989,7 +1063,16 @@ export default function Home() {
                 </div>
               ) : (
                 <div className="bubble">
-                  <Markdown text={m.content} />
+                  <AssistantContent content={m.content} evidence={m.evidence} handlers={panelHandlers} />
+                  {m.evidence && (
+                    <EvidencePanels
+                      evidence={m.evidence}
+                      mode={evidenceMode}
+                      collapsible
+                      excludeNames={inlinePanelNames(m.content, m.evidence)}
+                      {...panelHandlerProps}
+                    />
+                  )}
                 </div>
               )}
             </div>
@@ -998,7 +1081,8 @@ export default function Home() {
             <div className="msg assistant">
               <div className="role">Otomo</div>
               <div className="bubble">
-                <Markdown text={answer + "▍"} />
+                {/* 流式中面板标记逐字到达后即时嵌入（inline 锚定对打字中的回答同样生效） */}
+                <AssistantContent content={answer + "▍"} evidence={evidence} handlers={panelHandlers} />
               </div>
             </div>
           )}
@@ -1008,7 +1092,7 @@ export default function Home() {
               <div>
                 <div className="evidence-toolbar-title">证据视图</div>
                 <div className="evidence-toolbar-sub">
-                  {evidenceMode === "user" ? "默认只展示可读结论和可操作项" : "开发模式展示原始证据、校验和映射细节"}
+                  {evidenceMode === "user" ? "面板锚定在回答对应位置，未锚定的收进各消息的折叠区" : "开发模式在底部展示本轮全部原始证据"}
                 </div>
               </div>
               <div className="segmented" aria-label="证据视图">
@@ -1017,17 +1101,12 @@ export default function Home() {
               </div>
             </div>
           )}
+          {/* user 模式：底部只保留 memory 确认流（展示型面板已进消息内）；dev 模式：本轮全家桶便于调试 */}
           <EvidencePanels
             evidence={evidence}
             mode={evidenceMode}
-            onCritique={(q) => send(q)}
-            onConfirmAction={(id) => postAction("confirm", id)}
-            onCancelAction={(id) => postAction("cancel", id)}
-            onUndoAction={(id) => postAction("undo", id)}
-            onPrepareWrite={postPrepareWrite}
-            onPrepareDownloaderPush={postPrepareDownloaderPush}
-            onVisualFeedback={postVisualFeedback}
-            onVisualCorrectionSearch={searchVisualCorrection}
+            excludeNames={evidenceMode === "user" ? Object.keys(PANEL_LABELS) : []}
+            {...panelHandlerProps}
           />
           {spoiler?.progress_episode != null && (
             <div className="filter-note">🔒 已按第 {spoiler.progress_episode} 集进度过滤分集剧情内容</div>

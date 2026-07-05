@@ -224,14 +224,16 @@ class SessionStore:
         evidence: dict[str, list[Any]] = {}
         sources: list[dict[str, Any]] = []
         for row in rows:
+            ev = _json_load(row["evidence_json"], {})
             msg = {
                 "role": row["role"],
                 "content": row["content"],
                 "attachments": _json_load(row["attachments_json"], []),
+                # per-message evidence：前端 inline 面板锚定需要知道每条回答自己的证据
+                "evidence": ev if isinstance(ev, dict) else {},
                 "created_at": row["created_at"],
             }
             messages.append(msg)
-            ev = _json_load(row["evidence_json"], {})
             if isinstance(ev, dict):
                 for key, values in ev.items():
                     if isinstance(values, list):

@@ -494,6 +494,8 @@ _PANEL_TOOLS = {
     "search_pixiv_illusts",
     "get_pixiv_artist_portfolio",
     "get_trending_subjects",
+    "get_character_birthdays",
+    "compare_subjects",
     "where_to_watch",
     "get_anime_release_feeds",
     "get_bangumi_index",
@@ -1176,6 +1178,22 @@ def panel_data_from_payload(name: str, payload: dict[str, Any] | None) -> dict[s
         return _safe_pixiv_payload(data)
     if name == "get_trending_subjects":
         return _safe_trending_payload(data)
+    if name == "get_character_birthdays":
+        return {
+            "date": data.get("date"),
+            "count": data.get("count"),
+            "characters": _trim_dicts(data.get("characters"), limit=16),
+            "moegirl_entries": _trim_dicts(data.get("moegirl_entries"), limit=36),
+            "moegirl_category_url": data.get("moegirl_category_url"),
+            "caveats": _trim_strings(data.get("caveats"), limit=3, text_limit=160),
+        }
+    if name == "compare_subjects":
+        return {
+            "columns": _trim_dicts(data.get("columns"), limit=3),
+            "shared_tags": _trim_strings(data.get("shared_tags"), limit=8, text_limit=24),
+            "highlights": _trim_strings(data.get("highlights"), limit=5, text_limit=80),
+            "caveats": _trim_strings(data.get("caveats"), limit=3, text_limit=160),
+        }
     if name in _MEMORY_TOOLS:
         return _safe_memory_payload(data)
     return None

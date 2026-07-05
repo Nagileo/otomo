@@ -19,6 +19,7 @@ HOST_LIMITS = {
     "mikan": 2,
     "dmhy": 1,
     "acgnx": 1,
+    "moegirl": 2,
     "qbittorrent": 1,
 }
 
