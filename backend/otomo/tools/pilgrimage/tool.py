@@ -56,7 +56,9 @@ class PilgrimageResult(BaseModel):
 
 class PilgrimageTripArgs(BaseModel):
     username: str | None = Field(None, description="Bangumi 用户名；不传用当前账号")
-    city: str = Field("", description="可选：目的地简名，支持城市（东京/京都/大阪）和区域（关西/关东/九州），按都市圈分层")
+    city: str = Field("", description="可选：目的地简名，支持城市（东京/京都/热海/沼津）和区域（关西/关东/九州），按都市圈分层")
+    lat: float | None = Field(None, description="目的地纬度：city 不在支持列表时（工具会在 caveat 提示），用你知道的该地坐标重调")
+    lng: float | None = Field(None, description="目的地经度，与 lat 配对")
     max_subjects: int = Field(300, ge=5, le=1000, description="最多检查多少部（按用户评分从高到低截断；结果有 24h 缓存，重复查询很快）")
 
 
@@ -123,6 +125,19 @@ _REGION_CENTERS: dict[str, tuple[float, float, float, float]] = {
     "广岛": (34.385, 132.455, 70, 200),
     "金泽": (36.561, 136.656, 70, 200),
     "冲绳": (26.212, 127.679, 100, 300),
+    # ACGN 旅游热点小城（半径小：本地 + 顺路圈）
+    "热海": (35.096, 139.072, 40, 120),
+    "箱根": (35.233, 139.107, 40, 120),
+    "沼津": (35.096, 138.864, 40, 120),
+    "静冈": (34.976, 138.383, 70, 180),
+    "大洗": (36.313, 140.575, 40, 150),
+    "宇治": (34.884, 135.800, 30, 100),
+    "秩父": (35.992, 139.085, 40, 120),
+    "饭能": (35.856, 139.328, 35, 120),
+    "川越": (35.925, 139.486, 30, 100),
+    "江之岛": (35.300, 139.480, 30, 100),
+    "长野": (36.651, 138.181, 80, 200),
+    "松本": (36.238, 137.972, 60, 150),
 }
 
 
@@ -134,13 +149,21 @@ def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     return 6371.0 * 2 * asin(sqrt(a))
 
 
-def _classify_entry(query: str, city: str, geo: Any) -> tuple[str, float | None] | None:
-    """返回 (tier, distance_km)：core=同城/名称命中，nearby=顺路近郊，bonus=惊喜添头；None=不在圈内。"""
-    if _city_match(query, city):
+def _classify_entry(
+    query: str,
+    city: str,
+    geo: Any,
+    center: tuple[float, float, float, float] | None = None,
+) -> tuple[str, float | None] | None:
+    """返回 (tier, distance_km)：core=同城/名称命中，nearby=顺路近郊，bonus=惊喜添头；None=不在圈内。
+
+    center 可由调用方注入（LLM 传坐标兜内置表之外的长尾目的地）。"""
+    if query and _city_match(query, city):
         return "core", None
-    center = _REGION_CENTERS.get(query.strip())
+    if center is None:
+        center = _REGION_CENTERS.get(query.strip())
     if not center:
-        return None  # 未知目的地：只能名称匹配
+        return None  # 未知目的地且无坐标：只能名称匹配
     try:
         lat, lng = float(geo[0]), float(geo[1])
     except (TypeError, ValueError, IndexError):
@@ -359,7 +382,10 @@ class PlanPilgrimageTripTool(Tool):
         )
         entries: list[PilgrimageTripEntry] = []
         city_key = args.city.strip()
-        known_region = not city_key or city_key in _REGION_CENTERS
+        custom_center: tuple[float, float, float, float] | None = None
+        if args.lat is not None and args.lng is not None:
+            custom_center = (float(args.lat), float(args.lng), 60, 160)
+        known_region = not city_key or city_key in _REGION_CENTERS or custom_center is not None
         rate_limited = sum(1 for x in lites if isinstance(x, AnitabiRateLimited))
         other_errors = sum(1 for x in lites if isinstance(x, BaseException) and not isinstance(x, AnitabiRateLimited))
         for (sid, name), lite in zip(subjects, lites, strict=False):
@@ -368,8 +394,8 @@ class PlanPilgrimageTripTool(Tool):
             city = str(lite.get("city") or "")
             tier: str = "core"
             distance: int | None = None
-            if city_key:
-                classified = _classify_entry(city_key, city, lite.get("geo"))
+            if city_key or custom_center:
+                classified = _classify_entry(city_key, city, lite.get("geo"), center=custom_center)
                 if classified is None:
                     continue
                 tier, distance = classified
@@ -389,7 +415,11 @@ class PlanPilgrimageTripTool(Tool):
             )
         tier_rank = {"core": 0, "nearby": 1, "bonus": 2}
         entries.sort(key=lambda e: (tier_rank.get(e.tier, 3), -e.point_count))
-        await emit_tool_progress(tool=self.name, summary=f"命中 {len(entries)} 部有巡礼数据的作品", current=3, total=3)
+        progress_note = (
+            f"⚠ anitabi 限流（{rate_limited}/{len(subjects)}），结果不完整"
+            if rate_limited else f"命中 {len(entries)} 部有巡礼数据的作品"
+        )
+        await emit_tool_progress(tool=self.name, summary=progress_note, current=3, total=3)
         result = PilgrimageTripResult(
             username=username,
             city_filter=city_key,
@@ -408,7 +438,7 @@ class PlanPilgrimageTripTool(Tool):
                 (
                     "目的地按都市圈分层：core=同城、nearby=顺路近郊（如东京→饭能/秩父）、bonus=稍远惊喜（如大阪→冈山），距离为番剧取景中心到目的地的直线距离。"
                     if known_region and city_key else
-                    "该目的地不在内置都市圈表中，仅做了城市名前缀匹配；可换用 东京/大阪/京都/关西/关东 等常用名获得圈层推荐。"
+                    "该目的地不在内置都市圈表中，仅做了城市名前缀匹配——**请带上该地经纬度（lat/lng 参数）重调本工具**即可获得圈层推荐。"
                     if city_key else
                     "未指定目的地，列出全部有巡礼数据的作品。"
                 ),

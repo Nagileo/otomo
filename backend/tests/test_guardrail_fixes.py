@@ -219,3 +219,19 @@ def test_pilgrimage_geo_tiers():
     assert okayama[0] == "bonus" and okayama[1] > 100
     assert _classify_entry("东京", "冲绳", [26.2, 127.7]) is None  # 圈外
     assert _classify_entry("桂林", "东京都", [35.68, 139.77]) is None  # 未知目的地→仅名称匹配
+
+
+def test_pilgrimage_hotspot_cities_and_custom_center():
+    """热海等巡礼热点入表（用户实测：热海查询曾走名称匹配全空→LLM 乱转）；
+    表外长尾目的地支持 LLM 注入坐标。"""
+    from otomo.tools.pilgrimage.tool import _REGION_CENTERS, _classify_entry
+
+    assert "热海" in _REGION_CENTERS and "沼津" in _REGION_CENTERS
+    # 热海查询：伊豆山(热海市内)=core；箱根 ~18km=core 圈；小田原 ~25km 边缘
+    got = _classify_entry("热海", "伊豆山", [35.11, 139.08])
+    assert got is not None and got[0] == "core"
+    # 表外目的地（如 呉市）由 LLM 传坐标兜底：广岛市 ~20km → core 档
+    got2 = _classify_entry("呉", "广岛市", [34.385, 132.455], center=(34.249, 132.566, 60, 160))
+    assert got2 is not None and got2[0] == "core"
+    # 无坐标的表外目的地仍只能名称匹配
+    assert _classify_entry("呉", "广岛市", [34.385, 132.455]) is None
