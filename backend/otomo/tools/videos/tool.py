@@ -92,6 +92,26 @@ class BiliVideoContentArgs(BaseModel):
     limit: int = Field(80, ge=10, le=200)
 
 
+class SubjectVertical(BaseModel):
+    name: str
+    label: str
+    confidence: float = 0.0
+    evidence: list[str] = Field(default_factory=list)
+
+
+class GuideVideoHit(BaseModel):
+    title: str
+    url: str
+    aid: int | None = None
+    bvid: str | None = None
+    author: str
+    play: int | None = None
+    danmaku: int | None = None
+    pubdate: int | None = None
+    match_confidence: float = 0.0
+    match_reason: str = ""
+
+
 class GuideVideoLink(BaseModel):
     label: str
     url: str
@@ -100,6 +120,12 @@ class GuideVideoLink(BaseModel):
     positioning: str
     match_reason: str = ""
     confidence: Literal["high", "medium", "low"] = "medium"
+    route_score: int = 0
+    verticals: list[SubjectVertical] = Field(default_factory=list)
+    verified: bool = False
+    verified_hits: list[GuideVideoHit] = Field(default_factory=list)
+    verification_query: str = ""
+    verification_note: str = ""
 
 
 class BiliVideoMeta(BaseModel):
@@ -223,6 +249,7 @@ _GUIDE_UPS: list[dict] = [
         "intents": {"season", "data", "all"},
         "keywords": ["新番导视", "新番推荐", "季度新番"],
         "tags": {"新番", "季度", "数据"},
+        "domains": {"data_interest", "season_general"},
     },
     {
         "name": "泛式",
@@ -231,6 +258,7 @@ _GUIDE_UPS: list[dict] = [
         "intents": {"season", "review", "all"},
         "keywords": ["新番导视", "评价", "推荐"],
         "tags": {"新番", "季度", "漫评", "评价"},
+        "domains": {"mainstream_review", "season_general", "controversial"},
     },
     {
         "name": "瓶子君152",
@@ -239,6 +267,7 @@ _GUIDE_UPS: list[dict] = [
         "intents": {"season", "review", "all"},
         "keywords": ["新番导视", "评价", "杂谈"],
         "tags": {"新番", "季度", "漫评", "评价"},
+        "domains": {"mainstream_review", "season_general", "controversial"},
     },
     {
         "name": "台长",
@@ -247,6 +276,7 @@ _GUIDE_UPS: list[dict] = [
         "intents": {"season", "review", "all"},
         "keywords": ["新番导视", "评价", "杂谈"],
         "tags": {"新番", "季度", "漫评", "评价"},
+        "domains": {"mainstream_review", "season_general", "controversial"},
     },
     {
         "name": "FlowerMX-花梦",
@@ -255,6 +285,7 @@ _GUIDE_UPS: list[dict] = [
         "intents": {"season", "review", "yuri", "all"},
         "keywords": ["百合", "新番导视", "推荐"],
         "tags": {"百合", "GL", "新番", "季度"},
+        "domains": {"yuri_core", "yuri_adjacent", "season_general"},
     },
     {
         "name": "峻岸上的喀秋莎_Channel",
@@ -263,6 +294,7 @@ _GUIDE_UPS: list[dict] = [
         "intents": {"yuri", "review", "all"},
         "keywords": ["百合", "介绍", "推荐"],
         "tags": {"百合", "GL", "翻译"},
+        "domains": {"yuri_core", "yuri_adjacent"},
     },
     {
         "name": "芳文观星台",
@@ -271,6 +303,7 @@ _GUIDE_UPS: list[dict] = [
         "intents": {"kirara", "review", "all"},
         "keywords": ["芳文社", "Kirara", "きらら"],
         "tags": {"芳文社", "Kirara", "きらら", "日常"},
+        "domains": {"kirara", "cute_girls_daily"},
     },
     {
         "name": "大猫猫组",
@@ -279,6 +312,7 @@ _GUIDE_UPS: list[dict] = [
         "intents": {"kirara", "review", "all"},
         "keywords": ["芳文社", "Kirara", "きらら"],
         "tags": {"芳文社", "Kirara", "きらら", "日常"},
+        "domains": {"kirara", "cute_girls_daily"},
     },
 ]
 
@@ -295,7 +329,92 @@ def _tag_intents(tags: list[str]) -> set[str]:
     return intents
 
 
-def _guide_score(up: dict, intent: str, tags: list[str]) -> tuple[int, str, str]:
+def _norm_video_text(value: str | None) -> str:
+    return "".join(ch.lower() for ch in (value or "") if ch.isalnum())
+
+
+def _contains_any(text: str, keys: tuple[str, ...]) -> list[str]:
+    return [k for k in keys if k and k in text]
+
+
+def classify_subject_verticals(
+    tags: list[str] | None = None,
+    *,
+    title: str = "",
+    studio: str = "",
+    extra_text: str = "",
+) -> list[SubjectVertical]:
+    """把作品标签/标题映射到可解释圈层，供导视源路由使用。
+
+    这里只做保守启发式，不把"轻百合/女性主角群像"等价成强百合，也不把动画制作公司误判成芳文社。
+    真正能不能引用某 UP，后续还要经过 B站视频命中验证。
+    """
+    tags = tags or []
+    text = " ".join([title, studio, extra_text, *tags])
+    lower = text.lower()
+    out: list[SubjectVertical] = []
+
+    yuri_core = _contains_any(lower, ("百合", "gl", "girls love", "ガールズラブ", "百合姫"))
+    if yuri_core:
+        out.append(SubjectVertical(
+            name="yuri_core",
+            label="明确百合",
+            confidence=0.86,
+            evidence=[f"命中百合关键词：{', '.join(yuri_core[:3])}"],
+        ))
+    else:
+        yuri_adjacent = _contains_any(lower, ("轻百合", "輕百合", "女性主角", "女孩子", "女子", "girls band", "少女乐队"))
+        cute_daily = _contains_any(lower, ("日常", "治愈", "校园", "空气系", "萌系", "cute girls"))
+        if yuri_adjacent and cute_daily:
+            out.append(SubjectVertical(
+                name="yuri_adjacent",
+                label="百合邻近",
+                confidence=0.58,
+                evidence=[f"女性主角群像/轻百合信号：{', '.join((yuri_adjacent + cute_daily)[:4])}"],
+            ))
+
+    kirara = _contains_any(lower, ("芳文", "kirara", "きらら", "まんがタイム"))
+    if kirara:
+        out.append(SubjectVertical(
+            name="kirara",
+            label="芳文社/Kirara",
+            confidence=0.88,
+            evidence=[f"命中芳文/Kirara 关键词：{', '.join(kirara[:3])}"],
+        ))
+
+    cute = _contains_any(lower, ("日常", "治愈", "萌系", "空气系", "女子高生", "轻百合"))
+    if cute and not any(v.name == "kirara" for v in out):
+        out.append(SubjectVertical(
+            name="cute_girls_daily",
+            label="萌系日常",
+            confidence=0.55,
+            evidence=[f"命中日常/治愈/萌系标签：{', '.join(cute[:4])}"],
+        ))
+
+    data = _contains_any(lower, ("数据", "榜", "评分", "导视", "年度", "季度"))
+    if data:
+        out.append(SubjectVertical(
+            name="data_interest",
+            label="数据向导视",
+            confidence=0.62,
+            evidence=[f"查询/标签偏数据向：{', '.join(data[:3])}"],
+        ))
+
+    out.append(SubjectVertical(
+        name="mainstream_review",
+        label="泛用漫评",
+        confidence=0.45,
+        evidence=["默认保留泛用漫评源作为兜底，不代表该 UP 已覆盖具体作品。"],
+    ))
+    dedup: dict[str, SubjectVertical] = {}
+    for item in out:
+        old = dedup.get(item.name)
+        if old is None or item.confidence > old.confidence:
+            dedup[item.name] = item
+    return sorted(dedup.values(), key=lambda x: -x.confidence)
+
+
+def _guide_score(up: dict, intent: str, tags: list[str], verticals: list[SubjectVertical] | None = None) -> tuple[int, str, str]:
     score = 0
     reasons: list[str] = []
     if intent in up["intents"]:
@@ -309,20 +428,27 @@ def _guide_score(up: dict, intent: str, tags: list[str]) -> tuple[int, str, str]
         if inferred in up["intents"]:
             score += 2
             reasons.append(f"由标签推断适合 {inferred}")
-    confidence = "high" if score >= 5 else ("medium" if score >= 3 else "low")
+    for vertical in verticals or []:
+        if vertical.name in up.get("domains", set()):
+            add = max(1, round(vertical.confidence * 4))
+            score += add
+            reasons.append(f"圈层 {vertical.label}({vertical.confidence:.2f}) → {up['name']}")
+    confidence = "high" if score >= 7 else ("medium" if score >= 3 else "low")
     return score, "；".join(dict.fromkeys(reasons)) or "通用导视入口", confidence
 
 
 def _guide_links(query: str, intent: str, limit: int, tags: list[str] | None = None) -> list[GuideVideoLink]:
     q = query.strip()
     tags = tags or []
+    verticals = classify_subject_verticals(tags, title=q)
     ranked: list[tuple[int, int, GuideVideoLink]] = []
     for up in _GUIDE_UPS:
-        score, reason, confidence = _guide_score(up, intent, tags)
+        score, reason, confidence = _guide_score(up, intent, tags, verticals)
         if intent != "all" and score <= 0:
             continue
         keyword_tag = next((t for t in tags if t in up.get("tags", set())), "")
         keyword = " ".join([q, up["name"], keyword_tag or up["keywords"][0]]).strip()
+        route_verticals = [v for v in verticals if v.name in up.get("domains", set())]
         ranked.append((
             score,
             len(ranked),
@@ -334,10 +460,116 @@ def _guide_links(query: str, intent: str, limit: int, tags: list[str] | None = N
                 positioning=up["positioning"],
                 match_reason=reason,
                 confidence=confidence,
+                route_score=score,
+                verticals=route_verticals or verticals[:1],
+                verification_query=keyword,
+                verification_note="尚未验证具体视频命中，仅作为白名单导航入口。",
             ),
         ))
     ranked.sort(key=lambda x: (-x[0], x[1]))
     return [x[2] for x in ranked[:limit]]
+
+
+def _hit_relevance(raw: dict, *, up_name: str, aliases: list[str], tags: list[str], season_query: str = "") -> tuple[float, str]:
+    title = _clean_bili_title(raw.get("title") or "")
+    author = raw.get("author") or ""
+    title_key = _norm_video_text(title)
+    alias_keys = [_norm_video_text(x) for x in aliases if _norm_video_text(x)]
+    score = 0.0
+    reasons: list[str] = []
+    if author == up_name:
+        score += 0.35
+        reasons.append("UP 精确命中")
+    if any(k and (k in title_key or title_key in k) and min(len(k), len(title_key)) >= 4 for k in alias_keys):
+        score += 0.38
+        reasons.append("标题命中作品名")
+    season_key = _norm_video_text(season_query)
+    if season_key and season_key in title_key:
+        score += 0.22
+        reasons.append("标题命中季度查询")
+    guide_hits = [k for k in ("新番", "导视", "推荐", "评价", "杂谈", "百合", "芳文", "kirara", "きらら") if k.lower() in title.lower()]
+    if guide_hits:
+        score += min(0.18, 0.06 * len(guide_hits))
+        reasons.append("标题命中导视/圈层词：" + "、".join(guide_hits[:3]))
+    tag_hits = [t for t in tags if t and t.lower() in title.lower()]
+    if tag_hits:
+        score += min(0.12, 0.04 * len(tag_hits))
+        reasons.append("标题命中标签：" + "、".join(tag_hits[:3]))
+    return min(score, 1.0), "；".join(reasons) or "弱相关搜索结果"
+
+
+async def verify_guide_video_links(
+    query: str,
+    links: list[GuideVideoLink],
+    *,
+    title_aliases: list[str] | None = None,
+    tags: list[str] | None = None,
+    max_links: int = 2,
+    max_hits_per_link: int = 1,
+    min_confidence: float = 0.55,
+) -> list[GuideVideoLink]:
+    """对路由出的白名单 UP 做真实 B站搜索验证。
+
+    命中失败不删除导航入口，只把 verified=false 和 verification_note 暴露给前端，避免把"适合这个圈层"
+    误说成"这个 UP 已经讲过这部作品"。
+    """
+    tags = tags or []
+    aliases = [x for x in (title_aliases or []) if x]
+    verified_links = [link.model_copy(deep=True) for link in links]
+    for idx, link in enumerate(verified_links[:max_links]):
+        vertical_terms = [v.label for v in link.verticals[:2]]
+        search_query = " ".join(dict.fromkeys([*(aliases[:1] or [query]), link.up_name, *(vertical_terms or tags[:1])])).strip()
+        link.verification_query = search_query
+        try:
+            data = await _bili_search_async(search_query)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code != 412:
+                link.verification_note = f"B站搜索验证失败：HTTP {e.response.status_code}"
+                continue
+            try:
+                data = await asyncio.to_thread(_sync_bili_search, search_query)
+            except (httpx.HTTPError, httpx.TransportError, ValueError) as fallback_e:
+                link.verification_note = f"B站搜索验证失败：HTTP 412 / fallback {type(fallback_e).__name__}"
+                continue
+        except (httpx.HTTPError, httpx.TransportError, ValueError) as e:
+            link.verification_note = f"B站搜索验证失败：{type(e).__name__}"
+            continue
+
+        candidates: list[tuple[float, GuideVideoHit]] = []
+        for raw in ((data.get("data") or {}).get("result") or []):
+            author = raw.get("author") or ""
+            if author != link.up_name:
+                continue
+            url = raw.get("arcurl") or (f"https://www.bilibili.com/video/{raw.get('bvid')}" if raw.get("bvid") else "")
+            if not url:
+                continue
+            conf, reason = _hit_relevance(raw, up_name=link.up_name, aliases=aliases, tags=tags, season_query=query)
+            if conf < min_confidence:
+                continue
+            candidates.append((
+                conf,
+                GuideVideoHit(
+                    title=_clean_bili_title(raw.get("title") or ""),
+                    url=url.replace("http://", "https://"),
+                    aid=raw.get("aid") or raw.get("id"),
+                    bvid=raw.get("bvid"),
+                    author=author,
+                    play=raw.get("play"),
+                    danmaku=raw.get("video_review"),
+                    pubdate=raw.get("pubdate"),
+                    match_confidence=round(conf, 3),
+                    match_reason=reason,
+                ),
+            ))
+        candidates.sort(key=lambda x: -x[0])
+        link.verified_hits = [x[1] for x in candidates[:max_hits_per_link]]
+        link.verified = bool(link.verified_hits)
+        link.verification_note = (
+            f"已命中 {len(link.verified_hits)} 个白名单相关视频。"
+            if link.verified else
+            "未命中足够相关的具体视频，仅保留 UP/搜索入口。"
+        )
+    return verified_links
 
 
 def _whitelist_by_name() -> dict[str, dict]:

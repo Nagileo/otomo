@@ -16,6 +16,7 @@ from ...agent.contracts import Citation, Tool, ToolResult
 from ...memory import LongTermMemory
 from ...memory.consolidate import now_iso
 from ...memory.models import InboxItem, MemorySummary, WeeklyChannel, WeeklyDigestSubscription, WeeklyWebhookFormat, memory_summary
+from ...notifications import dispatch_weekly_digest_notifications
 from ...profile import compute_taste_profile
 from ..bangumi.client import SUBJECT_TYPE, BangumiClient
 from ..calendar.tool import AiringProgressArgs, AiringProgressItem, AiringProgressTool
@@ -37,12 +38,21 @@ class WatchItem(BaseModel):
     name: str
     date: str | None = None
     score: float | None = None
+    relation: str = ""
+    watch_role: Literal["main", "entry", "side", "alternate"] = "main"
+    necessity: Literal["required", "recommended", "optional", "skip"] = "recommended"
+    skip_advice: str = ""
+    episode_count: int | None = None
+    duration_hint: str = ""
 
 
 class WatchOrderResult(BaseModel):
     ip: str
     watch_order: list[WatchItem] = Field(default_factory=list)
-    side_stories: list[str] = Field(default_factory=list)  # 外传/世界观/剧场版，可选看
+    side_stories: list[WatchItem] = Field(default_factory=list)  # 外传/世界观/剧场版，可选看
+    alternate_routes: list[WatchItem] = Field(default_factory=list)
+    skip_candidates: list[WatchItem] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
 
 
 class WatchCopilotArgs(BaseModel):
@@ -103,6 +113,10 @@ class ConfigureWeeklyDigestArgs(BaseModel):
     weekday: int = Field(0, ge=0, le=6, description="0=Monday")
     hour: int = Field(9, ge=0, le=23)
     timezone: str = "Asia/Shanghai"
+    daily_enabled: bool | None = Field(None, description="每日追番提醒是否启用；不传则保持原值")
+    daily_hour: int | None = Field(None, ge=0, le=23, description="每日提醒小时；不传则保持原值")
+    daily_timezone: str | None = Field(None, description="每日提醒时区；不传则保持原值")
+    push_grading: Literal["brief", "normal", "detailed"] = Field("normal", description="推送内容粒度")
     limit: int = Field(8, ge=3, le=20)
     include_on_hold: bool = True
     channels: list[WeeklyChannel] = Field(
@@ -113,8 +127,11 @@ class ConfigureWeeklyDigestArgs(BaseModel):
     webhook_url: str = Field("", description="webhook 渠道 URL")
     webhook_format: WeeklyWebhookFormat = Field(
         "generic",
-        description="webhook 格式：generic=Otomo JSON，serverchan=Server酱 Turbo，telegram=Telegram sendMessage",
+        description="webhook 格式：generic/serverchan/telegram/discord/feishu",
     )
+    web_push_endpoint: str = Field("", description="Web Push endpoint；HTTPS 部署后由浏览器订阅写入")
+    web_push_p256dh: str = Field("", description="Web Push p256dh key")
+    web_push_auth: str = Field("", description="Web Push auth secret")
 
 
 class WeeklyDigestMemoryResult(BaseModel):
@@ -129,6 +146,7 @@ class GenerateWeeklyDigestNowArgs(BaseModel):
     limit: int = Field(8, ge=3, le=20)
     include_on_hold: bool = True
     mark_unread: bool = True
+    dispatch: bool = Field(False, description="是否按当前订阅渠道真实发送，用于测试 webhook/email")
 
 
 class WeeklyDigestInboxArgs(BaseModel):
@@ -180,6 +198,23 @@ def _eps(item: dict) -> int | None:
     return n if n > 0 else None
 
 
+def _watch_metadata(name: str, relation: str, role: str, eps: int | None) -> tuple[str, str, str]:
+    text = f"{name} {relation}".lower()
+    if any(k.lower() in text for k in ("总集篇", "recap", "総集編", "summary")):
+        return "skip", "总集篇/回顾性质，通常可跳过，除非你想复习剧情。", "回顾/总集篇"
+    if any(k.lower() in text for k in ("ova", "oad", "sp", "番外", "外传", "特典", "special")) or role == "side":
+        hint = "可选补充"
+        if eps:
+            hint = f"{eps} 集左右的可选补充"
+        return "optional", "番外/OVA/OAD/外传通常不影响主线理解，看完主线后按兴趣补。", hint
+    if any(k in text for k in ("剧场版", "映画", "movie")):
+        return "recommended", "剧场版可能是主线续作、总集篇或外传；按 relation 和上映时间判断，建议看前确认是否承接主线。", "剧场版/长篇"
+    if role in {"entry", "main"}:
+        hint = f"{eps} 集" if eps else "主线条目"
+        return "required", "主线/前传/续作，建议按顺序观看。", hint
+    return "recommended", "关系边不足以判定必要性，建议按日期和 relation 参考。", f"{eps} 集" if eps else ""
+
+
 async def _resolve_username(client: BangumiClient, username: str | None) -> str:
     if username:
         return username
@@ -221,9 +256,10 @@ class WatchOrderTool(Tool):
         sid = seed["id"]
         ip = seed.get("name_cn") or seed.get("name")
 
-        # BFS 沿系列边收集整条观看线；同时记旁支
+        # BFS 沿系列边收集整条观看线；同时记旁支/不同演绎，供补番路线面板分栏展示。
         members: dict[int, dict] = {sid: seed}
-        side: list[str] = []
+        side_map: dict[int, dict] = {}
+        alternate_map: dict[int, dict] = {}
         queue, visited = [sid], {sid}
         while queue and len(visited) < _MAX_SERIES:
             rels = await self.client.get_subject_relations(queue.pop(0))
@@ -236,33 +272,113 @@ class WatchOrderTool(Tool):
                     queue.append(rid)
                     members[rid] = r
                 elif rel in _SIDE_REL:
-                    nm = r.get("name_cn") or r.get("name")
-                    if nm and nm not in side:
-                        side.append(nm)
+                    side_map.setdefault(rid, r)
+                elif rel in {"不同演绎", "重制", "再编集"}:
+                    alternate_map.setdefault(rid, r)
 
         # relations 不带 date → 补 get_subject 拿年份/评分，再按年份排观看顺序
-        rows: list[dict] = []
-        for mid, m in members.items():
-            date, score = m.get("date"), None
+        async def row_of(mid: int, m: dict, *, role: str, relation: str = "") -> dict:
+            date, score, eps = m.get("date"), None, _eps(m)
+            raw = None
             if not date:
                 try:
                     raw = await self.client.get_subject(mid)
                     date, score = raw.get("date"), (raw.get("rating") or {}).get("score")
+                    eps = eps or _eps(raw)
                 except Exception:  # noqa: BLE001
                     pass
-            rows.append({"id": mid, "name": m.get("name_cn") or m.get("name"), "date": date, "score": score})
+            name = m.get("name_cn") or m.get("name") or (raw and (raw.get("name_cn") or raw.get("name"))) or f"subject {mid}"
+            rel = relation or m.get("relation") or ""
+            necessity, skip_advice, duration_hint = _watch_metadata(name, rel, role, eps)
+            return {
+                "id": mid,
+                "name": name,
+                "date": date,
+                "score": score,
+                "relation": rel,
+                "role": role,
+                "necessity": necessity,
+                "skip_advice": skip_advice,
+                "episode_count": eps,
+                "duration_hint": duration_hint,
+            }
+
+        rows = [await row_of(mid, m, role="main") for mid, m in members.items()]
         rows.sort(key=lambda x: x["date"] or "9999")  # 无日期的沉底
 
         order = [
-            WatchItem(order=i + 1, id=r["id"], name=r["name"], date=r["date"], score=r["score"])
+            WatchItem(
+                order=i + 1,
+                id=r["id"],
+                name=r["name"],
+                date=r["date"],
+                score=r["score"],
+                relation=r.get("relation") or "",
+                watch_role="entry" if i == 0 else "main",
+                necessity=r["necessity"],
+                skip_advice=r["skip_advice"],
+                episode_count=r["episode_count"],
+                duration_hint=r["duration_hint"],
+            )
             for i, r in enumerate(rows)
         ]
+        side_rows = [await row_of(mid, m, role="side", relation=m.get("relation") or "") for mid, m in side_map.items()]
+        side_rows.sort(key=lambda x: x["date"] or "9999")
+        sides = [
+            WatchItem(
+                order=i + 1,
+                id=r["id"],
+                name=r["name"],
+                date=r["date"],
+                score=r["score"],
+                relation=r.get("relation") or "外传",
+                watch_role="side",
+                necessity=r["necessity"],
+                skip_advice=r["skip_advice"],
+                episode_count=r["episode_count"],
+                duration_hint=r["duration_hint"],
+            )
+            for i, r in enumerate(side_rows[:8])
+        ]
+        alt_rows = [await row_of(mid, m, role="alternate", relation=m.get("relation") or "") for mid, m in alternate_map.items()]
+        alt_rows.sort(key=lambda x: x["date"] or "9999")
+        alternates = [
+            WatchItem(
+                order=i + 1,
+                id=r["id"],
+                name=r["name"],
+                date=r["date"],
+                score=r["score"],
+                relation=r.get("relation") or "不同演绎",
+                watch_role="alternate",
+                necessity=r["necessity"],
+                skip_advice=r["skip_advice"],
+                episode_count=r["episode_count"],
+                duration_hint=r["duration_hint"],
+            )
+            for i, r in enumerate(alt_rows[:8])
+        ]
+        skip_candidates = [x for x in order + sides + alternates if x.necessity == "skip"]
+        notes = [
+            "主线按 Bangumi 关系边和播出日期排序；没有日期的条目沉底。",
+            "外传/番外/世界观分支不强制排进主线，适合看完入口后按兴趣补。",
+            "必要性是基于 Bangumi relation、标题关键词和集数的启发式判断；总集篇/OVA/OAD/番外会标为可跳过或可选。",
+        ]
+        if alternates:
+            notes.append("不同演绎/重制作为替代路线展示，不默认替换主线。")
         return ToolResult(
             ok=True,
-            data=WatchOrderResult(ip=ip, watch_order=order, side_stories=side[:5]),
+            data=WatchOrderResult(
+                ip=ip,
+                watch_order=order,
+                side_stories=sides,
+                alternate_routes=alternates,
+                skip_candidates=skip_candidates[:8],
+                notes=notes,
+            ),
             sources=[
                 Citation(title=w.name, url=f"https://bgm.tv/subject/{w.id}", source="bangumi")
-                for w in order[:5]
+                for w in (order + sides + alternates)[:5]
             ],
         )
 
@@ -511,24 +627,33 @@ class ConfigureWeeklyDigestTool(Tool):
     async def run(self, args: ConfigureWeeklyDigestArgs) -> ToolResult[WeeklyDigestMemoryResult]:
         username = await _resolve_username(self.client, args.username)
         mem = self.ltm.load_user(username)
+        old = mem.weekly_digest_subscription
         mem.weekly_digest_subscription = WeeklyDigestSubscription(
             enabled=args.enabled,
             weekday=args.weekday,
             hour=args.hour,
             timezone=args.timezone,
+            daily_enabled=old.daily_enabled if args.daily_enabled is None else args.daily_enabled,
+            daily_hour=old.daily_hour if args.daily_hour is None else args.daily_hour,
+            daily_timezone=old.daily_timezone if args.daily_timezone is None else args.daily_timezone,
+            push_grading=args.push_grading or old.push_grading,
             limit=args.limit,
             include_on_hold=args.include_on_hold,
             channels=list(dict.fromkeys(args.channels or ["inbox"])),
-            email=args.email.strip() or mem.weekly_digest_subscription.email,
-            webhook_url=args.webhook_url.strip() or mem.weekly_digest_subscription.webhook_url,
-            webhook_format=args.webhook_format or mem.weekly_digest_subscription.webhook_format,
-            last_delivery=mem.weekly_digest_subscription.last_delivery,
-            last_run_key=mem.weekly_digest_subscription.last_run_key,
-            daily_last_run_key=mem.weekly_digest_subscription.daily_last_run_key,
+            email=args.email.strip() or old.email,
+            webhook_url=args.webhook_url.strip() or old.webhook_url,
+            webhook_format=args.webhook_format or old.webhook_format,
+            web_push_endpoint=args.web_push_endpoint.strip() or old.web_push_endpoint,
+            web_push_p256dh=args.web_push_p256dh.strip() or old.web_push_p256dh,
+            web_push_auth=args.web_push_auth.strip() or old.web_push_auth,
+            last_delivery=old.last_delivery,
+            last_run_key=old.last_run_key,
+            daily_last_run_key=old.daily_last_run_key,
             updated_at=now_iso(),
         )
         self.ltm.save_user(mem)
-        message = "已开启周报订阅。" if args.enabled else "已关闭周报订阅。"
+        daily_msg = "每日提醒开启" if mem.weekly_digest_subscription.daily_enabled else "每日提醒关闭"
+        message = ("已开启周报订阅。" if args.enabled else "已关闭周报订阅。") + f" {daily_msg}。"
         return ToolResult(
             ok=True,
             data=WeeklyDigestMemoryResult(
@@ -559,7 +684,13 @@ class GenerateWeeklyDigestNowTool(Tool):
         if not res.ok or res.data is None:
             return ToolResult(ok=False, error=res.error or "周报生成失败")
         mem = self.ltm.load_user(username)
-        mem.inbox.append(_digest_inbox_item(res.data, unread=args.mark_unread))
+        item = _digest_inbox_item(res.data, unread=args.mark_unread)
+        if args.dispatch:
+            deliveries = await dispatch_weekly_digest_notifications(username, mem.weekly_digest_subscription, item)
+            item.payload["deliveries"] = deliveries
+            mem.weekly_digest_subscription.last_delivery = deliveries[-8:]
+            mem.weekly_digest_subscription.updated_at = now_iso()
+        mem.inbox.append(item)
         mem.inbox = mem.inbox[-30:]
         self.ltm.save_user(mem)
         return ToolResult(

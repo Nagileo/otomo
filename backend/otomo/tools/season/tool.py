@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import asyncio
+import math
+from datetime import date
 from typing import Literal
 from urllib.parse import quote
 
@@ -17,13 +19,17 @@ from ...profile import compute_taste_profile
 from .._concurrency import gather_limited
 from ..bangumi.client import SUBJECT_TYPE, BangumiClient
 from ..bangumi.models import SubjectBrief
+from ..calendar.tool import BroadcastCalendarArgs, BroadcastCalendarTool
+from ..discovery.tool import GetTrendingSubjectsTool, TrendingArgs
 from ..videos.tool import (
     BiliGuideSearchArgs,
     BiliVideoCommentsArgs,
     GetBiliVideoCommentsTool,
     GuideVideoLink,
     SearchBiliGuideVideosTool,
+    SubjectVertical,
     _guide_links,
+    verify_guide_video_links,
 )
 from ..yuc.tool import ListYucSeasonTool, YucAnime, YucSeasonArgs
 
@@ -60,6 +66,10 @@ class YearAnimeArgs(BaseModel):
 class SeasonGuideBriefArgs(BaseModel):
     year: int = Field(..., description="年份，如 2026")
     month: Literal[1, 4, 7, 10] = Field(..., description="季度起始月：1/4/7/10")
+    mode: Literal["guide", "hot"] = Field(
+        "guide",
+        description="guide=按用户口味导视排序；hot=优先看本季热播/讨论热度，再结合口味重排",
+    )
     limit: int = Field(10, ge=1, le=20)
     username: str | None = Field(None, description="Bangumi 用户名；不传则尝试当前账号，失败就做非个性化导视")
     focus_tags: list[str] | None = Field(None, description="用户临时偏好，如 ['百合','日常','治愈']")
@@ -70,6 +80,8 @@ class SeasonGuideBriefArgs(BaseModel):
     )
     comment_video_limit: int = Field(2, ge=1, le=3, description="最多读取几个导视视频的评论")
     comment_limit: int = Field(20, ge=5, le=50, description="每个导视视频最多读取多少条评论")
+    verify_guide_videos: bool = Field(True, description="是否对路由出的白名单 UP 做真实 B站视频命中验证")
+    guide_verify_limit: int = Field(2, ge=0, le=4, description="每部番最多验证几个导视源；0 表示只做路由不搜索")
 
 
 class GuideLink(BaseModel):
@@ -111,6 +123,15 @@ class SeasonGuideItem(BaseModel):
     fit: Literal["strong", "maybe", "wait", "unknown"] = "unknown"
     reason: str = ""
     evidence: list[str] = Field(default_factory=list)
+    hotness: float = 0.0
+    hotness_level: Literal["none", "warm", "hot", "surge"] = "none"
+    doing: int | None = None
+    trending_rank: int | None = None
+    trending_collects: int | None = None
+    episode_comment_avg: float | None = None
+    episode_comment_peak: int | None = None
+    hotness_evidence: list[str] = Field(default_factory=list)
+    verticals: list[SubjectVertical] = Field(default_factory=list)
     guide_videos: list[GuideVideoLink] = Field(default_factory=list)
     official_url: str | None = None
     pv_url: str | None = None
@@ -131,6 +152,7 @@ class GuideCommentDigest(BaseModel):
 
 class SeasonGuideBriefResult(BaseModel):
     season: str
+    mode: Literal["guide", "hot"] = "guide"
     count: int
     personalized: bool = False
     profile_tags: list[str] = Field(default_factory=list)
@@ -139,6 +161,17 @@ class SeasonGuideBriefResult(BaseModel):
     guide_videos: list[GuideVideoLink] = Field(default_factory=list)
     guide_comment_digests: list[GuideCommentDigest] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
+
+
+class HotSignals(BaseModel):
+    doing: int | None = None
+    trending_rank: int | None = None
+    trending_collects: int | None = None
+    episode_comment_avg: float | None = None
+    episode_comment_peak: int | None = None
+    hotness: float = 0.0
+    level: Literal["none", "warm", "hot", "surge"] = "none"
+    evidence: list[str] = Field(default_factory=list)
 
 
 def _norm_title(value: str | None) -> str:
@@ -286,6 +319,94 @@ class SeasonGuideBriefTool(Tool):
         self._bili_search_tool = SearchBiliGuideVideosTool()
         self._bili_comments_tool = GetBiliVideoCommentsTool()
 
+    async def _hot_signal_maps(self, subjects: list[SubjectBrief]) -> dict[int, HotSignals]:
+        signals: dict[int, HotSignals] = {s.id: HotSignals() for s in subjects}
+        if not subjects:
+            return signals
+
+        async def calendar_map() -> dict[int, int]:
+            out: dict[int, int] = {}
+            try:
+                res = await BroadcastCalendarTool(self.client).run(BroadcastCalendarArgs(day="week", only_mine=False))
+            except Exception:  # noqa: BLE001
+                return out
+            if not res.ok or not res.data:
+                return out
+            for day in res.data.days:
+                for item in day.items:
+                    if item.id and item.doing is not None:
+                        out[int(item.id)] = int(item.doing)
+            return out
+
+        async def trending_map() -> dict[int, tuple[int, int | None]]:
+            out: dict[int, tuple[int, int | None]] = {}
+            try:
+                res = await GetTrendingSubjectsTool().run(TrendingArgs(subject_type="anime", limit=24))
+            except Exception:  # noqa: BLE001
+                return out
+            if not res.ok or not res.data:
+                return out
+            for idx, item in enumerate(res.data.items, start=1):
+                out[int(item.id)] = (idx, item.collects)
+            return out
+
+        async def episode_stats(subject_id: int) -> tuple[int, float | None, int | None]:
+            try:
+                raw = await self.client.get_episodes(subject_id, ep_type=0, limit=80)
+            except Exception:  # noqa: BLE001
+                return subject_id, None, None
+            counts = []
+            today = date.today().isoformat()
+            for row in raw.get("data") or []:
+                air = row.get("airdate") or ""
+                if air and air > today:
+                    continue
+                value = row.get("comment") or 0
+                try:
+                    counts.append(int(value))
+                except (TypeError, ValueError):
+                    continue
+            if not counts:
+                return subject_id, None, None
+            return subject_id, round(sum(counts) / max(len(counts), 1), 2), max(counts)
+
+        cal_res, trend_res, ep_res = await asyncio.gather(
+            calendar_map(),
+            trending_map(),
+            gather_limited([episode_stats(s.id) for s in subjects], host="bangumi"),
+        )
+        max_doing = max(cal_res.values(), default=0)
+        avg_values = [x[1] for x in ep_res if not isinstance(x, Exception) and x[1] is not None]
+        max_avg = max(avg_values, default=0.0)
+        for sid, sig in signals.items():
+            doing = cal_res.get(sid)
+            if doing is not None:
+                sig.doing = doing
+                sig.evidence.append(f"Bangumi 日历 doing {doing}")
+            if sid in trend_res:
+                rank, collects = trend_res[sid]
+                sig.trending_rank = rank
+                sig.trending_collects = collects
+                sig.evidence.append(f"Bangumi trending 第 {rank} 位")
+            for row in ep_res:
+                if isinstance(row, Exception):
+                    continue
+                ep_sid, avg, peak = row
+                if ep_sid == sid:
+                    sig.episode_comment_avg = avg
+                    sig.episode_comment_peak = peak
+                    if peak is not None:
+                        sig.evidence.append(f"分集讨论峰值 {peak} 条")
+                    break
+            doing_norm = math.log1p(doing or 0) / math.log1p(max_doing) if max_doing else 0.0
+            trend_norm = 0.0
+            if sig.trending_rank:
+                trend_norm = max(0.0, 1.0 - ((sig.trending_rank - 1) / 24.0))
+            disc_norm = math.log1p(sig.episode_comment_avg or 0) / math.log1p(max_avg) if max_avg else 0.0
+            sig.hotness = round(0.5 * doing_norm + 0.3 * trend_norm + 0.2 * disc_norm, 4)
+            sig.level = "surge" if sig.hotness >= 0.78 else "hot" if sig.hotness >= 0.55 else "warm" if sig.hotness >= 0.25 else "none"
+        return signals
+
     async def _profile_tags(self, username: str | None) -> tuple[bool, list[str]]:
         try:
             user = username
@@ -363,6 +484,7 @@ class SeasonGuideBriefTool(Tool):
         yuc_items = yuc_res.data.anime if yuc_res.ok and yuc_res.data else []
         personalized, profile_tags = await self._profile_tags(args.username)
         wanted = list(dict.fromkeys((args.focus_tags or []) + profile_tags))
+        hot_signals = await self._hot_signal_maps(season.anime[: args.limit])
 
         async def build_item(subject: SubjectBrief) -> SeasonGuideItem:
             yuc, match_confidence, matched_by = _match_yuc(subject, yuc_items)
@@ -377,6 +499,27 @@ class SeasonGuideBriefTool(Tool):
             tags = _unique((yuc.tags if yuc else []) + bangumi_tags)
             fit, match_tags, reason, fit_score = _fit_item(tags, subject.score, wanted)
             item_guides = _guide_links(subject.name_cn or subject.name, "review", 3, tags)
+            if args.verify_guide_videos and args.guide_verify_limit > 0:
+                item_guides = await verify_guide_video_links(
+                    subject.name_cn or subject.name,
+                    item_guides,
+                    title_aliases=_unique([
+                        subject.name_cn or "",
+                        subject.name or "",
+                        yuc.title_cn if yuc else "",
+                        yuc.title_jp if yuc else "",
+                    ]),
+                    tags=tags,
+                    max_links=args.guide_verify_limit,
+                    max_hits_per_link=1,
+                )
+            vertical_map: dict[str, SubjectVertical] = {}
+            for link in item_guides:
+                for vertical in link.verticals:
+                    old = vertical_map.get(vertical.name)
+                    if old is None or vertical.confidence > old.confidence:
+                        vertical_map[vertical.name] = vertical
+            hot = hot_signals.get(subject.id) or HotSignals()
             return SeasonGuideItem(
                 subject_id=subject.id,
                 title=subject.name_cn or subject.name,
@@ -394,7 +537,16 @@ class SeasonGuideBriefTool(Tool):
                 fit_score=fit_score,
                 fit=fit,
                 reason=reason,
-                evidence=_evidence(subject, yuc, match_tags, fit, match_confidence),
+                evidence=_evidence(subject, yuc, match_tags, fit, match_confidence) + hot.evidence[:3],
+                hotness=hot.hotness,
+                hotness_level=hot.level,
+                doing=hot.doing,
+                trending_rank=hot.trending_rank,
+                trending_collects=hot.trending_collects,
+                episode_comment_avg=hot.episode_comment_avg,
+                episode_comment_peak=hot.episode_comment_peak,
+                hotness_evidence=hot.evidence,
+                verticals=sorted(vertical_map.values(), key=lambda x: -x.confidence),
                 guide_videos=item_guides,
                 official_url=yuc.official_url if yuc else None,
                 pv_url=yuc.pv_url if yuc else None,
@@ -405,7 +557,10 @@ class SeasonGuideBriefTool(Tool):
         item_results = await gather_limited([build_item(subject) for subject in season.anime[: args.limit]], host="bangumi")
         items = [item for item in item_results if isinstance(item, SeasonGuideItem)]
         dropped = len(item_results) - len(items)
-        items.sort(key=lambda x: (-_fit_rank(x.fit), -x.fit_score, -(x.bangumi_score or 0)))
+        if args.mode == "hot":
+            items.sort(key=lambda x: (-(x.hotness * 0.7 + min(x.fit_score / 8.0, 1.0) * 0.3), -x.hotness, -(x.bangumi_score or 0)))
+        else:
+            items.sort(key=lambda x: (-_fit_rank(x.fit), -x.fit_score, -x.hotness, -(x.bangumi_score or 0)))
 
         guide_query = f"{args.year}年{args.month}月 新番导视"
         guide_comment_digests = (
@@ -415,14 +570,26 @@ class SeasonGuideBriefTool(Tool):
             if args.include_video_comments
             else []
         )
+        season_guide_links = _guide_links(guide_query, "season", 6, wanted)
+        if args.verify_guide_videos and args.guide_verify_limit > 0:
+            season_guide_links = await verify_guide_video_links(
+                guide_query,
+                season_guide_links,
+                title_aliases=[guide_query, f"{args.year}年{args.month}月新番"],
+                tags=wanted,
+                max_links=min(3, args.guide_verify_limit + 1),
+                max_hits_per_link=1,
+                min_confidence=0.5,
+            )
         result = SeasonGuideBriefResult(
             season=season.season,
+            mode=args.mode,
             count=len(items),
             personalized=personalized,
             profile_tags=profile_tags,
             focus_tags=args.focus_tags or [],
             items=items,
-            guide_videos=_guide_links(guide_query, "season", 6, wanted),
+            guide_videos=season_guide_links,
             guide_comment_digests=guide_comment_digests,
             notes=[
                 "Bangumi 提供条目/评分/收藏锚点，yuc 提供放送表/官网/PV/制作阵容。",
@@ -431,6 +598,11 @@ class SeasonGuideBriefTool(Tool):
                     "B站导视评论已抽样读取；它们是话语源，不是事实源，且可能包含剧透/玩梗。"
                     if guide_comment_digests else
                     "B站导视默认仅返回白名单 UP 搜索入口；需要观众期待/担心点时可启用 include_video_comments。"
+                ),
+                (
+                    "hot 模式已融合 Bangumi doing / trending / 分集讨论量；热度是追番参考，不等于质量。"
+                    if args.mode == "hot" else
+                    "guide 模式优先口味分诊；热度字段仍会附带给前端作为徽章。"
                 ),
                 *(
                     [f"有 {dropped} 部条目在并发补全时失败被跳过，本季清单可能不完整。"]

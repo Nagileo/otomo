@@ -23,7 +23,7 @@ from ..auth import AuthStore, BangumiToken, build_authorization_url, exchange_oa
 from ..config import settings
 from ..memory import LongTermMemory
 from ..memory.consolidate import now_iso
-from ..memory.models import VisualFeedbackItem, VisualFeedbackSignal, memory_summary
+from ..memory.models import VisualFeedbackItem, VisualFeedbackSignal, WeeklyChannel, WeeklyDigestSubscription, WeeklyWebhookFormat, memory_summary
 from ..obs import append_visual_feedback, traced_stream
 from ..factory import build_registry
 from ..quota import (
@@ -41,6 +41,7 @@ from ..agent.plan_execute import PlanExecuteRunner
 from ..agent.react import ReActRunner
 from ..tools.bangumi.client import SUBJECT_TYPE, BangumiClient
 from ..tools.moegirl.client import MoegirlClient
+from ..tools.watchorder.tool import GenerateWeeklyDigestNowArgs, GenerateWeeklyDigestNowTool
 
 
 @asynccontextmanager
@@ -202,6 +203,32 @@ class RenameSessionRequest(BaseModel):
     auth_session_id: str | None = None
 
 
+class NotificationSubscriptionUpdate(BaseModel):
+    enabled: bool | None = None
+    weekday: int | None = Field(None, ge=0, le=6)
+    hour: int | None = Field(None, ge=0, le=23)
+    timezone: str | None = None
+    daily_enabled: bool | None = None
+    daily_hour: int | None = Field(None, ge=0, le=23)
+    daily_timezone: str | None = None
+    push_grading: Literal["brief", "normal", "detailed"] | None = None
+    limit: int | None = Field(None, ge=3, le=20)
+    include_on_hold: bool | None = None
+    channels: list[WeeklyChannel] | None = None
+    email: str | None = None
+    webhook_url: str | None = None
+    webhook_format: WeeklyWebhookFormat | None = None
+    web_push_endpoint: str | None = None
+    web_push_p256dh: str | None = None
+    web_push_auth: str | None = None
+
+
+class NotificationTestRequest(BaseModel):
+    auth_session_id: str | None = None
+    kind: Literal["weekly"] = "weekly"
+    dispatch: bool = True
+
+
 def _set_auth_cookies(response: Response, session) -> None:
     max_age = max(int(settings.session_ttl_seconds), 60)
     response.set_cookie(
@@ -310,6 +337,87 @@ async def weekly_run_due(request: Request, response: Response) -> dict[str, Any]
     _require_csrf(request, session.auth_session_id)
     count = await app.state.weekly_service.run_due_once()
     return {"ok": True, "generated": count}
+
+
+def _subscription_public(sub: WeeklyDigestSubscription) -> dict[str, Any]:
+    return sub.model_dump(mode="json")
+
+
+@app.get("/notifications/subscription")
+async def get_notification_subscription(request: Request, response: Response) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    identity = _authenticated_identity(session.auth_session_id)
+    username = identity.username or str(identity.user_id or "")
+    mem = app.state.ltm.load_user(username)
+    return {
+        "ok": True,
+        "username": username,
+        "subscription": _subscription_public(mem.weekly_digest_subscription),
+        "memory": memory_summary(mem).model_dump(mode="json"),
+        "notes": [
+            "本地运行时只有 backend 常驻才会推送；部署到服务器后才适合 24/7 主动提醒。",
+            "Web Push 需要 HTTPS、service worker 和浏览器订阅；当前 API 只保存订阅字段。",
+        ],
+    }
+
+
+@app.put("/notifications/subscription")
+async def update_notification_subscription(
+    req: NotificationSubscriptionUpdate,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    identity = _authenticated_identity(session.auth_session_id)
+    username = identity.username or str(identity.user_id or "")
+    mem = app.state.ltm.load_user(username)
+    sub = mem.weekly_digest_subscription.model_copy(deep=True)
+    updates = req.model_dump(exclude_unset=True)
+    if "channels" in updates:
+        updates["channels"] = list(dict.fromkeys(updates.get("channels") or ["inbox"]))
+    for key, value in updates.items():
+        if isinstance(value, str):
+            value = value.strip()
+        setattr(sub, key, value)
+    sub.updated_at = now_iso()
+    mem.weekly_digest_subscription = sub
+    app.state.ltm.save_user(mem)
+    return {
+        "ok": True,
+        "username": username,
+        "subscription": _subscription_public(sub),
+        "memory": memory_summary(mem).model_dump(mode="json"),
+    }
+
+
+@app.post("/notifications/test")
+async def test_notification_subscription(
+    req: NotificationTestRequest,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response, req.auth_session_id)
+    _require_csrf(request, session.auth_session_id)
+    identity = _authenticated_identity(session.auth_session_id)
+    username = identity.username or str(identity.user_id or "")
+    client = await _request_client(app, session.auth_session_id)
+    try:
+        tool = GenerateWeeklyDigestNowTool(client, app.state.ltm)
+        res = await tool.run(GenerateWeeklyDigestNowArgs(username=username, dispatch=req.dispatch))
+    finally:
+        if hasattr(client, "aclose"):
+            await client.aclose()
+    if not res.ok:
+        raise HTTPException(status_code=500, detail=res.error or "测试推送失败")
+    mem = app.state.ltm.load_user(username)
+    return {
+        "ok": True,
+        "username": username,
+        "subscription": _subscription_public(mem.weekly_digest_subscription),
+        "inbox": [x.model_dump(mode="json") for x in mem.inbox[-6:]],
+        "memory": memory_summary(mem).model_dump(mode="json"),
+    }
 
 
 @app.get("/auth/bangumi/login")

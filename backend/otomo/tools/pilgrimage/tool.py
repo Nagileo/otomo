@@ -35,7 +35,8 @@ class PilgrimageArgs(BaseModel):
 class PilgrimagePoint(BaseModel):
     model_config = ConfigDict(extra="ignore")
     name: str
-    episode: int | None = None
+    # anitabi may return either numeric episode sorts or labels like "EP3".
+    episode: int | str | None = None
     second: int | None = None
     lat: float | None = None
     lng: float | None = None
@@ -87,6 +88,13 @@ def _gmaps(lat: Any, lng: Any) -> str:
         return f"https://www.google.com/maps?q={float(lat)},{float(lng)}"
     except (TypeError, ValueError):
         return ""
+
+
+def _episode_label(value: int | str | None) -> str:
+    if value is None or value == "":
+        return ""
+    raw = str(value).strip()
+    return raw if raw.lower().startswith("ep") else f"ep{raw}"
 
 
 def _city_match(query: str, city: str) -> bool:
@@ -324,7 +332,12 @@ class GetPilgrimageMapTool(Tool):
         )
         sources = [Citation(title=f"anitabi — {result.title} 巡礼地图", url=result.map_url, source="anitabi", image=lite.get("cover"))]
         sources.extend(
-            Citation(title=f"{pt.name}（ep{pt.episode}）", url=pt.google_maps_url or result.map_url, source="anitabi", image=pt.image)
+            Citation(
+                title=f"{pt.name}（{_episode_label(pt.episode)}）" if _episode_label(pt.episode) else pt.name,
+                url=pt.google_maps_url or result.map_url,
+                source="anitabi",
+                image=pt.image,
+            )
             for pt in points[:4]
         )
         return ToolResult(ok=True, data=result, sources=sources)

@@ -59,6 +59,29 @@ def test_digest_text_uses_action_and_why_fields():
     assert "把队列加入计划板" in text
 
 
+def test_digest_text_honors_push_grading_brief():
+    item = InboxItem(
+        id="x",
+        title="每日提醒",
+        payload={
+            "push_grading": "brief",
+            "sections": [
+                {
+                    "title": "追番",
+                    "items": [{"name": f"番{i}", "action": f"看第 {i} 集"} for i in range(6)],
+                    "notes": ["只应该保留第一条 note", "这条 brief 不展示"],
+                }
+            ],
+        },
+        created_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
+    )
+    text = digest_text(item)
+    assert "番0" in text and "番2" in text
+    assert "番3" not in text
+    assert "只应该保留第一条 note" in text
+    assert "这条 brief 不展示" not in text
+
+
 def test_telegram_webhook_url_can_carry_chat_id():
     sub = WeeklyDigestSubscription(webhook_format="telegram", webhook_url="https://api.telegram.org/botTOKEN/sendMessage?chat_id=42")
     endpoint, payload = _telegram_endpoint_and_payload(sub.webhook_url, "hello")

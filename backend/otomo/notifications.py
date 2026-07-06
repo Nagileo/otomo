@@ -23,17 +23,20 @@ from .memory.models import InboxItem, WeeklyDigestSubscription
 def digest_text(item: InboxItem) -> str:
     payload = item.payload or {}
     lines = [item.title]
+    grade = str(payload.get("push_grading") or "normal")
+    item_limit = 3 if grade == "brief" else 8 if grade == "normal" else 12
+    note_limit = 1 if grade == "brief" else 3 if grade == "normal" else 5
     for section in payload.get("sections") or []:
         title = section.get("title") or "Section"
         lines.append(f"\n## {title}")
-        for row in (section.get("items") or [])[:8]:
+        for row in (section.get("items") or [])[:item_limit]:
             name = row.get("name") or row.get("title") or row.get("subject_name") or "未命名条目"
             why = row.get("why") or row.get("reasons") or []
             reason = row.get("reason") or row.get("note") or row.get("action") or ""
             if not reason and why:
                 reason = "；".join(str(x) for x in why[:2])
             lines.append(f"- {name}" + (f"：{reason}" if reason else ""))
-        for note in (section.get("notes") or [])[:3]:
+        for note in (section.get("notes") or [])[:note_limit]:
             lines.append(f"  - {note}")
     next_actions = payload.get("next_actions") or []
     if next_actions:
@@ -53,6 +56,26 @@ def _telegram_endpoint_and_payload(url: str, text: str) -> tuple[str, dict[str, 
     return endpoint, payload
 
 
+def _chunks(text: str, limit: int) -> list[str]:
+    if len(text) <= limit:
+        return [text]
+    chunks: list[str] = []
+    cur: list[str] = []
+    cur_len = 0
+    for line in text.splitlines():
+        part_len = len(line) + 1
+        if cur and cur_len + part_len > limit:
+            chunks.append("\n".join(cur))
+            cur = [line]
+            cur_len = part_len
+        else:
+            cur.append(line)
+            cur_len += part_len
+    if cur:
+        chunks.append("\n".join(cur))
+    return chunks
+
+
 async def _send_webhook(username: str, sub: WeeklyDigestSubscription, item: InboxItem) -> dict[str, Any]:
     if not sub.webhook_url:
         return {"channel": "webhook", "ok": False, "error": "webhook_url empty", "ts": now_iso()}
@@ -65,6 +88,19 @@ async def _send_webhook(username: str, sub: WeeklyDigestSubscription, item: Inbo
             elif fmt == "telegram":
                 endpoint, payload = _telegram_endpoint_and_payload(sub.webhook_url, text)
                 resp = await client.post(endpoint, json=payload)
+            elif fmt == "discord":
+                # Discord webhook content limit is 2000 chars; split instead of silently truncating.
+                responses = []
+                for chunk in _chunks(text, 1900)[:5]:
+                    responses.append(await client.post(sub.webhook_url, json={"content": chunk}))
+                for r in responses:
+                    r.raise_for_status()
+                resp = responses[-1]
+            elif fmt == "feishu":
+                resp = await client.post(
+                    sub.webhook_url,
+                    json={"msg_type": "text", "content": {"text": text[:16000]}},
+                )
             else:
                 payload = {
                     "source": "otomo",

@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -119,6 +120,10 @@ def _norm_title(value: str | None) -> str:
     if not value:
         return ""
     return "".join(ch.lower() for ch in value if ch.isalnum())
+
+
+def _unique(values: list[str]) -> list[str]:
+    return [v for v in dict.fromkeys(str(x).strip() for x in values if str(x).strip())]
 
 
 _SAFE_EDITION_TOKENS = (
@@ -291,6 +296,10 @@ def _blank_id() -> dict:
 
 class RecommendArgs(BaseModel):
     subject_type: Literal["anime", "book", "music", "game", "real"] = "anime"
+    scenario: Literal["general", "tonight", "season", "backlog", "gal_intro", "cross_media"] = Field(
+        "general",
+        description="推荐场景：general 通用 / tonight 今晚看 / season 当季追番 / backlog 想看列表清理 / gal_intro galgame 入门 / cross_media 跨媒体延伸",
+    )
     tags: list[str] | None = Field(
         None, description="额外/心境标签（如 ['治愈','百合']），与口味标签合并召回；心境推荐时由你提炼"
     )
@@ -343,6 +352,11 @@ class RecItem(BaseModel):
     name: str
     score: float
     reasons: list[str]
+    why_recalled: list[str] = Field(default_factory=list)
+    fit_points: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    heat: dict = Field(default_factory=dict)
+    next_step: list[str] = Field(default_factory=list)
     explicit_tag_matches: list[str] = Field(default_factory=list)
     bangumi_score: float | None = None
     rank: int | None = None
@@ -370,6 +384,8 @@ class RecommendResult(BaseModel):
     critique_chips: list[str] = Field(default_factory=list)
     mapping_warnings: list[str] = Field(default_factory=list)  # EGS→Bangumi 未安全对齐/歧义（可观测，不静默丢）
     media_strategy: dict = Field(default_factory=dict)
+    scenario: str = "general"
+    feedback_policy: dict = Field(default_factory=dict)
 
 
 class RecommendTool(Tool):
@@ -622,17 +638,73 @@ class RecommendTool(Tool):
                 )
             username = me.get("username") or str(me.get("id"))
 
+        scenario = args.scenario
+        effective_cross_media = args.cross_media or scenario == "cross_media"
+        effective_max_episodes = args.max_episodes
+        if scenario == "tonight" and effective_max_episodes is None and args.subject_type == "anime":
+            effective_max_episodes = 13
+        scenario_prefer: list[str] = []
+        scenario_notes: list[str] = []
+        if scenario == "tonight":
+            scenario_prefer.extend(["短篇", "轻松", "日常"])
+            scenario_notes.append("今晚看场景：默认偏短篇、低启动成本、少负担。")
+        elif scenario == "season":
+            scenario_prefer.extend(["新番", "连载", "TV"])
+            scenario_notes.append("当季追番场景：若用户明确问某季，优先使用 season_guide_brief(mode=hot)；recommend_subjects 负责补个性化候选。")
+        elif scenario == "backlog":
+            scenario_notes.append("补 backlog 场景：会把想看列表作为候选池，不再把想看条目当作已看排除。")
+        elif scenario == "gal_intro":
+            scenario_prefer.extend(["galgame", "视觉小说", "全年龄", "治愈", "恋爱"])
+            scenario_notes.append("galgame 入门场景：Bangumi 召回为主，批判空间/VNDB 作为证据补充。")
+        elif scenario == "cross_media":
+            scenario_notes.append("跨媒体场景：从你喜欢的动画/书籍/game 关系边召回原作、改编、音乐等条目。")
+
         excluded = {int(x) for x in args.exclude_ids if x}
         await emit_tool_progress(tool=self.name, summary=f"拉取 @{username} 的 {args.subject_type} 收藏", current=2, total=6)
         items = await self.client.get_all_user_collections(username, stype, None, max_items=_MAX_COLLECT)
-        seen = {it["subject"]["id"] for it in items if it.get("subject", {}).get("id")} | excluded
+        if scenario == "backlog":
+            seen = {
+                it["subject"]["id"]
+                for it in items
+                if it.get("subject", {}).get("id") and it.get("type") != 1
+            } | excluded
+        else:
+            seen = {it["subject"]["id"] for it in items if it.get("subject", {}).get("id")} | excluded
         watched = [it for it in items if it.get("type") == 2]
+        wishlist = [it for it in items if it.get("type") == 1]
         profile = compute_taste_profile(username, watched)
         memory_dislikes: list[str] = []
+        feedback_like_tags: list[str] = []
+        feedback_dislike_tags: list[str] = []
+        feedback_excluded_ids: set[int] = set()
+        feedback_summary: dict = {"positive": 0, "negative": 0, "excluded_ids": []}
         aspect_profile: UserAspectProfile | None = None
         if self.ltm is not None:
             mem = self.ltm.load_user(username)
             memory_dislikes = [it.value for it in mem.dislikes if it.value.strip()]
+            recent_feedback = mem.feedback[-50:]
+            feedback_positive = [f for f in recent_feedback if f.signal in {"like", "more"}]
+            feedback_negative = [f for f in recent_feedback if f.signal in {"dislike", "less"}]
+            feedback_summary["positive"] = len(feedback_positive)
+            feedback_summary["negative"] = len(feedback_negative)
+            feedback_excluded_ids = {int(f.subject_id) for f in feedback_negative if f.subject_id}
+            excluded |= feedback_excluded_ids
+            feedback_summary["excluded_ids"] = sorted(feedback_excluded_ids)[:12]
+            async def feedback_tags(feedback_items):
+                tags: list[str] = []
+                for f in feedback_items[:12]:
+                    if not f.subject_id:
+                        continue
+                    try:
+                        raw = await self.client.get_subject(int(f.subject_id))
+                    except Exception:  # noqa: BLE001
+                        continue
+                    tags.extend(t.get("name", "") for t in (raw.get("tags") or []) if isinstance(t, dict) and t.get("name"))
+                return _unique(tags)[:10]
+            tags_pos, tags_neg = await asyncio.gather(feedback_tags(feedback_positive), feedback_tags(feedback_negative))
+            feedback_like_tags = tags_pos
+            feedback_dislike_tags = tags_neg
+            seen |= feedback_excluded_ids
             if args.use_aspect_profile:
                 aspect_profile = mem.aspect_profiles.get(args.subject_type)
         all_tags = [t["tag"] for t in profile.top_tags]
@@ -640,7 +712,9 @@ class RecommendTool(Tool):
         maxw = max(user_tags.values()) if user_tags else 1.0
 
         subtype_focus_tags = _subtype_tags(args.subject_type, args.book_subtype, args.music_subtype)
-        mood = _expand_moods(list(dict.fromkeys((args.tags or []) + args.prefer_tags + subtype_focus_tags)))
+        mood = _expand_moods(list(dict.fromkeys(
+            (args.tags or []) + args.prefer_tags + scenario_prefer + feedback_like_tags[:4] + subtype_focus_tags
+        )))
         core = all_tags[2:8] if args.explore else all_tags[:6]  # explore：用次级标签拓展
         recall_tags = list(dict.fromkeys(mood + core))[:_MAX_RECALL_TAGS]
         cold_start_questions: list[str] = []
@@ -661,6 +735,16 @@ class RecommendTool(Tool):
             note="标签/外部排行/图谱/协同/跨媒体",
         )
         await self._tag_recall(cand, stype, recall_tags, user_tags, maxw, mood, seen, args.niche)
+        if scenario == "backlog":
+            for raw in wishlist:
+                subj = raw.get("subject") or {}
+                sid = subj.get("id")
+                if not sid or sid in excluded:
+                    continue
+                c = cand.setdefault(int(sid), _blank(subj))
+                c["tags"].update(_tag_names(subj))
+                c["external"].add("来自你的想看列表")
+                c["external_boost"] = max(c.get("external_boost", 0.0), 0.35)
         mapping_warnings: list[str] = []
         if args.subject_type == "game" and args.use_external_recall:
             mapping_warnings = await self._external_game_recall(cand, seen, args.limit)
@@ -703,7 +787,7 @@ class RecommendTool(Tool):
             await self._graph_recall(cand, stype, fav_ids, seen)
         if args.use_cf:  # 协同召回（离线 CF 反哺）：无 i2i 表则 _load_i2i 返回空、静默跳过
             self._cf_recall(cand, fav_ids, seen, _load_i2i(args.subject_type))
-        if args.cross_media:
+        if effective_cross_media:
             if args.subject_type != "anime":
                 source_items = await self.client.get_all_user_collections(
                     username, SUBJECT_TYPE["anime"], collection_type=2, max_items=1000
@@ -765,7 +849,7 @@ class RecommendTool(Tool):
             if c.get("name"):
                 haystack.append(str(c["name"]))
             hits: list[str] = []
-            for value in args.avoid_tags:
+            for value in list(args.avoid_tags) + feedback_dislike_tags[:6]:
                 key = _norm_title(value)
                 if not key:
                     continue
@@ -920,11 +1004,63 @@ class RecommendTool(Tool):
                 for (sid, _c), res in zip(series_targets, series_results, strict=False):
                     if not isinstance(res, Exception):
                         series_contexts[sid] = res
+
+        def explanation_parts(c: dict, r_id: int, r_name: str, reasons: list[str], subtype_notes: list[str]) -> tuple[list[str], list[str], list[str], dict, list[str]]:
+            why_recalled = []
+            if c["matched"]:
+                why_recalled.append("标签召回：" + "、".join(sorted(c["matched"])[:4]))
+            if c["graph"]:
+                why_recalled.append("图谱召回：" + "、".join(sorted(c["graph"])[:2]))
+            if c.get("cf_from"):
+                why_recalled.extend(cf_reason(c)[:1])
+            if c.get("external"):
+                why_recalled.append("外部证据：" + "、".join(sorted(c["external"])[:2]))
+            fit_points = []
+            if explicit_matches := sorted(c["matched"] & mood_set):
+                fit_points.append("本轮偏好命中：" + "、".join(explicit_matches[:4]))
+            if aspect_like_hits(c):
+                fit_points.append("长期好球区：" + "、".join(aspect_like_hits(c)[:3]))
+            if subtype_notes:
+                fit_points.extend(subtype_notes[:2])
+            risks = []
+            if aspect_dislike_hits(c):
+                risks.append("可能触及雷区：" + "、".join(aspect_dislike_hits(c)[:3]))
+            if temporary_avoidance_hits(c):
+                risks.append("接近近期避雷/本轮避雷：" + "、".join(temporary_avoidance_hits(c)[:3]))
+            if memory_avoidance_hits(c):
+                risks.append("接近长期避雷：" + "、".join(memory_avoidance_hits(c)[:3]))
+            eps = c.get("eps")
+            if effective_max_episodes and eps and eps > effective_max_episodes:
+                risks.append(f"篇幅 {eps} 集，超过本轮短篇目标")
+            heat = {
+                "bangumi_score": (c.get("rating") or {}).get("score"),
+                "rank": (c.get("rating") or {}).get("rank"),
+                "evidence": [e.model_dump(mode="json", exclude_none=True) for e in c.get("external_evidence", [])[:3]],
+                "badges": _quality_badges(list(c.get("external_evidence", []))),
+            }
+            if scenario == "tonight":
+                next_step = [f"今晚先看《{r_name}》第 1 集试口味", "如果觉得节奏不对，反馈“少来这种/换短一点”"]
+            elif scenario == "backlog":
+                next_step = [f"从想看列表开《{r_name}》1-2 集", "看完后可写回在看或移出想看"]
+            elif scenario == "gal_intro":
+                next_step = [f"先查《{r_name}》购买/入门入口", "可再问“无剧透评价/适合我吗”"]
+            elif scenario == "cross_media":
+                next_step = [f"把《{r_name}》作为跨媒体延伸入口", "可继续查原作/改编关系图"]
+            else:
+                next_step = [f"先看《{r_name}》的无剧透评价", "喜欢/不喜欢后用反馈按钮继续重排"]
+            return (
+                why_recalled[:5] or reasons[:3],
+                fit_points[:5] or reasons[:3],
+                risks[:5],
+                heat,
+                next_step[:4],
+            )
+
         for sid, c in ranked:
             if not c["name"]:
                 continue  # 协同召回候选未被 enrich 补到名，跳过
             eps = c.get("eps")
-            if args.max_episodes is not None and isinstance(eps, int) and eps > args.max_episodes:
+            if effective_max_episodes is not None and isinstance(eps, int) and eps > effective_max_episodes:
                 continue
             r_id, r_name, r_img, r_rating, extra = sid, c["name"], c.get("image"), c["rating"], []
             if args.use_series:
@@ -958,9 +1094,15 @@ class RecommendTool(Tool):
             subtype = media_subtype(c)
             subtype_notes = media_notes(c)
             reasons.extend(n for n in subtype_notes if n not in reasons)
+            why_recalled, fit_points, risks, heat, next_step = explanation_parts(c, r_id, r_name, reasons, subtype_notes)
             out.append(RecItem(
                 id=r_id, name=r_name, score=round(score(c), 3),
                 reasons=reasons,
+                why_recalled=why_recalled,
+                fit_points=fit_points,
+                risks=risks,
+                heat=heat,
+                next_step=next_step,
                 explicit_tag_matches=explicit_matches,
                 bangumi_score=(r_rating or {}).get("score"),
                 rank=(r_rating or {}).get("rank"),
@@ -998,16 +1140,28 @@ class RecommendTool(Tool):
                 notes.append("部分候选未命中本轮显式标签，只能作为画像邻近补充。")
         if memory_dislikes:
             notes.append("已按长期记忆避雷项降权：" + "、".join(memory_dislikes[:8]))
+        notes.extend(scenario_notes)
+        if feedback_like_tags or feedback_dislike_tags:
+            notes.append(
+                "已读取近期推荐反馈：正向标签 "
+                + ("、".join(feedback_like_tags[:5]) or "无")
+                + "；负向标签 "
+                + ("、".join(feedback_dislike_tags[:5]) or "无")
+            )
         applied_constraints: list[str] = []
         if args.exclude_ids:
             applied_constraints.append(f"已排除上轮/指定候选 {len(args.exclude_ids)} 个")
-        if args.max_episodes is not None:
-            applied_constraints.append(f"短篇约束：eps ≤ {args.max_episodes}")
+        if effective_max_episodes is not None:
+            applied_constraints.append(f"短篇约束：eps ≤ {effective_max_episodes}")
         if args.avoid_tags:
             applied_constraints.append("本轮临时避雷：" + "、".join(args.avoid_tags[:8]))
         if args.prefer_tags:
             applied_constraints.append("本轮偏好：" + "、".join(args.prefer_tags[:8]))
-        if args.cross_media:
+        if scenario_prefer:
+            applied_constraints.append("场景偏好：" + "、".join(scenario_prefer[:8]))
+        if feedback_excluded_ids:
+            applied_constraints.append(f"已排除近期负反馈条目 {len(feedback_excluded_ids)} 个")
+        if effective_cross_media:
             applied_constraints.append("已启用跨媒体召回")
         if args.use_curation and curation_hits:
             applied_constraints.append(f"已启用 Bangumi 目录策展召回：{curation_hits} 个候选")
@@ -1049,6 +1203,13 @@ class RecommendTool(Tool):
                 ],
                 mapping_warnings=mapping_warnings,
                 media_strategy=media_strategy,
+                scenario=scenario,
+                feedback_policy={
+                    **feedback_summary,
+                    "positive_tags": feedback_like_tags[:10],
+                    "negative_tags": feedback_dislike_tags[:10],
+                    "principle": "近期反馈作为弱 rerank 信号；本轮显式要求优先。",
+                },
             ),
             sources=[
                 Citation(title=it.name, url=f"https://bgm.tv/subject/{it.id}", source="bangumi", image=it.image)

@@ -11,8 +11,10 @@ from .config import settings
 from .memory import LongTermMemory
 from .memory.consolidate import now_iso
 from .notifications import dispatch_weekly_digest_notifications
+from .tools._concurrency import gather_limited
 from .tools.bangumi.client import BangumiClient
 from .tools.calendar.tool import AiringProgressArgs, AiringProgressTool
+from .tools.discovery.tool import EpisodeBuzzRadarTool, EpisodeRadarArgs
 from .tools.release.tool import fetch_release_items_from_url
 from .tools.watchorder.tool import WeeklyDigestArgs, WeeklyDigestTool, _digest_inbox_item
 
@@ -74,6 +76,7 @@ class WeeklyDigestService:
                 continue
             mem = self.ltm.load_user(username)
             item = _digest_inbox_item(res.data, unread="inbox" in (sub.channels or ["inbox"]))
+            item.payload["push_grading"] = sub.push_grading
             deliveries = await dispatch_weekly_digest_notifications(username, sub, item)
             item.payload["deliveries"] = deliveries
             mem.inbox.append(item)
@@ -186,46 +189,104 @@ class DailyAiringService:
             "notes": ["来自 AniList 人气榜与萌娘百科生日分类；两源口径不同可能有重复。"],
         }
 
+    async def _episode_radar_section(
+        self,
+        client: BangumiClient,
+        airing_items: list[Any],
+    ) -> dict[str, Any] | None:
+        targets = [x for x in airing_items if getattr(x, "id", None)][:4]
+        if not targets:
+            return None
+        radar_tool = EpisodeBuzzRadarTool(client)
+        jobs = [
+            radar_tool.run(
+                EpisodeRadarArgs(
+                    subject_id=x.id,
+                    progress_episode=getattr(x, "my_ep", None) or None,
+                    top=3,
+                    with_summary=False,
+                )
+            )
+            for x in targets
+        ]
+        results = await gather_limited(jobs, host="bangumi")
+        rows: list[dict[str, Any]] = []
+        for item, res in zip(targets, results, strict=False):
+            if isinstance(res, Exception) or not res.ok or not res.data:
+                continue
+            peaks = [
+                {
+                    "episode": p.ep or p.sort,
+                    "sort": p.sort,
+                    "comments": p.comments,
+                    "airdate": p.airdate,
+                    "name": p.name,
+                }
+                for p in res.data.peaks[:3]
+                if p.comments > 0
+            ]
+            if not peaks:
+                continue
+            rows.append({
+                "subject_id": item.id,
+                "name": item.name,
+                "my_ep": getattr(item, "my_ep", 0),
+                "peaks": peaks,
+                "why": [f"分集讨论峰值 {peaks[0]['comments']} 条，供追番节奏参考"],
+            })
+        if not rows:
+            return None
+        return {
+            "title": "分集热度雷达",
+            "items": rows,
+            "notes": ["讨论数是话题度，不等于质量；已按你的当前进度过滤后续集。"],
+        }
+
     async def run_due_once(self, now: datetime | None = None) -> int:
         if not settings.daily_airing_enabled:
             return 0
         count = 0
-        tz = _zone(settings.daily_airing_timezone)
-        local_now = (now or datetime.now(tz)).astimezone(tz)
-        if local_now.hour != settings.daily_airing_hour:
-            return 0
-        run_key = local_now.strftime("%Y-%m-%d-%H")
         birthday_section = await self._birthday_section()
         for username in self.ltm.list_users():
             mem = self.ltm.load_user(username)
             sub = mem.weekly_digest_subscription
+            user_tz = _zone(sub.daily_timezone or settings.daily_airing_timezone)
+            local_now = (now or datetime.now(user_tz)).astimezone(user_tz)
+            if local_now.hour != (sub.daily_hour if sub.daily_enabled else settings.daily_airing_hour):
+                continue
+            run_key = local_now.strftime("%Y-%m-%d-%H")
             if sub.daily_last_run_key == run_key:
                 continue
-            if not sub.enabled and not any(plan.rss_url for plan in mem.watch_plan):
+            if not sub.daily_enabled and not any(plan.rss_url for plan in mem.watch_plan):
                 continue
             token = self.auth.token_for_username(username)
             client = (
                 self.client_factory(username, token.access_token if token else None)
                 if self.client_factory else BangumiClient(token=token.access_token if token else None)
             )
+            airing_items: list[Any] = []
+            radar_section: dict[str, Any] | None = None
             try:
                 airing = await AiringProgressTool(client).run(
                     AiringProgressArgs(username=username, include_wishlist=True, limit=20)
                 )
+                airing_items = airing.data.items if airing.ok and airing.data else []
+                radar_section = await self._episode_radar_section(client, airing_items)
             finally:
                 if hasattr(client, "aclose"):
                     await client.aclose()
             rss_updates = await self._rss_updates(mem)
-            airing_items = airing.data.items if airing.ok and airing.data else []
             payload = {
                 "username": username,
                 "date": local_now.date().isoformat(),
+                "push_grading": sub.push_grading,
                 "sections": [
                     {
                         "title": "今日追番进度",
                         "items": [x.model_dump(mode="json", exclude_none=True) for x in airing_items[:8]],
                         "notes": ["基于 Bangumi 正片 airdate 与 ep_status；国内平台上架可能有时差。"],
                     },
+                    *([radar_section] if radar_section else []),
                     {
                         "title": "RSS 新资源",
                         "items": rss_updates[:12],
@@ -241,7 +302,7 @@ class DailyAiringService:
                     "每日提醒需要后台 worker 常驻运行；本地电脑关机后不会推送。",
                 ],
             }
-            if not airing_items and not rss_updates:
+            if not airing_items and not rss_updates and not radar_section:
                 mem.weekly_digest_subscription.daily_last_run_key = run_key
                 mem.weekly_digest_subscription.updated_at = now_iso()
                 self.ltm.save_user(mem)

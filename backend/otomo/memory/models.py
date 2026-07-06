@@ -15,7 +15,7 @@ DecisionKind = Literal["accept", "reject", "defer", "write", "undo", "plan", "no
 PlanStatus = Literal["wishlist", "watching", "backlog", "on_hold", "revive", "completed", "rejected"]
 InboxKind = Literal["weekly_digest", "daily_airing", "system"]
 WeeklyChannel = Literal["inbox", "webhook", "email"]
-WeeklyWebhookFormat = Literal["generic", "serverchan", "telegram"]
+WeeklyWebhookFormat = Literal["generic", "serverchan", "telegram", "discord", "feishu"]
 AspectKey = Literal[
     "story", "character", "pacing", "visual", "music",
     "direction", "text", "system", "voice", "general",
@@ -129,12 +129,19 @@ class WeeklyDigestSubscription(BaseModel):
     weekday: int = Field(0, ge=0, le=6, description="0=Monday")
     hour: int = Field(9, ge=0, le=23)
     timezone: str = "Asia/Shanghai"
+    daily_enabled: bool = False
+    daily_hour: int = Field(9, ge=0, le=23)
+    daily_timezone: str = "Asia/Shanghai"
+    push_grading: Literal["brief", "normal", "detailed"] = "normal"
     limit: int = Field(8, ge=3, le=20)
     include_on_hold: bool = True
     channels: list[WeeklyChannel] = Field(default_factory=lambda: ["inbox"])
     email: str = ""
     webhook_url: str = ""
     webhook_format: WeeklyWebhookFormat = "generic"
+    web_push_endpoint: str = ""
+    web_push_p256dh: str = ""
+    web_push_auth: str = ""
     last_delivery: list[dict] = Field(default_factory=list)
     last_run_key: str = ""
     daily_last_run_key: str = ""

@@ -51,8 +51,9 @@ type PendingImage = { id: string; file: File; preview: string };
 type Msg = { role: "user" | "assistant"; content: string; attachments?: ImageAttachment[]; evidence?: EvidenceMap };
 type EvidenceMap = Record<string, Record<string, any>[]>;
 
-// [[panel:tool_name]]：LLM 在正文中锚定证据面板的位置（豆包/Gemini 式 inline 卡片）
-const PANEL_MARK = /\[\[panel:([a-z_]+)\]\]/g;
+// [[panel:tool_name]]：LLM 在正文中锚定证据面板的位置（豆包/Gemini 式 inline 卡片）。
+// 兼容模型偶发输出的 [[panel:tool_name:subject_id]]，但只用 tool_name 做渲染键。
+const PANEL_MARK = /\[\[panel:([a-z_]+)(?::[^\]]*)?\]\]/g;
 
 function inlinePanelNames(content: string, evidence?: EvidenceMap): string[] {
   const names: string[] = [];
@@ -73,7 +74,7 @@ function AssistantContent({
   evidence?: EvidenceMap;
   handlers: PanelHandlers;
 }) {
-  const parts = content.split(/\[\[panel:([a-z_]+)\]\]/);
+  const parts = content.split(/\[\[panel:([a-z_]+)(?::[^\]]*)?\]\]/);
   const used = new Set<string>();
   const nodes: ReactNode[] = [];
   for (let i = 0; i < parts.length; i++) {
@@ -132,6 +133,7 @@ type AuthState = {
 };
 type AuthNotice = { tone: "good" | "warn" | "bad"; text: string };
 type UploadNotice = { tone: "good" | "warn" | "bad"; text: string };
+type NotificationSubscription = Record<string, any>;
 type ChatSession = {
   id: string;
   title: string;
@@ -142,6 +144,18 @@ type ChatSession = {
 
 const MAX_IMAGES = 4;
 const SUPPORTED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/jpg", "image/webp"]);
+const WEEKDAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+const NOTIFICATION_CHANNELS = [
+  ["inbox", "站内收件箱"],
+  ["webhook", "Webhook"],
+  ["email", "Email"],
+] as const;
+const WEBHOOK_FORMATS = ["generic", "serverchan", "telegram", "discord", "feishu"] as const;
+const PUSH_GRADINGS = [
+  ["brief", "简短"],
+  ["normal", "标准"],
+  ["detailed", "详细"],
+] as const;
 
 function list(value: any): any[] {
   return Array.isArray(value) ? value : [];
@@ -165,6 +179,12 @@ function evidenceSummary(evidence: EvidenceMap) {
     ["review_subject", "评价矩阵"],
     ["get_broadcast_calendar", "放送日历"],
     ["get_airing_progress", "追番进度"],
+    ["watch_cockpit", "追番驾驶舱"],
+    ["subject_dossier", "作品档案"],
+    ["franchise_map", "IP图谱"],
+    ["monthly_watch_report", "月度报告"],
+    ["anime_music_themes", "OP/ED音乐"],
+    ["search_anime_themes", "AnimeThemes"],
     ["route_image_source", "图片来源路由"],
     ["extract_visual_text", "OCR 结构化"],
     ["recommend_by_visual_style", "视觉推荐"],
@@ -172,6 +192,7 @@ function evidenceSummary(evidence: EvidenceMap) {
     ["analyze_video_frames", "视频帧分析"],
     ["summarize_bilibili_video_content", "B站视频分析"],
     ["compare_user_taste", "同步率"],
+    ["plan_watch_order", "补番路线"],
     ["build_aspect_profile", "Aspect 画像"],
     ["build_collection_dashboard", "收藏仪表盘"],
     ["episode_buzz_radar", "分集口碑"],
@@ -230,6 +251,155 @@ function AnswerSupport({ sources, evidence }: { sources: Source[]; evidence: Evi
   );
 }
 
+function NotificationSettingsPanel({
+  open,
+  authenticated,
+  subscription,
+  notice,
+  busy,
+  onToggle,
+  onReload,
+  onChange,
+  onChannelToggle,
+  onSave,
+  onTest,
+}: {
+  open: boolean;
+  authenticated: boolean;
+  subscription: NotificationSubscription | null;
+  notice: AuthNotice | null;
+  busy: boolean;
+  onToggle: () => void;
+  onReload: () => void;
+  onChange: (field: string, value: any) => void;
+  onChannelToggle: (channel: string) => void;
+  onSave: () => void;
+  onTest: () => void;
+}) {
+  if (!open) return null;
+  const sub = subscription || {};
+  const channels = list(sub.channels) as string[];
+  return (
+    <section className="settings-card">
+      <div className="settings-head">
+        <div>
+          <div className="settings-title">主动提醒设置</div>
+          <div className="settings-sub">周报、每日追番提醒、站内收件箱、Webhook 和 Email 渠道统一在这里管理</div>
+        </div>
+        <button className="inline-action" onClick={onToggle} disabled={busy}>收起</button>
+      </div>
+      {!authenticated ? (
+        <div className="settings-empty">需要先绑定 Bangumi 账号，订阅配置会按当前用户隔离保存。</div>
+      ) : (
+        <>
+          <div className="settings-grid">
+            <label className="setting-card">
+              <span className="setting-line">
+                <input type="checkbox" checked={Boolean(sub.enabled)} onChange={(e) => onChange("enabled", e.target.checked)} />
+                <b>每周周报</b>
+              </span>
+              <span className="setting-copy">自动生成本周追番/想看/搁置盘活建议。</span>
+            </label>
+            <label className="setting-card">
+              <span className="setting-line">
+                <input type="checkbox" checked={Boolean(sub.daily_enabled)} onChange={(e) => onChange("daily_enabled", e.target.checked)} />
+                <b>每日提醒</b>
+              </span>
+              <span className="setting-copy">适合提醒今日更新、RSS 资源和追番进度。</span>
+            </label>
+            <label className="setting-field">
+              <span>周报日</span>
+              <select value={Number(sub.weekday ?? 0)} onChange={(e) => onChange("weekday", Number(e.target.value))}>
+                {WEEKDAYS.map((label, idx) => <option value={idx} key={label}>{label}</option>)}
+              </select>
+            </label>
+            <label className="setting-field">
+              <span>周报小时</span>
+              <input type="number" min={0} max={23} value={Number(sub.hour ?? 9)} onChange={(e) => onChange("hour", Number(e.target.value))} />
+            </label>
+            <label className="setting-field">
+              <span>每日小时</span>
+              <input type="number" min={0} max={23} value={Number(sub.daily_hour ?? 9)} onChange={(e) => onChange("daily_hour", Number(e.target.value))} />
+            </label>
+            <label className="setting-field">
+              <span>时区</span>
+              <input type="text" value={String(sub.timezone ?? "Asia/Shanghai")} onChange={(e) => onChange("timezone", e.target.value)} />
+            </label>
+            <label className="setting-field">
+              <span>推送粒度</span>
+              <select value={String(sub.push_grading ?? "normal")} onChange={(e) => onChange("push_grading", e.target.value)}>
+                {PUSH_GRADINGS.map(([value, label]) => <option value={value} key={value}>{label}</option>)}
+              </select>
+            </label>
+            <label className="setting-field">
+              <span>候选数量</span>
+              <input type="number" min={3} max={20} value={Number(sub.limit ?? 8)} onChange={(e) => onChange("limit", Number(e.target.value))} />
+            </label>
+          </div>
+          <div className="settings-section">
+            <div className="settings-label">推送渠道</div>
+            <div className="settings-options">
+              {NOTIFICATION_CHANNELS.map(([value, label]) => (
+                <label className="settings-check" key={value}>
+                  <input type="checkbox" checked={channels.includes(value)} onChange={() => onChannelToggle(value)} />
+                  <span>{label}</span>
+                </label>
+              ))}
+              <label className="settings-check">
+                <input type="checkbox" checked={Boolean(sub.include_on_hold)} onChange={(e) => onChange("include_on_hold", e.target.checked)} />
+                <span>包含搁置盘活</span>
+              </label>
+            </div>
+          </div>
+          <div className="settings-grid">
+            <label className="setting-field wide">
+              <span>Email 收件地址</span>
+              <input type="email" value={String(sub.email ?? "")} onChange={(e) => onChange("email", e.target.value)} placeholder="you@example.com" />
+            </label>
+            <label className="setting-field">
+              <span>Webhook 格式</span>
+              <select value={String(sub.webhook_format ?? "generic")} onChange={(e) => onChange("webhook_format", e.target.value)}>
+                {WEBHOOK_FORMATS.map((fmt) => <option value={fmt} key={fmt}>{fmt}</option>)}
+              </select>
+            </label>
+            <label className="setting-field wide">
+              <span>Webhook URL</span>
+              <input type="url" value={String(sub.webhook_url ?? "")} onChange={(e) => onChange("webhook_url", e.target.value)} placeholder="https://..." />
+            </label>
+            <label className="setting-field">
+              <span>每日提醒时区</span>
+              <input type="text" value={String(sub.daily_timezone ?? "Asia/Shanghai")} onChange={(e) => onChange("daily_timezone", e.target.value)} />
+            </label>
+          </div>
+          <details className="quiet-detail settings-webpush">
+            <summary>Web Push 预留字段</summary>
+            <div className="settings-grid">
+              <label className="setting-field wide">
+                <span>Endpoint</span>
+                <input type="url" value={String(sub.web_push_endpoint ?? "")} onChange={(e) => onChange("web_push_endpoint", e.target.value)} />
+              </label>
+              <label className="setting-field">
+                <span>p256dh</span>
+                <input type="text" value={String(sub.web_push_p256dh ?? "")} onChange={(e) => onChange("web_push_p256dh", e.target.value)} />
+              </label>
+              <label className="setting-field">
+                <span>auth</span>
+                <input type="text" value={String(sub.web_push_auth ?? "")} onChange={(e) => onChange("web_push_auth", e.target.value)} />
+              </label>
+            </div>
+          </details>
+          <div className="settings-actions">
+            <button className="inline-action" onClick={onReload} disabled={busy}>重新读取</button>
+            <button className="inline-action primary" onClick={onSave} disabled={busy}>保存设置</button>
+            <button className="inline-action" onClick={onTest} disabled={busy}>测试推送</button>
+          </div>
+        </>
+      )}
+      {notice && <div className={`auth-notice ${notice.tone}`}>{notice.text}</div>}
+    </section>
+  );
+}
+
 function friendlyToolName(name: string) {
   const map: Record<string, string> = {
     recommend_subjects: "生成推荐候选",
@@ -246,6 +416,13 @@ function friendlyToolName(name: string) {
     summarize_bilibili_video_content: "分析B站视频",
     get_broadcast_calendar: "查询放送日历",
     get_airing_progress: "计算追番进度",
+    watch_cockpit: "汇总追番驾驶舱",
+    subject_dossier: "生成作品档案",
+    franchise_map: "构建IP图谱",
+    monthly_watch_report: "生成月度报告",
+    anime_music_themes: "融合OP/ED音乐",
+    search_anime_themes: "查询AnimeThemes",
+    plan_watch_order: "规划补番路线",
     compare_user_taste: "计算同步率",
     build_aspect_profile: "更新口味画像",
     build_collection_dashboard: "生成收藏仪表盘",
@@ -352,6 +529,10 @@ export default function Home() {
   const [evidenceMode, setEvidenceMode] = useState<"user" | "dev">("user");
   const [authNotice, setAuthNotice] = useState<AuthNotice | null>(null);
   const [uploadNotice, setUploadNotice] = useState<UploadNotice | null>(null);
+  const [subscriptionOpen, setSubscriptionOpen] = useState(false);
+  const [subscription, setSubscription] = useState<NotificationSubscription | null>(null);
+  const [subscriptionNotice, setSubscriptionNotice] = useState<AuthNotice | null>(null);
+  const [subscriptionBusy, setSubscriptionBusy] = useState(false);
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState("");
   const [busy, setBusy] = useState(false);
@@ -965,6 +1146,109 @@ export default function Home() {
     setAuth({ auth_session_id: authSessionId.current, authenticated: false });
     setAuthNotice({ tone: "warn", text: "已退出当前浏览器会话的 Bangumi 绑定" });
     setMemory(null);
+    setSubscription(null);
+    setSubscriptionOpen(false);
+  }
+
+  async function loadNotificationSubscription() {
+    if (!auth?.authenticated) {
+      setSubscriptionNotice({ tone: "warn", text: "需要先绑定 Bangumi 账号后才能管理订阅。" });
+      return;
+    }
+    setSubscriptionBusy(true);
+    try {
+      const res = await fetch(`${BACKEND}/notifications/subscription`, { credentials: "include" });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok || !payload.ok) {
+        setSubscriptionNotice({ tone: "bad", text: payload.detail || payload.error || `读取失败：HTTP ${res.status}` });
+        return;
+      }
+      setSubscription(payload.subscription || {});
+      if (payload.memory) setMemory(payload.memory);
+      setSubscriptionNotice({ tone: "good", text: "订阅设置已同步。" });
+    } catch (e) {
+      setSubscriptionNotice({ tone: "bad", text: `读取订阅失败：${String(e)}` });
+    } finally {
+      setSubscriptionBusy(false);
+    }
+  }
+
+  function toggleSubscriptionSettings() {
+    setSubscriptionOpen((open) => {
+      const next = !open;
+      if (next && auth?.authenticated && !subscription && !subscriptionBusy) {
+        void loadNotificationSubscription();
+      }
+      return next;
+    });
+  }
+
+  function updateSubscriptionField(field: string, value: any) {
+    setSubscription((prev) => ({ ...(prev ?? {}), [field]: value }));
+  }
+
+  function toggleSubscriptionChannel(channel: string) {
+    setSubscription((prev) => {
+      const current = new Set(list(prev?.channels) as string[]);
+      if (current.has(channel)) current.delete(channel);
+      else current.add(channel);
+      if (!current.size) current.add("inbox");
+      return { ...(prev ?? {}), channels: Array.from(current) };
+    });
+  }
+
+  async function saveNotificationSubscription() {
+    if (!auth?.authenticated || !subscription) return;
+    setSubscriptionBusy(true);
+    try {
+      const res = await fetch(`${BACKEND}/notifications/subscription`, {
+        method: "PUT",
+        credentials: "include",
+        headers: csrfHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify(subscription),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok || !payload.ok) {
+        setSubscriptionNotice({ tone: "bad", text: payload.detail || payload.error || `保存失败：HTTP ${res.status}` });
+        return;
+      }
+      setSubscription(payload.subscription || {});
+      if (payload.memory) setMemory(payload.memory);
+      setSubscriptionNotice({ tone: "good", text: "订阅设置已保存。" });
+    } catch (e) {
+      setSubscriptionNotice({ tone: "bad", text: `保存订阅失败：${String(e)}` });
+    } finally {
+      setSubscriptionBusy(false);
+    }
+  }
+
+  async function testNotificationSubscription() {
+    if (!auth?.authenticated) return;
+    setSubscriptionBusy(true);
+    try {
+      const res = await fetch(`${BACKEND}/notifications/test`, {
+        method: "POST",
+        credentials: "include",
+        headers: csrfHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ kind: "weekly", dispatch: true }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok || !payload.ok) {
+        setSubscriptionNotice({ tone: "bad", text: payload.detail || payload.error || `测试失败：HTTP ${res.status}` });
+        return;
+      }
+      setSubscription(payload.subscription || subscription || {});
+      if (payload.memory) setMemory(payload.memory);
+      setSubscriptionNotice({ tone: "good", text: "测试周报已生成，并按当前渠道尝试发送。" });
+      setEvidence((prev) => ({
+        ...prev,
+        list_weekly_digest_inbox: payload.inbox ? [{ items: payload.inbox, username: payload.username }] : (prev.list_weekly_digest_inbox ?? []),
+      }));
+    } catch (e) {
+      setSubscriptionNotice({ tone: "bad", text: `测试推送失败：${String(e)}` });
+    } finally {
+      setSubscriptionBusy(false);
+    }
   }
 
   const hasEvidence = Object.values(evidence).some((rows) => list(rows).length > 0);
@@ -993,6 +1277,9 @@ export default function Home() {
             {auth?.authenticated ? (
               <>
                 <span className="badge good">Bangumi @{auth.username}</span>
+                <button className="inline-action" onClick={toggleSubscriptionSettings} disabled={busy || subscriptionBusy}>
+                  推送设置
+                </button>
                 <button className="inline-action" onClick={logoutBangumi} disabled={busy}>退出</button>
               </>
             ) : (
@@ -1008,6 +1295,19 @@ export default function Home() {
             )}
           </div>
           {authNotice && <div className={`auth-notice ${authNotice.tone}`}>{authNotice.text}</div>}
+          <NotificationSettingsPanel
+            open={subscriptionOpen}
+            authenticated={Boolean(auth?.authenticated)}
+            subscription={subscription}
+            notice={subscriptionNotice}
+            busy={busy || subscriptionBusy}
+            onToggle={toggleSubscriptionSettings}
+            onReload={loadNotificationSubscription}
+            onChange={updateSubscriptionField}
+            onChannelToggle={toggleSubscriptionChannel}
+            onSave={saveNotificationSubscription}
+            onTest={testNotificationSubscription}
+          />
           <div className="session-strip">
             <button className="inline-action" onClick={newChat} disabled={busy}>新建</button>
             {sessions.slice(0, 6).map((s) => (

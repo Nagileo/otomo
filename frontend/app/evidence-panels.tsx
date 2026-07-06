@@ -522,21 +522,54 @@ function BangumiIndexPanel({ data, onPrepareWrite }: { data: AnyRecord; onPrepar
 
 function SeasonGuidePanel({ data, onPrepareWrite }: { data: AnyRecord; onPrepareWrite?: PrepareWriteHandler }) {
   const items = list(data.items);
+  const renderGuideRoute = (video: AnyRecord, idx: number) => {
+    const hit = list(video.verified_hits)[0] || null;
+    const href = hit?.url || video.url || video.up_url || "";
+    return (
+      <a className={`guide-route ${video.verified ? "verified" : ""}`} href={href || undefined} target={href ? "_blank" : undefined} rel={href ? "noreferrer" : undefined} key={`${video.up_name}-${idx}`}>
+        <div className="guide-route-head">
+          <span>{text(video.up_name)}</span>
+          <Badge tone={video.verified ? "good" : video.confidence === "high" ? "warn" : "dim"}>
+            {video.verified ? "已命中" : "仅导航"}
+          </Badge>
+        </div>
+        <div className="card-meta">{text(video.positioning)}</div>
+        {hit ? (
+          <>
+            <div className="guide-hit-title">{text(hit.title)}</div>
+            <div className="card-meta">
+              conf {pct(hit.match_confidence)}
+              {hit.play ? ` · 播放 ${hit.play}` : ""}
+              {hit.danmaku ? ` · 弹幕 ${hit.danmaku}` : ""}
+            </div>
+          </>
+        ) : (
+          <div className="card-meta">{text(video.verification_note || video.match_reason)}</div>
+        )}
+        {list(video.verticals).length > 0 && (
+          <div className="compact-list inline">
+            {list(video.verticals).slice(0, 2).map((v, j) => <span key={`${v.name}-${j}`}>{text(v.label)} {pct(v.confidence)}</span>)}
+          </div>
+        )}
+      </a>
+    );
+  };
   return (
     <Panel
       title={`季番导视 · ${text(data.season)}`}
-      subtitle={`${data.personalized ? "已按用户画像分诊" : "非个性化导视"} · ${items.length} 部`}
+      subtitle={`${data.personalized ? "已按用户画像分诊" : "非个性化导视"} · ${items.length} 部 · mode: ${text(data.mode, "guide")}`}
     >
       <div className="evidence-row">
+        <Badge tone={data.mode === "hot" ? "warn" : "dim"}>{data.mode === "hot" ? "热播优先" : "口味导视"}</Badge>
         {list<string>(data.profile_tags).slice(0, 8).map((tag) => <Badge key={tag} tone="dim">{tag}</Badge>)}
         {list<string>(data.focus_tags).map((tag) => <Badge key={tag} tone="good">{tag}</Badge>)}
       </div>
       <div className="season-grid">
         {items.map((item, i) => (
-          <a className="season-card" href={`https://bgm.tv/subject/${item.subject_id}`} target="_blank" rel="noreferrer" key={`${item.subject_id}-${i}`}>
+          <div className="season-card" key={`${item.subject_id}-${i}`}>
             {item.image ? <img src={item.image} alt="" /> : <div className="season-noimg" />}
             <div className="season-main">
-              <div className="card-title">{text(item.title)}</div>
+              <a className="card-title title-link" href={`https://bgm.tv/subject/${item.subject_id}`} target="_blank" rel="noreferrer">{text(item.title)}</a>
               <div className="card-meta">
                 {item.bangumi_score ? `Bangumi ${item.bangumi_score}` : "暂无评分"}
                 {item.broadcast ? ` · ${item.broadcast}` : ""}
@@ -546,9 +579,28 @@ function SeasonGuidePanel({ data, onPrepareWrite }: { data: AnyRecord; onPrepare
                 <Badge tone={item.match_confidence >= 0.8 ? "good" : item.match_confidence > 0 ? "warn" : "dim"}>
                   match {pct(item.match_confidence)}
                 </Badge>
+                <Badge tone={item.hotness_level === "surge" || item.hotness_level === "hot" ? "warn" : item.hotness_level === "warm" ? "dim" : "dim"}>
+                  heat {text(item.hotness_level, "none")} {pct(item.hotness)}
+                </Badge>
               </div>
+              {list(item.verticals).length > 0 && (
+                <div className="evidence-row tight">
+                  {list(item.verticals).slice(0, 3).map((v) => (
+                    <Badge key={v.name} tone={v.confidence >= 0.75 ? "good" : v.confidence >= 0.55 ? "warn" : "dim"}>
+                      {text(v.label)} {pct(v.confidence)}
+                    </Badge>
+                  ))}
+                </div>
+              )}
               <p className="card-note">{item.reason}</p>
               {item.studio && <div className="card-meta">制作：{item.studio}</div>}
+              {(item.doing || item.trending_rank || item.episode_comment_peak) && (
+                <div className="card-meta">
+                  {item.doing ? `在看 ${item.doing}` : ""}
+                  {item.trending_rank ? ` · 热门 #${item.trending_rank}` : ""}
+                  {item.episode_comment_peak ? ` · 分集峰值 ${item.episode_comment_peak}` : ""}
+                </div>
+              )}
               {list<string>(item.evidence).length > 0 && (
                 <div className="compact-list inline">
                   {list<string>(item.evidence).slice(0, 3).map((e, idx) => <span key={idx}>{e}</span>)}
@@ -571,12 +623,24 @@ function SeasonGuidePanel({ data, onPrepareWrite }: { data: AnyRecord; onPrepare
                 {item.official_url && <span>官网</span>}
                 {item.pv_url && <span>PV</span>}
                 {item.bili_url && <span>B站正版</span>}
-                {list(item.guide_videos).slice(0, 2).map((v) => <span key={v.url}>{text(v.up_name)}</span>)}
               </div>
+              {list(item.guide_videos).length > 0 && (
+                <div className="guide-route-list">
+                  {list(item.guide_videos).slice(0, 3).map(renderGuideRoute)}
+                </div>
+              )}
             </div>
-          </a>
+          </div>
         ))}
       </div>
+      {list(data.guide_videos).length > 0 && (
+        <>
+          <div className="section-title">季度导视源</div>
+          <div className="guide-route-list global">
+            {list(data.guide_videos).slice(0, 6).map(renderGuideRoute)}
+          </div>
+        </>
+      )}
       {list(data.guide_comment_digests).length > 0 && (
         <>
           <div className="section-title">导视评论摘要</div>
@@ -820,9 +884,10 @@ function RecommendPanel({
   return (
     <Panel
       title={`推荐证据 · ${text(data.subject_type)}`}
-      subtitle={`mode: ${text(data.mode, "normal")} · ${items.length} 个候选`}
+      subtitle={`scenario: ${text(data.scenario, "general")} · mode: ${text(data.mode, "normal")} · ${items.length} 个候选`}
     >
       <div className="evidence-row">
+        <Badge tone="good">{text(data.scenario, "general")}</Badge>
         {list<string>(data.based_on_tags).slice(0, 10).map((tag) => <Badge key={tag} tone="dim">{tag}</Badge>)}
         {list<string>(data.applied_constraints).map((x) => <Badge key={x} tone="warn">{x}</Badge>)}
         {mediaStrategy.book_subtype && mediaStrategy.book_subtype !== "auto" && (
@@ -875,6 +940,29 @@ function RecommendPanel({
                   {list<string>(item.media_notes).slice(0, 3).map((r, idx) => <span key={idx}>{r}</span>)}
                 </div>
               )}
+              {(list<string>(item.why_recalled).length > 0 || list<string>(item.fit_points).length > 0 || list<string>(item.risks).length > 0) && (
+                <div className="taste-groups mini">
+                  <div>
+                    <div className="section-title">召回</div>
+                    <div className="compact-list">{list<string>(item.why_recalled).slice(0, 3).map((r, idx) => <span key={idx}>{r}</span>)}</div>
+                  </div>
+                  <div>
+                    <div className="section-title">适合</div>
+                    <div className="compact-list">{list<string>(item.fit_points).slice(0, 3).map((r, idx) => <span key={idx}>{r}</span>)}</div>
+                  </div>
+                  {list<string>(item.risks).length > 0 && (
+                    <div>
+                      <div className="section-title">风险</div>
+                      <div className="compact-list">{list<string>(item.risks).slice(0, 3).map((r, idx) => <span key={idx}>{r}</span>)}</div>
+                    </div>
+                  )}
+                </div>
+              )}
+              {list<string>(item.next_step).length > 0 && (
+                <div className="compact-list inline next-step">
+                  {list<string>(item.next_step).slice(0, 3).map((r, idx) => <span key={idx}>{r}</span>)}
+                </div>
+              )}
               <div className="compact-list inline">
                 {list<string>(item.reasons).slice(0, 4).map((r, idx) => <span key={idx}>{r}</span>)}
               </div>
@@ -918,6 +1006,15 @@ function RecommendPanel({
         <div className="caveats">
           <div className="section-title">映射告警（未安全对齐，已跳过）</div>
           {list<string>(data.mapping_warnings).map((w, i) => <span key={i}>⚠ {w}</span>)}
+        </div>
+      )}
+      {data.feedback_policy && (
+        <div className="caveats">
+          <span>
+            反馈闭环：正向 {data.feedback_policy.positive ?? 0} / 负向 {data.feedback_policy.negative ?? 0}
+            {list<string>(data.feedback_policy.positive_tags).length ? ` · 正向标签 ${list<string>(data.feedback_policy.positive_tags).slice(0, 4).join("、")}` : ""}
+            {list<string>(data.feedback_policy.negative_tags).length ? ` · 避雷标签 ${list<string>(data.feedback_policy.negative_tags).slice(0, 4).join("、")}` : ""}
+          </span>
         </div>
       )}
       {list<string>(data.notes).length > 0 && (
@@ -969,6 +1066,477 @@ function WatchCopilotPanel({ data }: { data: AnyRecord }) {
               </div>
             ) : <EmptyHint text="暂无候选" />}
           </div>
+        ))}
+      </div>
+      {list<string>(data.notes).length > 0 && (
+        <div className="caveats">{list<string>(data.notes).map((n, i) => <span key={i}>{n}</span>)}</div>
+      )}
+    </Panel>
+  );
+}
+
+function WatchOrderPanel({ data }: { data: AnyRecord }) {
+  const main = list(data.watch_order);
+  const sides = list(data.side_stories);
+  const alternates = list(data.alternate_routes);
+  const skips = list(data.skip_candidates);
+  const tone = (necessity: any) => {
+    const n = String(necessity || "");
+    if (n === "required") return "good";
+    if (n === "optional" || n === "skip") return "warn";
+    return "dim";
+  };
+  const label = (necessity: any) => {
+    const n = String(necessity || "");
+    if (n === "required") return "必看";
+    if (n === "optional") return "可选";
+    if (n === "skip") return "可跳过";
+    return "建议";
+  };
+  const renderItems = (items: AnyRecord[], compact = false) => (
+    <div className={compact ? "watch-order-list compact" : "watch-order-list"}>
+      {items.map((item, i) => (
+        <a className="watch-order-item" href={`https://bgm.tv/subject/${item.id}`} target="_blank" rel="noreferrer" key={`${item.id}-${i}`}>
+          <div className="watch-order-index">{item.order ?? i + 1}</div>
+          <div className="watch-order-body">
+            <div className="watch-order-top">
+              <span className="card-title">{text(item.name)}</span>
+              <Badge tone={tone(item.necessity)}>{label(item.necessity)}</Badge>
+            </div>
+            <div className="card-meta">
+              {text(item.relation || item.watch_role, "主线")}
+              {item.date ? ` · ${item.date}` : ""}
+              {item.duration_hint ? ` · ${item.duration_hint}` : ""}
+              {item.score ? ` · BGM ${item.score}` : ""}
+            </div>
+            {item.skip_advice ? <p className="card-note">{text(item.skip_advice)}</p> : null}
+          </div>
+        </a>
+      ))}
+    </div>
+  );
+  return (
+    <Panel title={`补番路线 · ${text(data.ip)}`} subtitle="按 Bangumi 关系边、播出日期和必要性整理">
+      <div className="evidence-row">
+        <Badge tone="good">主线 {main.length}</Badge>
+        <Badge tone="dim">旁支 {sides.length}</Badge>
+        <Badge tone="dim">不同演绎 {alternates.length}</Badge>
+        <Badge tone={skips.length ? "warn" : "good"}>可跳过 {skips.length}</Badge>
+      </div>
+      {main.length > 0 ? (
+        <>
+          <div className="section-title">主线顺序</div>
+          {renderItems(main)}
+        </>
+      ) : <EmptyHint text="没有主线条目" />}
+      {sides.length > 0 && (
+        <>
+          <div className="section-title">旁支 / OVA / 番外</div>
+          {renderItems(sides, true)}
+        </>
+      )}
+      {alternates.length > 0 && (
+        <>
+          <div className="section-title">不同演绎 / 重制 / 替代路线</div>
+          {renderItems(alternates, true)}
+        </>
+      )}
+      {skips.length > 0 && (
+        <>
+          <div className="section-title">可跳过候选</div>
+          <div className="compact-list">
+            {skips.map((item, i) => (
+              <span key={`${item.id}-${i}`}>{text(item.name)} · {text(item.skip_advice)}</span>
+            ))}
+          </div>
+        </>
+      )}
+      {list<string>(data.notes).length > 0 && (
+        <div className="caveats">{list<string>(data.notes).map((n, i) => <span key={i}>{n}</span>)}</div>
+      )}
+    </Panel>
+  );
+}
+
+function MonthlyWatchReportPanel({ data }: { data: AnyRecord }) {
+  const sections = list(data.sections);
+  const byTitle = new Map(sections.map((s) => [String(s.title || ""), s]));
+  const summary = data.summary || {};
+  const metricRows = [
+    ["收藏总量", summary.collection_count],
+    ["本月更新", summary.month_updated_count],
+    ["本月完成", summary.completed_this_month],
+    ["本月均分", summary.month_avg_rate ?? "暂无"],
+    ["全量均分", summary.avg_user_rate ?? "暂无"],
+    ["已评分", summary.rated_count],
+  ];
+  const renderSubjectCards = (title: string, limit = 8) => {
+    const items = list(byTitle.get(title)?.items);
+    if (!items.length) return <EmptyHint text="暂无条目" />;
+    return (
+      <div className="rec-grid">
+        {items.slice(0, limit).map((item, i) => (
+          <a className="rec-card" href={item.id ? `https://bgm.tv/subject/${item.id}` : undefined} target={item.id ? "_blank" : undefined} rel={item.id ? "noreferrer" : undefined} key={`${title}-${item.id}-${i}`}>
+            {item.image ? <img src={item.image} alt="" /> : <div className="rec-noimg" />}
+            <div className="rec-body">
+              <div className="card-title">{text(item.name)}</div>
+              <div className="card-meta">
+                {text(item.status, "")}
+                {item.rate ? ` · 你 ${item.rate}` : ""}
+                {item.score ? ` · BGM ${item.score}` : ""}
+                {item.ep_status ? ` · ep ${item.ep_status}` : ""}
+              </div>
+              {item.comment ? <p className="card-note">{text(item.comment)}</p> : null}
+              {item.updated_at ? <div className="card-meta">更新：{text(item.updated_at)}</div> : null}
+            </div>
+          </a>
+        ))}
+      </div>
+    );
+  };
+  const renderCompact = (title: string, primary: string, secondary?: string, limit = 16) => {
+    const items = list(byTitle.get(title)?.items);
+    if (!items.length) return <EmptyHint text="暂无数据" />;
+    return (
+      <div className="compact-list">
+        {items.slice(0, limit).map((item, i) => (
+          <span key={`${title}-${i}`}>
+            {text(item[primary] ?? item.name ?? item.status ?? item.rating)}
+            {secondary && item[secondary] !== undefined ? ` · ${secondary} ${item[secondary]}` : ""}
+            {item.count !== undefined ? ` · ${item.count}` : ""}
+            {item.lift !== undefined ? ` · lift ${item.lift}` : ""}
+          </span>
+        ))}
+      </div>
+    );
+  };
+  return (
+    <Panel title={`月度报告 · @${text(data.username)}`} subtitle={`${data.year}-${String(data.month || "").padStart(2, "0")} · ${text(data.subject_type)}`}>
+      <div className="metric-grid">
+        {metricRows.map(([label, value]) => (
+          <div className="metric-card" key={String(label)}>
+            <div className="metric-label">{label}</div>
+            <div className="metric-value">{text(value)}</div>
+          </div>
+        ))}
+      </div>
+      <div className="section-title">本月完成</div>
+      {renderSubjectCards("本月完成", 8)}
+      <div className="section-title">本月更新</div>
+      {renderSubjectCards("本月更新", 8)}
+      <div className="taste-groups">
+        <div className="taste-group">
+          <div className="section-title">状态分布</div>
+          {renderCompact("状态分布", "status", "count")}
+        </div>
+        <div className="taste-group">
+          <div className="section-title">评分分布</div>
+          {renderCompact("评分分布", "rating", "count")}
+        </div>
+        <div className="taste-group">
+          <div className="section-title">本月标签漂移</div>
+          {renderCompact("本月标签漂移", "tag", "month_count")}
+        </div>
+        <div className="taste-group">
+          <div className="section-title">Staff/CV/Studio</div>
+          {renderCompact("Staff/CV/Studio", "name", "count")}
+        </div>
+      </div>
+      <div className="section-title">搁置/抛弃观察</div>
+      {renderSubjectCards("搁置/抛弃观察", 8)}
+      {list<string>(data.caveats).length > 0 && (
+        <div className="caveats">{list<string>(data.caveats).map((n, i) => <span key={i}>{n}</span>)}</div>
+      )}
+    </Panel>
+  );
+}
+
+function ProductSectionsPanel({ data, title }: { data: AnyRecord; title: string }) {
+  const subject = data.subject || data.seed || {};
+  const sections = list(data.sections);
+  const nodes = list(data.nodes);
+  const edges = list(data.edges);
+  const subscription = data.subscription || {};
+  return (
+    <Panel
+      title={title}
+      subtitle={subject.name ? text(subject.name) : data.username ? `@${text(data.username)}` : text(data.season || data.month || data.today, "")}
+    >
+      {Object.keys(subject).length > 0 && (
+        <div className="subject-hero compact">
+          {subject.image ? <img src={subject.image} alt="" /> : null}
+          <div>
+            <div className="card-title">{text(subject.name)}</div>
+            <div className="card-meta">
+              {text(subject.type_name, "")} {subject.date ? `· ${subject.date}` : ""} {subject.score ? `· ${subject.score}` : ""}
+            </div>
+            {subject.summary ? <p className="card-note">{text(subject.summary)}</p> : null}
+            <div className="evidence-row tight">
+              {list<string>(subject.tags).slice(0, 8).map((tag) => <Badge key={tag} tone="dim">{tag}</Badge>)}
+            </div>
+          </div>
+        </div>
+      )}
+      {Object.keys(subscription).length > 0 && (
+        <div className="evidence-row">
+          <Badge tone={subscription.enabled ? "good" : "dim"}>周报 {subscription.enabled ? "on" : "off"}</Badge>
+          <Badge tone={subscription.daily_enabled ? "good" : "dim"}>每日 {subscription.daily_enabled ? "on" : "off"}</Badge>
+          <Badge tone="dim">push {text(subscription.push_grading, "normal")}</Badge>
+          {list<string>(subscription.channels).map((ch) => <Badge key={ch} tone="dim">{ch}</Badge>)}
+          {subscription.webhook_format ? <Badge tone="dim">{subscription.webhook_format}</Badge> : null}
+        </div>
+      )}
+      {sections.map((section, i) => (
+        <div key={`${section.title}-${i}`}>
+          <div className="section-title">{text(section.title)}</div>
+          {list(section.items).length > 0 ? (
+            <div className="rec-grid">
+              {list(section.items).slice(0, 12).map((item, idx) => {
+                const subjectId = item.subject_id || item.id;
+                const href = subjectId ? `https://bgm.tv/subject/${subjectId}` : item.url || item.page_url || "";
+                return (
+                  <a
+                    className="rec-card"
+                    href={href || undefined}
+                    target={href ? "_blank" : undefined}
+                    rel={href ? "noreferrer" : undefined}
+                    key={`${subjectId || section.title}-${idx}`}
+                  >
+                    {item.image ? <img src={item.image} alt="" /> : <div className="rec-noimg" />}
+                    <div className="rec-body">
+                      <div className="card-title">{text(item.name || item.title || item.anime_title || item.relation || item.source)}</div>
+                      <div className="card-meta">
+                        {item.status || item.type_name || item.relation || item.action || item.theme_type || ""}
+                        {item.score ? ` · ${item.score}` : ""}
+                        {item.rank ? ` · rank ${item.rank}` : ""}
+                        {item.my_ep !== undefined ? ` · ep ${item.my_ep}` : ""}
+                      </div>
+                      {item.reason || item.note || item.consensus ? <p className="card-note">{text(item.reason || item.note || item.consensus)}</p> : null}
+                      {list<string>(item.why).length > 0 && (
+                        <div className="compact-list inline">{list<string>(item.why).slice(0, 3).map((x, j) => <span key={j}>{x}</span>)}</div>
+                      )}
+                      {list(item.peaks).length > 0 && (
+                        <div className="compact-list inline">
+                          {list(item.peaks).slice(0, 3).map((p, j) => <span key={j}>EP {p.episode || p.sort} · {p.comments} 讨论</span>)}
+                        </div>
+                      )}
+                    </div>
+                  </a>
+                );
+              })}
+            </div>
+          ) : <EmptyHint text="暂无数据" />}
+          {list<string>(section.notes).length > 0 && (
+            <div className="caveats">{list<string>(section.notes).map((n, j) => <span key={j}>{n}</span>)}</div>
+          )}
+        </div>
+      ))}
+      {nodes.length > 0 && (
+        <>
+          <div className="section-title">图谱节点</div>
+          <div className="compact-list">
+            {nodes.slice(0, 24).map((node) => (
+              <span key={node.id}>{text(node.name)} · {text(node.type_name, "unknown")}{node.date ? ` · ${node.date}` : ""}</span>
+            ))}
+          </div>
+        </>
+      )}
+      {edges.length > 0 && (
+        <>
+          <div className="section-title">关系边</div>
+          <div className="compact-list">
+            {edges.slice(0, 24).map((edge, i) => (
+              <span key={`${edge.source}-${edge.target}-${i}`}>{edge.source} → {edge.target} · {text(edge.relation)}</span>
+            ))}
+          </div>
+        </>
+      )}
+      {list<string>(data.quick_actions).length > 0 && (
+        <>
+          <div className="section-title">快捷动作</div>
+          <div className="followups">{list<string>(data.quick_actions).map((q, i) => <span className="chip ghost" key={i}>{q}</span>)}</div>
+        </>
+      )}
+      {list<string>(data.next_actions).length > 0 && (
+        <>
+          <div className="section-title">下一步</div>
+          <div className="compact-list">{list<string>(data.next_actions).map((n, i) => <span key={i}>{n}</span>)}</div>
+        </>
+      )}
+      {list<string>(data.caveats || data.notes).length > 0 && (
+        <div className="caveats">{list<string>(data.caveats || data.notes).map((n, i) => <span key={i}>{n}</span>)}</div>
+      )}
+    </Panel>
+  );
+}
+
+function SubjectDossierPanel({ data }: { data: AnyRecord }) {
+  const subject = data.subject || {};
+  const sections = list(data.sections);
+  const byTitle = new Map(sections.map((s) => [String(s.title || ""), s]));
+  const sectionNames = ["评价矩阵", "观看/购买入口", "OP/ED/音乐", "补番路线", "分集热度雷达", "跨媒体关系", "Release/RSS"];
+  return (
+    <Panel title="作品档案" subtitle={text(subject.name)}>
+      <div className="subject-hero compact">
+        {subject.image ? <img src={subject.image} alt="" /> : <div className="rec-noimg" />}
+        <div>
+          <div className="card-title">{text(subject.name)}</div>
+          <div className="card-meta">
+            {text(subject.type_name, "")} {subject.date ? `· ${subject.date}` : ""} {subject.score ? `· BGM ${subject.score}` : ""}
+            {subject.rank ? ` · rank ${subject.rank}` : ""}
+          </div>
+          {subject.summary ? <p className="card-note">{text(subject.summary)}</p> : null}
+          <div className="evidence-row tight">
+            {list<string>(subject.tags).slice(0, 10).map((tag) => <Badge key={tag} tone="dim">{tag}</Badge>)}
+          </div>
+        </div>
+      </div>
+      <div className="dossier-grid">
+        {sectionNames.map((name) => {
+          const section = byTitle.get(name);
+          if (!section) return null;
+          const items = list(section.items);
+          return (
+            <div className="dossier-section" key={name}>
+              <div className="section-title">{name}</div>
+              {items.length ? (
+                <div className="compact-list">
+                  {items.slice(0, name === "OP/ED/音乐" ? 12 : 8).map((item, i) => {
+                    if (name === "评价矩阵") {
+                      return (
+                        <span key={i}>
+                          {text(item.consensus, "暂无综合评价")}
+                          {list(item.ratings).length ? ` · ${list(item.ratings).length} 个评分源` : ""}
+                          {list(item.aspect_summary).length ? ` · ${list(item.aspect_summary).length} 个口碑方面` : ""}
+                        </span>
+                      );
+                    }
+                    if (name === "观看/购买入口") {
+                      const official = list(item.official_sources);
+                      const fallback = list(item.search_fallbacks);
+                      return (
+                        <span key={i}>
+                          正版/官方入口 {official.length} 个
+                          {official[0] ? ` · ${text(official[0].label || official[0].site || official[0].source)}` : ""}
+                          {fallback.length ? ` · 兜底搜索 ${fallback.length}` : ""}
+                        </span>
+                      );
+                    }
+                    if (name === "Release/RSS") {
+                      const groups = list(item.groups);
+                      const fallback = list(item.fallback_items);
+                      const links = list(item.search_links);
+                      return (
+                        <span key={i}>
+                          RSS 组 {groups.length} 个
+                          {groups[0] ? ` · ${text(groups[0].source)} ${text(groups[0].subgroup, "")}` : ""}
+                          {fallback.length ? ` · fallback ${fallback.length}` : ""}
+                          {links.length ? ` · 搜索入口 ${links.length}` : ""}
+                        </span>
+                      );
+                    }
+                    if (name === "OP/ED/音乐") {
+                      return (
+                        <span key={i}>
+                          {text(item.kind, "music")} · {text(item.song_title || item.matched_bangumi_music_name)}
+                          {list<string>(item.artists).length ? ` · ${list<string>(item.artists).slice(0, 3).join(" / ")}` : ""}
+                          {item.matched_bangumi_music_id ? ` · BGM#${item.matched_bangumi_music_id}` : ""}
+                        </span>
+                      );
+                    }
+                    if (name === "分集热度雷达") {
+                      return <span key={i}>EP {item.ep || item.sort} · {item.comments ?? 0} 讨论 · {text(item.name, "")}</span>;
+                    }
+                    if (name === "跨媒体关系") {
+                      return <span key={i}>{text(item.relation)} · {text(item.name_cn || item.name)} · {text(item.type_name, "")}</span>;
+                    }
+                    if (name === "补番路线") {
+                      const order = list(item.watch_order);
+                      const sides = list(item.side_stories);
+                      const skips = list(item.skip_candidates);
+                      return (
+                        <span key={i}>
+                          主线 {order.length} 部 · 旁支 {sides.length} 部 · 可跳过 {skips.length} 部
+                          {order[0] ? ` · 入口 ${text(order[0].name)}` : ""}
+                        </span>
+                      );
+                    }
+                    return <span key={i}>{text(item.consensus || item.title || item.name || item.label || item.source || JSON.stringify(item).slice(0, 80))}</span>;
+                  })}
+                </div>
+              ) : <EmptyHint text="暂无数据" />}
+              {list<string>(section.notes).length > 0 && (
+                <div className="caveats">{list<string>(section.notes).slice(0, 2).map((n, i) => <span key={i}>{n}</span>)}</div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      {list<string>(data.quick_actions).length > 0 && (
+        <div className="followups">{list<string>(data.quick_actions).map((q, i) => <span className="chip ghost" key={i}>{q}</span>)}</div>
+      )}
+      {list<string>(data.caveats).length > 0 && (
+        <div className="caveats">{list<string>(data.caveats).map((n, i) => <span key={i}>{n}</span>)}</div>
+      )}
+    </Panel>
+  );
+}
+
+function AnimeMusicThemesPanel({ data }: { data: AnyRecord }) {
+  const subject = data.subject || {};
+  const fused = list(data.fused);
+  return (
+    <Panel title="OP/ED/音乐融合" subtitle={text(subject.name)}>
+      <div className="evidence-row">
+        <Badge tone="good">Bangumi music {list(data.bangumi_music).length}</Badge>
+        <Badge tone="dim">AnimeThemes {list(data.animethemes_entries).length}</Badge>
+      </div>
+      <div className="rec-grid">
+        {fused.map((item, i) => {
+          const href = item.bangumi_url || item.animethemes_url || item.video_url || "";
+          return (
+            <a className="rec-card" href={href || undefined} target={href ? "_blank" : undefined} rel={href ? "noreferrer" : undefined} key={`${item.song_title}-${i}`}>
+              <div className="rec-body">
+                <div className="card-title">{text(item.song_title || item.matched_bangumi_music_name)}</div>
+                <div className="card-meta">
+                  {text(item.kind, "music")}
+                  {item.theme_type ? ` · ${item.theme_type}${item.sequence ? ` ${item.sequence}` : ""}` : ""}
+                  {item.score ? ` · BGM ${item.score}` : ""}
+                </div>
+                {list<string>(item.artists).length > 0 && (
+                  <div className="compact-list inline">{list<string>(item.artists).slice(0, 4).map((a) => <span key={a}>{a}</span>)}</div>
+                )}
+                <p className="card-note">{text(item.mapping_note, "")}</p>
+              </div>
+            </a>
+          );
+        })}
+      </div>
+      {list<string>(data.notes).length > 0 && (
+        <div className="caveats">{list<string>(data.notes).map((n, i) => <span key={i}>{n}</span>)}</div>
+      )}
+      {list<string>(data.caveats).length > 0 && (
+        <div className="caveats">{list<string>(data.caveats).map((n, i) => <span key={i}>{n}</span>)}</div>
+      )}
+    </Panel>
+  );
+}
+
+function AnimeThemesPanel({ data }: { data: AnyRecord }) {
+  const entries = list(data.entries);
+  return (
+    <Panel title="AnimeThemes 音乐元数据" subtitle={`${text(data.query)} · ${entries.length} 条`}>
+      <div className="rec-grid">
+        {entries.map((entry, i) => (
+          <a className="rec-card" href={entry.page_url || entry.video_url} target="_blank" rel="noreferrer" key={`${entry.slug}-${i}`}>
+            <div className="rec-body">
+              <div className="card-title">{text(entry.song_title || entry.anime_title)}</div>
+              <div className="card-meta">{text(entry.anime_title)} · {text(entry.theme_type)}{entry.sequence ? ` ${entry.sequence}` : ""}</div>
+              <div className="compact-list inline">
+                {list<string>(entry.artists).slice(0, 4).map((a) => <span key={a}>{a}</span>)}
+              </div>
+            </div>
+          </a>
         ))}
       </div>
       {list<string>(data.notes).length > 0 && (
@@ -2480,6 +3048,11 @@ export const PANEL_LABELS: Record<string, string> = {
   list_weekly_digest_inbox: "收件箱",
   get_broadcast_calendar: "放送日历",
   get_airing_progress: "追番进度",
+  watch_cockpit: "追番驾驶舱",
+  subject_dossier: "作品档案",
+  franchise_map: "IP 图谱",
+  monthly_watch_report: "月度报告",
+  anime_music_themes: "OP/ED/音乐",
   where_to_watch: "观看/购买渠道",
   get_anime_release_feeds: "离线资源",
   get_bangumi_index: "目录清单",
@@ -2489,6 +3062,8 @@ export const PANEL_LABELS: Record<string, string> = {
   compare_user_taste: "口味同步率",
   explore_voice_network: "声优网络",
   episode_buzz_radar: "分集雷达",
+  search_anime_themes: "AnimeThemes",
+  plan_watch_order: "补番路线",
   plan_watch_copilot: "追番副驾",
   build_weekly_digest: "周报",
   build_collection_dashboard: "收藏仪表盘",
@@ -2532,6 +3107,11 @@ export function renderPanelByName(name: string, rows: AnyRecord[], h: PanelHandl
     case "list_weekly_digest_inbox": return render((d, i) => <InboxPanel data={d} key={`${name}-${i}`} />);
     case "get_broadcast_calendar": return render((d, i) => <BroadcastCalendarPanel data={d} onPrepareWrite={h.onPrepareWrite} key={`${name}-${i}`} />);
     case "get_airing_progress": return render((d, i) => <AiringProgressPanel data={d} key={`${name}-${i}`} />);
+    case "watch_cockpit": return render((d, i) => <ProductSectionsPanel data={d} title="追番驾驶舱" key={`${name}-${i}`} />);
+    case "subject_dossier": return render((d, i) => <SubjectDossierPanel data={d} key={`${name}-${i}`} />);
+    case "franchise_map": return render((d, i) => <ProductSectionsPanel data={d} title="IP 图谱" key={`${name}-${i}`} />);
+    case "monthly_watch_report": return render((d, i) => <MonthlyWatchReportPanel data={d} key={`${name}-${i}`} />);
+    case "anime_music_themes": return render((d, i) => <AnimeMusicThemesPanel data={d} key={`${name}-${i}`} />);
     case "where_to_watch": return render((d, i) => <WhereToWatchPanel data={d} key={`${name}-${i}`} />);
     case "get_anime_release_feeds": return render((d, i) => <ReleaseFeedsPanel data={d} onPrepareDownloaderPush={h.onPrepareDownloaderPush} key={`${name}-${i}`} />);
     case "get_bangumi_index": return render((d, i) => <BangumiIndexPanel data={d} onPrepareWrite={h.onPrepareWrite} key={`${name}-${i}`} />);
@@ -2541,6 +3121,8 @@ export function renderPanelByName(name: string, rows: AnyRecord[], h: PanelHandl
     case "compare_user_taste": return render((d, i) => <TasteAffinityPanel data={d} key={`${name}-${i}`} />);
     case "explore_voice_network": return render((d, i) => <ExplorerPanel data={d} key={`${name}-${i}`} />);
     case "episode_buzz_radar": return render((d, i) => <EpisodeRadarPanel data={d} key={`${name}-${i}`} />);
+    case "search_anime_themes": return render((d, i) => <AnimeThemesPanel data={d} key={`${name}-${i}`} />);
+    case "plan_watch_order": return render((d, i) => <WatchOrderPanel data={d} key={`${name}-${i}`} />);
     case "plan_watch_copilot": return render((d, i) => <WatchCopilotPanel data={d} key={`${name}-${i}`} />);
     case "build_weekly_digest": return render((d, i) => <WeeklyDigestPanel data={d} key={`${name}-${i}`} />);
     case "build_collection_dashboard": return render((d, i) => <CollectionDashboardPanel data={d} key={`${name}-${i}`} />);

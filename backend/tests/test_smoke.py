@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from otomo.agent._common import _looks_like_leak_prefix, should_fallback_answer
 from otomo.agent.contracts import Tool, ToolResult
 from otomo.agent.registry import ToolRegistry
+from otomo.factory import build_registry
 from otomo.tools.bangumi import build_bangumi_tools
 from otomo.tools.bangumi.client import BangumiClient
 
@@ -67,6 +68,20 @@ def test_bangumi_tools_build_and_schema():
     for t in tools:
         s = t.openai_schema()
         assert s["function"]["name"] == t.name
+
+
+def test_phase19_product_loop_tools_are_registered():
+    registry = build_registry(BangumiClient())
+    names = set(registry._tools.keys())
+    assert {
+        "watch_cockpit",
+        "subject_dossier",
+        "franchise_map",
+        "monthly_watch_report",
+        "anime_music_themes",
+        "search_anime_themes",
+        "plan_watch_order",
+    } <= names
 
 
 def test_final_answer_fallback_rejects_single_marker_fragments():

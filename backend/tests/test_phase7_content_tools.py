@@ -6,6 +6,7 @@ from datetime import datetime
 from otomo.auth import AuthStore
 from otomo.memory import LongTermMemory
 from otomo.tools.videos.tool import BiliSubtitleSegment, _parse_danmaku, _rough_subtitle_summary
+from otomo.tools.videos.tool import _guide_links, classify_subject_verticals
 from otomo.tools.watchorder.tool import (
     ConfigureWeeklyDigestArgs,
     ConfigureWeeklyDigestTool,
@@ -13,6 +14,7 @@ from otomo.tools.watchorder.tool import (
     GenerateWeeklyDigestNowTool,
     WeeklyDigestArgs,
     WeeklyDigestTool,
+    _watch_metadata,
 )
 from otomo.tools.websearch.tool import _TextExtractor, _highlights
 from otomo.tools.websearch.tool import BrowserFetchArgs, BrowserFetchSummaryTool, _validate_public_url
@@ -60,6 +62,33 @@ def test_parse_bili_danmaku_xml():
     assert len(items) == 2
     assert items[0].time == 1.2
     assert items[1].text == "期待"
+
+
+def test_watch_order_metadata_marks_recap_and_ova():
+    necessity, advice, hint = _watch_metadata("某作品 总集篇", "续集", "main", 1)
+    assert necessity == "skip"
+    assert "总集篇" in advice
+    assert "总集篇" in hint
+
+    necessity, advice, hint = _watch_metadata("某作品 OVA", "番外篇", "side", 2)
+    assert necessity == "optional"
+    assert "OVA" in advice or "番外" in advice
+    assert "2" in hint
+
+
+def test_guide_routing_prefers_vertical_up_sources():
+    yuri = classify_subject_verticals(["百合", "校园", "日常"], title="百合新番")
+    assert yuri[0].name == "yuri_core"
+    yuri_links = _guide_links("某百合番", "review", 3, ["百合", "校园"])
+    assert yuri_links[0].up_name == "FlowerMX-花梦"
+    assert any(v.name == "yuri_core" for v in yuri_links[0].verticals)
+    assert yuri_links[0].route_score > yuri_links[-1].route_score
+
+    kirara = classify_subject_verticals(["まんがタイムきらら", "日常"], title="芳文社新番")
+    assert kirara[0].name == "kirara"
+    kirara_links = _guide_links("某芳文番", "review", 3, ["まんがタイムきらら", "日常"])
+    assert kirara_links[0].up_name in {"芳文观星台", "大猫猫组"}
+    assert any(v.name == "kirara" for v in kirara_links[0].verticals)
 
 
 class FakeBangumiClient:

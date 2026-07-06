@@ -482,6 +482,12 @@ _PANEL_TOOLS = {
     "recommend_subjects",
     "get_broadcast_calendar",
     "get_airing_progress",
+    "watch_cockpit",
+    "subject_dossier",
+    "franchise_map",
+    "monthly_watch_report",
+    "anime_music_themes",
+    "search_anime_themes",
     "explore_voice_network",
     "episode_buzz_radar",
     "extract_visual_text",
@@ -502,6 +508,7 @@ _PANEL_TOOLS = {
     "get_anime_release_feeds",
     "get_bangumi_index",
     "build_aspect_profile",
+    "plan_watch_order",
     "plan_watch_copilot",
     "build_taste_report",
     "build_collection_dashboard",
@@ -603,6 +610,7 @@ def _safe_season_payload(data: dict[str, Any]) -> dict[str, Any]:
         copied["tags"] = _trim_strings(copied.get("tags"), limit=10, text_limit=40)
         copied["match_tags"] = _trim_strings(copied.get("match_tags"), limit=6, text_limit=40)
         copied["evidence"] = _trim_strings(copied.get("evidence"), limit=6, text_limit=160)
+        copied["hotness_evidence"] = _trim_strings(copied.get("hotness_evidence"), limit=4, text_limit=120)
         copied["guide_videos"] = _trim_dicts(copied.get("guide_videos"), limit=3)
         items.append(copied)
     digests = []
@@ -614,6 +622,7 @@ def _safe_season_payload(data: dict[str, Any]) -> dict[str, Any]:
         })
     return {
         "season": data.get("season"),
+        "mode": data.get("mode"),
         "count": data.get("count"),
         "personalized": data.get("personalized"),
         "profile_tags": _trim_strings(data.get("profile_tags"), limit=12, text_limit=40),
@@ -634,6 +643,11 @@ def _safe_recommend_payload(data: dict[str, Any]) -> dict[str, Any]:
         copied["evidence"] = _trim_dicts(copied.get("evidence"), limit=8)
         copied["external_mappings"] = _trim_dicts(copied.get("external_mappings"), limit=6)
         copied["quality_badges"] = _trim_strings(copied.get("quality_badges"), limit=5, text_limit=120)
+        copied["why_recalled"] = _trim_strings(copied.get("why_recalled"), limit=5, text_limit=120)
+        copied["fit_points"] = _trim_strings(copied.get("fit_points"), limit=5, text_limit=120)
+        copied["risks"] = _trim_strings(copied.get("risks"), limit=5, text_limit=120)
+        copied["next_step"] = _trim_strings(copied.get("next_step"), limit=5, text_limit=120)
+        copied["heat"] = copied.get("heat") if isinstance(copied.get("heat"), dict) else {}
         copied["aspect_matches"] = _trim_strings(copied.get("aspect_matches"), limit=6, text_limit=120)
         copied["aspect_warnings"] = _trim_strings(copied.get("aspect_warnings"), limit=6, text_limit=120)
         copied["source_routes"] = _trim_strings(copied.get("source_routes"), limit=6, text_limit=160)
@@ -642,6 +656,7 @@ def _safe_recommend_payload(data: dict[str, Any]) -> dict[str, Any]:
         items.append(copied)
     return {
         "subject_type": data.get("subject_type"),
+        "scenario": data.get("scenario"),
         "based_on_tags": _trim_strings(data.get("based_on_tags"), limit=12, text_limit=40),
         "mode": data.get("mode"),
         "items": items,
@@ -652,6 +667,7 @@ def _safe_recommend_payload(data: dict[str, Any]) -> dict[str, Any]:
         "critique_chips": _trim_strings(data.get("critique_chips"), limit=6, text_limit=80),
         "mapping_warnings": _trim_strings(data.get("mapping_warnings"), limit=8, text_limit=160),
         "media_strategy": data.get("media_strategy") if isinstance(data.get("media_strategy"), dict) else {},
+        "feedback_policy": data.get("feedback_policy") if isinstance(data.get("feedback_policy"), dict) else {},
     }
 
 
@@ -692,6 +708,27 @@ def _safe_watch_copilot_payload(data: dict[str, Any]) -> dict[str, Any]:
         "continue_watching": items("continue_watching", 8),
         "start_from_wishlist": items("start_from_wishlist", 8),
         "revive_on_hold": items("revive_on_hold", 8),
+        "notes": _trim_strings(data.get("notes"), limit=8, text_limit=180),
+    }
+
+
+def _safe_watch_order_payload(data: dict[str, Any]) -> dict[str, Any]:
+    def items(key: str, limit: int) -> list[dict[str, Any]]:
+        out = []
+        for item in _trim_dicts(data.get(key), limit=limit):
+            copied = dict(item)
+            copied["skip_advice"] = _trim_text(copied.get("skip_advice"), 180)
+            copied["duration_hint"] = _trim_text(copied.get("duration_hint"), 80)
+            copied["relation"] = _trim_text(copied.get("relation"), 40)
+            out.append(copied)
+        return out
+
+    return {
+        "ip": _trim_text(data.get("ip"), 140),
+        "watch_order": items("watch_order", 24),
+        "side_stories": items("side_stories", 16),
+        "alternate_routes": items("alternate_routes", 16),
+        "skip_candidates": items("skip_candidates", 12),
         "notes": _trim_strings(data.get("notes"), limit=8, text_limit=180),
     }
 
@@ -925,6 +962,58 @@ def _safe_episode_radar_payload(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _safe_product_sections_payload(data: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "username": data.get("username"),
+        "today": data.get("today"),
+        "subject": data.get("subject"),
+        "summary": data.get("summary"),
+        "subscription": data.get("subscription"),
+        "sections": [],
+        "quick_actions": _trim_strings(data.get("quick_actions"), limit=8, text_limit=80),
+        "next_actions": _trim_strings(data.get("next_actions"), limit=8, text_limit=120),
+        "caveats": _trim_strings(data.get("caveats"), limit=5, text_limit=180),
+    }
+    for section in _trim_dicts(data.get("sections"), limit=8):
+        out["sections"].append({
+            "title": section.get("title"),
+            "items": _trim_dicts(section.get("items"), limit=16),
+            "notes": _trim_strings(section.get("notes"), limit=3, text_limit=140),
+        })
+    return out
+
+
+def _safe_franchise_payload(data: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "seed": data.get("seed"),
+        "nodes": _trim_dicts(data.get("nodes"), limit=80),
+        "edges": _trim_dicts(data.get("edges"), limit=120),
+        "groups": data.get("groups") or {},
+        "suggested_order": (data.get("suggested_order") or [])[:40],
+        "notes": _trim_strings(data.get("notes"), limit=4, text_limit=160),
+    }
+
+
+def _safe_animethemes_payload(data: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "query": data.get("query"),
+        "count": data.get("count"),
+        "entries": _trim_dicts(data.get("entries"), limit=20),
+        "notes": _trim_strings(data.get("notes"), limit=3, text_limit=160),
+    }
+
+
+def _safe_anime_music_payload(data: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "subject": data.get("subject"),
+        "bangumi_music": _trim_dicts(data.get("bangumi_music"), limit=18),
+        "animethemes_entries": _trim_dicts(data.get("animethemes_entries"), limit=18),
+        "fused": _trim_dicts(data.get("fused"), limit=24),
+        "notes": _trim_strings(data.get("notes"), limit=4, text_limit=180),
+        "caveats": _trim_strings(data.get("caveats"), limit=4, text_limit=180),
+    }
+
+
 def _safe_multimodal_payload(data: dict[str, Any]) -> dict[str, Any]:
     candidates = []
     for item in _trim_dicts(data.get("candidates"), limit=10):
@@ -1142,8 +1231,18 @@ def panel_data_from_payload(name: str, payload: dict[str, Any] | None) -> dict[s
         return _safe_broadcast_calendar_payload(data)
     if name == "get_airing_progress":
         return _safe_airing_progress_payload(data)
+    if name in {"watch_cockpit", "subject_dossier", "monthly_watch_report"}:
+        return _safe_product_sections_payload(data)
+    if name == "franchise_map":
+        return _safe_franchise_payload(data)
+    if name == "anime_music_themes":
+        return _safe_anime_music_payload(data)
+    if name == "search_anime_themes":
+        return _safe_animethemes_payload(data)
     if name == "build_aspect_profile":
         return _safe_aspect_profile_payload(data)
+    if name == "plan_watch_order":
+        return _safe_watch_order_payload(data)
     if name == "plan_watch_copilot":
         return _safe_watch_copilot_payload(data)
     if name == "build_weekly_digest":
