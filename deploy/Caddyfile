@@ -1,15 +1,25 @@
+# OTOMO_DOMAIN 决定证书行为：
+#   localhost           → Caddy 本地自签（浏览器会告警，仅本机测试）
+#   <公网IP>.nip.io     → Caddy 自动申请 Let's Encrypt 真证书（免费、免买域名）
+#   your-domain.com     → 同上，真实域名
+# 走 Cloudflare Tunnel 时外层 HTTPS 由 CF 终结，这里可设 localhost（内部 http）。
 {$OTOMO_DOMAIN:localhost} {
 	encode zstd gzip
 
-	@api path /api/* /auth/* /uploads/* /sessions* /sessions/* /weekly/* /actions/* /feedback/* /health
+	# 后端 API：浏览器一律走 /api/*（含 /api/share/* /api/subscriptions/* /api/notifications/*）。
+	# 裸前缀只留"被外部/浏览器直接命中"的：OAuth 回调 /auth/*、上传预览、健康检查等。
+	# 注意：绝不要把裸 /share/* 放进来——那是前端分享【页面】/share/[type]/[id] 的路由，
+	# 放进来会把公开分享页误导给 backend 而 404。
+	@api path /api/* /auth/* /uploads/* /sessions* /weekly/* /actions/* /feedback/* /health
 	handle @api {
 		uri strip_prefix /api
 		reverse_proxy backend:8000 {
-			# 覆盖（而非默认的追加）客户端预置的 XFF 链，防伪造 IP 绕过后端限流
+			# 覆盖（而非追加）客户端预置的 XFF 链，防伪造 IP 绕过后端限流
 			header_up X-Forwarded-For {client_ip}
 		}
 	}
 
+	# 其余全部给 Next.js 前端（含 /share/[type]/[id] 分享页、/settings 订阅中心）
 	handle {
 		reverse_proxy frontend:3000
 	}

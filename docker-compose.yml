@@ -5,7 +5,9 @@ services:
     env_file:
       - ./backend/.env
     environment:
+      # API 进程不跑调度器（避免多进程重复推送）；调度交给 scheduler 服务
       WEEKLY_SCHEDULER_ENABLED: "false"
+      SUBSCRIPTION_SCHEDULER_ENABLED: "false"
       COOKIE_SECURE: "${COOKIE_SECURE:-false}"
     volumes:
       - ./cache:/app/cache
@@ -21,7 +23,8 @@ services:
       start_period: 20s
     restart: unless-stopped
 
-  weekly:
+  # 常驻调度器：周报 + 主动订阅（每日追番/RSS/生日/月报…）。单实例，避免重复推送。
+  scheduler:
     build:
       context: ./backend
     command: ["python", "-m", "otomo.weekly_daemon"]
@@ -29,6 +32,7 @@ services:
       - ./backend/.env
     environment:
       WEEKLY_SCHEDULER_ENABLED: "true"
+      SUBSCRIPTION_SCHEDULER_ENABLED: "true"
     volumes:
       - ./cache:/app/cache
       - ./logs:/app/logs
@@ -42,8 +46,11 @@ services:
     build:
       context: ./frontend
       args:
-        # NEXT_PUBLIC_* 在 build 期内联进 client bundle，必须走 build args 而非 runtime env
+        # NEXT_PUBLIC_* 在 build 期内联进 client bundle（浏览器侧走 /api 反代）
         NEXT_PUBLIC_BACKEND: "${NEXT_PUBLIC_BACKEND:-/api}"
+    environment:
+      # 分享页是 server component，SSR fetch 在容器内直连后端服务（不能用浏览器相对 /api）
+      INTERNAL_BACKEND: "http://backend:8000"
     expose:
       - "3000"
     depends_on:
@@ -51,6 +58,7 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # 反代 + 自动 HTTPS。OTOMO_DOMAIN 支持：localhost（本机）/ <公网IP>.nip.io（免域名真证书）/ 真实域名。
   caddy:
     image: caddy:2-alpine
     environment:
@@ -65,6 +73,17 @@ services:
     depends_on:
       - frontend
       - backend
+    restart: unless-stopped
+
+  # 可选：Cloudflare Quick Tunnel——没有公网 IP / 没域名 / 在家里的机器也能拿到临时公网 HTTPS URL。
+  # 启用：docker compose --profile tunnel up -d，日志里会打印 https://xxx.trycloudflare.com。
+  # 注意 URL 每次重启会变（OAuth 回调需稳定 URL 时改用 nip.io 方案）。
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: ["tunnel", "--no-autoupdate", "--url", "http://caddy:80"]
+    profiles: ["tunnel"]
+    depends_on:
+      - caddy
     restart: unless-stopped
 
 volumes:

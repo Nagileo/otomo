@@ -1,6 +1,10 @@
 import type { Metadata } from "next";
 
-const BACKEND = process.env.NEXT_PUBLIC_BACKEND ?? "http://localhost:8000";
+// 分享页是 server component：fetch 在 Node 服务端跑，不能用浏览器相对路径 "/api"。
+// 容器里走 INTERNAL_BACKEND（如 http://backend:8000）直连后端；本地开发退回 localhost。
+const BACKEND =
+  process.env.INTERNAL_BACKEND ||
+  (process.env.NEXT_PUBLIC_BACKEND?.startsWith("http") ? process.env.NEXT_PUBLIC_BACKEND : "http://localhost:8000");
 
 type AnyRecord = Record<string, any>;
 
