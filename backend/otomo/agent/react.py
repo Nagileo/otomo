@@ -27,6 +27,7 @@ from .contracts import (
 )
 from .prompts import COMPOSE_PROMPT, SYSTEM_PROMPT
 from .registry import ToolRegistry
+from .tool_router import ToolSelector
 
 
 class ReActRunner(AgentRunner):
@@ -52,7 +53,7 @@ class ReActRunner(AgentRunner):
         C.inject_runtime_state(state.messages, state)
         state.messages.append({"role": "user", "content": user_input})
 
-        tools = self.registry.openai_tools()
+        selector = ToolSelector(self.registry, user_input)
         sources: list[Citation] = []
         seen_urls: set[str] = set()
         steps = 0
@@ -62,12 +63,12 @@ class ReActRunner(AgentRunner):
             for ev in C.runtime_state_events(state):
                 yield ev
 
-            # ---- 阶段 1：工具循环 ---- #
+            # ---- 阶段 1：工具循环（渐进披露：每轮从 selector 取子集，逃生舱可增量加载）---- #
             for _ in range(self.max_iters):
                 resp = await self.llm.chat.completions.create(
                     model=self.model,
                     messages=C.trim_messages(state.messages),
-                    tools=tools,
+                    tools=selector.schemas(),
                     tool_choice="auto",
                 )
                 msg = resp.choices[0].message
@@ -78,16 +79,17 @@ class ReActRunner(AgentRunner):
                         state.messages.append({"role": "system", "content": C.CORRECT_FC})
                         continue
                     break
+                selector.note_meta_calls(msg)
                 async for ev in C.step_tools(self.registry, msg, state.messages, sources, seen_urls, state):
                     if isinstance(ev, ToolCallEvent):
                         steps += 1
                     yield ev
 
-            # ---- 阶段 2：流式最终答案 ---- #
+            # ---- 阶段 2：流式最终答案（不发工具 schema，省 token）---- #
             compose = C.trim_messages(state.messages) + [{"role": "system", "content": COMPOSE_PROMPT}]
             parts: list[str] = []
             leaked: list[bool] = []
-            async for ev in C.stream_answer(self.llm, self.model, compose, tools, leaked):
+            async for ev in C.stream_answer(self.llm, self.model, compose, None, leaked):
                 parts.append(ev.text)
                 yield ev
 

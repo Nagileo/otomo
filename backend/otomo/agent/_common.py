@@ -1444,9 +1444,19 @@ async def step_tools(
 ) -> AsyncIterator[Any]:
     """执行一轮（一个 assistant 回合里的全部 tool_calls），产出 ToolCall/Observation 事件。
     side effect：把 assistant 与 tool 结果消息追加进 messages、新来源并入 sources。"""
+    from .tool_router import META_TOOL, meta_observation
+
     messages.append(assistant_toolcalls_msg(msg))
     for tc in msg.tool_calls:
         call_args = safe_json(tc.function.arguments)
+        # 逃生舱元工具：不走 registry.dispatch（它不是数据工具），回一条"已加载"观察，
+        # 组的实际激活由 runner 调 selector.note_meta_calls 完成（影响下一轮 schema）。
+        if tc.function.name == META_TOOL:
+            obs = meta_observation(tc.function.arguments)
+            yield ToolCallEvent(name=META_TOOL, args=call_args)
+            yield ObservationEvent(name=META_TOOL, ok=True, summary=obs)
+            messages.append({"role": "tool", "tool_call_id": tc.id, "content": obs})
+            continue
         yield ToolCallEvent(name=tc.function.name, args=call_args)
         yield ProgressEvent(stage="tool_start", tool=tc.function.name, summary=f"开始执行 {tc.function.name}")
         progress_queue: asyncio.Queue[ProgressEvent] = asyncio.Queue()
@@ -1489,18 +1499,19 @@ async def run_tool_round(
     model: str,
     registry: ToolRegistry,
     messages: list[dict],
-    tools: list[dict],
+    selector: Any,
     max_iters: int,
     sources: list[Citation],
     seen_urls: set[str],
     state: Any | None = None,
 ) -> AsyncIterator[Any]:
     """一轮"执行"：反复让模型调工具直到它不再调（含 DSML 文本误写的纠正）。
-    ReAct / Plan-Execute / Adaptive 三个 runner 共用。side effect 落到 messages/sources。"""
+    ReAct / Plan-Execute / Adaptive 三个 runner 共用。side effect 落到 messages/sources。
+    selector 是 ToolSelector：每轮重算暴露的工具子集，逃生舱调用后增量激活工具组。"""
     corrections = 0
     for _ in range(max_iters):
         resp = await llm.chat.completions.create(
-            model=model, messages=trim_messages(messages), tools=tools, tool_choice="auto"
+            model=model, messages=trim_messages(messages), tools=selector.schemas(), tool_choice="auto"
         )
         msg = resp.choices[0].message
         if not msg.tool_calls:
@@ -1510,21 +1521,25 @@ async def run_tool_round(
                 messages.append({"role": "system", "content": CORRECT_FC})
                 continue
             return
+        selector.note_meta_calls(msg)  # 逃生舱：激活模型请求的工具组，供下一轮暴露
         async for ev in step_tools(registry, msg, messages, sources, seen_urls, state):
             yield ev
 
 
 async def stream_answer(
-    llm: AsyncOpenAI, model: str, messages: list[dict], tools: list[dict],
+    llm: AsyncOpenAI, model: str, messages: list[dict], tools: list[dict] | None = None,
     leaked: list[bool] | None = None,
 ) -> AsyncIterator[AnswerDeltaEvent]:
     """无工具（tool_choice=none）的流式最终答案；一旦冒出工具标记立即停止吐，并把 True 记入 leaked。
 
     leaked 让调用方知道"流式中途漏了 DSML 标记"——即使已 yield 了残片（如单个"<"），
-    也能据此触发纯文本兜底，而不是把残片当最终答案。"""
-    stream = await llm.chat.completions.create(
-        model=model, messages=messages, tools=tools, tool_choice="none", stream=True
-    )
+    也能据此触发纯文本兜底，而不是把残片当最终答案。
+    tools 传空/None：阶段 2 本就不调工具，不发 schema 省下整份工具 token（96 工具 ~26k）。"""
+    kwargs: dict[str, Any] = {"model": model, "messages": messages, "stream": True}
+    if tools:
+        kwargs["tools"] = tools
+        kwargs["tool_choice"] = "none"
+    stream = await llm.chat.completions.create(**kwargs)
     acc = ""
     pending = ""
     async for chunk in stream:

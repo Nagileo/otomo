@@ -235,3 +235,79 @@ def test_pilgrimage_hotspot_cities_and_custom_center():
     assert got2 is not None and got2[0] == "core"
     # 无坐标的表外目的地仍只能名称匹配
     assert _classify_entry("呉", "广岛市", [34.385, 132.455]) is None
+
+
+def test_tool_selector_coverage_and_subset():
+    """渐进披露：分组+核心必须覆盖全部会暴露给 LLM 的工具（写工具除外），
+    且典型查询暴露的工具数远小于全量。"""
+    import asyncio as _a
+    from otomo.factory import build_registry
+    from otomo.tools.bangumi.client import BangumiClient
+    from otomo.tools.moegirl.client import MoegirlClient
+    from otomo.memory import LongTermMemory
+    from otomo.agent.tool_router import ToolSelector, TOOL_GROUPS, CORE_TOOLS, META_TOOL
+
+    async def scenario():
+        async with BangumiClient() as c:
+            reg = build_registry(c, MoegirlClient(), LongTermMemory())
+            registered = set(reg._tools.keys())
+            writes = {n for n, t in reg._tools.items() if getattr(t, "is_write", False)}
+            grouped = set().union(*[g["tools"] for g in TOOL_GROUPS.values()]) | (CORE_TOOLS - {META_TOOL})
+            # 非写工具必须全部可达（core 或某组），否则渐进披露会永久藏掉某能力
+            assert (registered - writes) - grouped == set(), (registered - writes) - grouped
+            # 组里不能有拼错的工具名
+            assert grouped - registered == set(), grouped - registered
+            full = reg.openai_tools()
+            # 巡礼类查询：子集应含 pilgrimage 工具、且远小于全量
+            sel = ToolSelector(reg, "我想去京都巡礼有什么番")
+            names = {s["function"]["name"] for s in sel.schemas()}
+            assert "get_pilgrimage_map" in names
+            assert META_TOOL in names  # 逃生舱始终在
+            assert len(names) < len(full) * 0.6
+            # 逃生舱：未选中的组能被激活
+            assert "vision" not in sel.active_groups
+            sel.activate("vision")
+            names2 = {s["function"]["name"] for s in sel.schemas()}
+            assert "route_image_source" in names2
+            # 关闭开关 → 回全量
+            sel_off = ToolSelector(reg, "任意", enabled=False)
+            assert len(sel_off.schemas()) >= len(full)
+
+    _a.run(scenario())
+
+
+def test_escape_hatch_step_tools_and_activation():
+    """逃生舱确定性验证：step_tools 对 load_tool_group 回合成观察（不走 dispatch），
+    ToolSelector.note_meta_calls 依模型请求激活工具组，下一轮 schema 即含新工具。"""
+    from types import SimpleNamespace
+    from otomo.agent import _common as C
+    from otomo.agent.tool_router import ToolSelector, META_TOOL
+    from otomo.factory import build_registry
+    from otomo.tools.bangumi.client import BangumiClient
+    from otomo.tools.moegirl.client import MoegirlClient
+    from otomo.memory import LongTermMemory
+
+    async def scenario():
+        async with BangumiClient() as c:
+            reg = build_registry(c, MoegirlClient(), LongTermMemory())
+            sel = ToolSelector(reg, "随便问问")  # 无关键词 → 只有 core
+            assert "get_pilgrimage_map" not in {s["function"]["name"] for s in sel.schemas()}
+            # 模型"调用"逃生舱加载 pilgrimage
+            fake_call = SimpleNamespace(
+                id="c1",
+                function=SimpleNamespace(name=META_TOOL, arguments='{"groups":["pilgrimage"]}'),
+            )
+            fake_msg = SimpleNamespace(tool_calls=[fake_call], content=None)
+            messages: list = []
+            events = []
+            async for ev in C.step_tools(reg, fake_msg, messages, [], set(), None):
+                events.append(ev)
+            # 合成观察发出、且没有真的 dispatch 报 unknown tool
+            obs = [e for e in events if e.type == "observation"]
+            assert obs and obs[0].name == META_TOOL and obs[0].ok
+            assert "get_pilgrimage_map" in obs[0].summary
+            # runner 侧激活 → 下一轮暴露该工具
+            sel.note_meta_calls(fake_msg)
+            assert "get_pilgrimage_map" in {s["function"]["name"] for s in sel.schemas()}
+
+    asyncio.run(scenario())

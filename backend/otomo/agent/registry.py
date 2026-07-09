@@ -28,6 +28,14 @@ class ToolRegistry:
             if include_write or not getattr(t, "is_write", False)
         ]
 
+    def openai_tools_for(self, names: set[str], include_write: bool = False) -> list[dict[str, Any]]:
+        """渐进式披露用：只导出 names 命中的（已注册）工具 schema。未注册的名字（如逃生舱元工具）静默跳过。"""
+        return [
+            t.openai_schema()
+            for name, t in self._tools.items()
+            if name in names and (include_write or not getattr(t, "is_write", False))
+        ]
+
     async def dispatch(self, name: str, arguments_json: str, *, allow_write: bool = False) -> ToolResult:
         """解析 LLM 给的 JSON 参数 → 校验 → 执行。任何异常都收敛成 ok=False 的 ToolResult。"""
         tool = self._tools.get(name)

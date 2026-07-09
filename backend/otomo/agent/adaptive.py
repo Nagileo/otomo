@@ -36,6 +36,7 @@ from .prompts import (
     SYSTEM_PROMPT,
 )
 from .registry import ToolRegistry
+from .tool_router import ToolSelector
 
 
 class AdaptiveRunner(AgentRunner):
@@ -64,7 +65,7 @@ class AdaptiveRunner(AgentRunner):
         C.inject_runtime_state(state.messages, state)
         state.messages.append({"role": "user", "content": user_input})
 
-        tools = self.registry.openai_tools()
+        selector = ToolSelector(self.registry, user_input)
         sources: list[Citation] = []
         seen_urls: set[str] = set()
         steps = 0
@@ -91,7 +92,7 @@ class AdaptiveRunner(AgentRunner):
                 # 简单任务：直接 ReAct，一轮执行即可
                 yield PlanEvent(summary="简单任务 → 直接执行（ReAct）")
                 async for ev in C.run_tool_round(
-                    self.llm, self.model, self.registry, state.messages, tools, self.max_iters, sources, seen_urls, state
+                    self.llm, self.model, self.registry, state.messages, selector, self.max_iters, sources, seen_urls, state
                 ):
                     if isinstance(ev, ToolCallEvent):
                         steps += 1
@@ -101,7 +102,7 @@ class AdaptiveRunner(AgentRunner):
                 yield PlanEvent(summary="综述题 → 一次检索后综合")
                 compose_prompt = SYNTHESIS_COMPOSE
                 async for ev in C.run_tool_round(
-                    self.llm, self.model, self.registry, state.messages, tools,
+                    self.llm, self.model, self.registry, state.messages, selector,
                     min(self.max_iters, 3), sources, seen_urls, state,
                 ):
                     if isinstance(ev, ToolCallEvent):
@@ -115,7 +116,7 @@ class AdaptiveRunner(AgentRunner):
                 )
                 for rnd in range(MAX_REFLECT_ROUNDS):
                     async for ev in C.run_tool_round(
-                        self.llm, self.model, self.registry, state.messages, tools, self.max_iters, sources, seen_urls, state
+                        self.llm, self.model, self.registry, state.messages, selector, self.max_iters, sources, seen_urls, state
                     ):
                         if isinstance(ev, ToolCallEvent):
                             steps += 1
@@ -137,7 +138,7 @@ class AdaptiveRunner(AgentRunner):
             compose = C.trim_messages(state.messages) + [{"role": "system", "content": compose_prompt}]
             parts: list[str] = []
             leaked: list[bool] = []
-            async for ev in C.stream_answer(self.llm, self.model, compose, tools, leaked):
+            async for ev in C.stream_answer(self.llm, self.model, compose, None, leaked):
                 parts.append(ev.text)
                 yield ev
 

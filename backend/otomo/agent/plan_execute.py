@@ -27,6 +27,7 @@ from .contracts import (
 )
 from .prompts import COMPOSE_PROMPT, PLAN_PROMPT, REFLECT_PROMPT, SYSTEM_PROMPT
 from .registry import ToolRegistry
+from .tool_router import ToolSelector
 
 MAX_REFLECT_ROUNDS = 2  # 执行轮上限（首轮 + 一次反思补救）
 
@@ -47,10 +48,10 @@ class PlanExecuteRunner(AgentRunner):
     async def _chat(self, messages: list[dict], **kw):
         return await self.llm.chat.completions.create(model=self.model, messages=messages, **kw)
 
-    def _tool_round(self, state, tools, sources, seen_urls) -> AsyncIterator[AgentEvent]:
+    def _tool_round(self, state, selector, sources, seen_urls) -> AsyncIterator[AgentEvent]:
         """一轮执行：复用共享的 run_tool_round（含 DSML 纠正）。"""
         return C.run_tool_round(
-            self.llm, self.model, self.registry, state.messages, tools, self.max_iters, sources, seen_urls, state
+            self.llm, self.model, self.registry, state.messages, selector, self.max_iters, sources, seen_urls, state
         )
 
     async def stream(
@@ -63,7 +64,7 @@ class PlanExecuteRunner(AgentRunner):
         C.inject_runtime_state(state.messages, state)
         state.messages.append({"role": "user", "content": user_input})
 
-        tools = self.registry.openai_tools()
+        selector = ToolSelector(self.registry, user_input)
         sources: list[Citation] = []
         seen_urls: set[str] = set()
         steps = 0
@@ -90,7 +91,7 @@ class PlanExecuteRunner(AgentRunner):
 
             # ---- 2. EXECUTE + 3. REFLECT（最多 MAX_REFLECT_ROUNDS 轮）---- #
             for rnd in range(MAX_REFLECT_ROUNDS):
-                async for ev in self._tool_round(state, tools, sources, seen_urls):
+                async for ev in self._tool_round(state, selector, sources, seen_urls):
                     if isinstance(ev, ToolCallEvent):
                         steps += 1
                     yield ev
@@ -112,7 +113,7 @@ class PlanExecuteRunner(AgentRunner):
             compose = C.trim_messages(state.messages) + [{"role": "system", "content": COMPOSE_PROMPT}]
             parts: list[str] = []
             leaked: list[bool] = []
-            async for ev in C.stream_answer(self.llm, self.model, compose, tools, leaked):
+            async for ev in C.stream_answer(self.llm, self.model, compose, None, leaked):
                 parts.append(ev.text)
                 yield ev
 
