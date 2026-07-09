@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     csrf_cookie_name: str = "otomo_csrf"
     csrf_header_name: str = "x-otomo-csrf"
     session_store_path: str = "cache/sessions.sqlite3"
+    share_store_path: str = "cache/share_snapshots.sqlite3"
+    subscription_store_path: str = "cache/subscriptions.sqlite3"
     cookie_secure: bool = False          # 生产 HTTPS 必须设 true
     csrf_protection_enabled: bool = True
     session_ttl_seconds: int = 60 * 60 * 24 * 30
@@ -87,14 +89,14 @@ class Settings(BaseSettings):
     weekly_scheduler_enabled: bool = False
     weekly_scheduler_interval_seconds: int = 900
     weekly_webhook_timeout: float = 8.0
-    daily_airing_enabled: bool = False
-    daily_airing_hour: int = 9
-    daily_airing_timezone: str = "Asia/Shanghai"
-    daily_airing_interval_seconds: int = 900
+    subscription_scheduler_enabled: bool = False
+    subscription_scheduler_interval_seconds: int = 900
     rate_limit_enabled: bool = True
     rate_limit_chat_per_minute: int = 10
     rate_limit_chat_per_hour: int = 30
     rate_limit_uploads_per_minute: int = 5
+    rate_limit_share_ip_per_hour: int = 60
+    rate_limit_share_user_per_hour: int = 20
     anonymous_session_turn_limit: int = 8
     # 真实 usage 计量（llm.py 代理逐次累加，DeepSeek cache hit 按 1/10 折算）。
     # 参考量级：一次复杂查询（推荐/资源聚合）约 1~4 万折算 token。
@@ -111,6 +113,9 @@ class Settings(BaseSettings):
 
     # ---- Agent / HTTP ----
     agent_max_iters: int = 8
+    # 渐进式工具披露：核心常驻 + 按查询词法选组 + load_tool_group 逃生舱。
+    # 关掉则回到全量 96 工具塞给模型（对拍/排障用）。
+    tool_progressive_disclosure_enabled: bool = True
     http_timeout: float = 30.0
     cache_ttl: float = 300.0  # Bangumi 响应内存缓存秒数（A5 换 Redis）
     upload_max_image_bytes: int = 6 * 1024 * 1024

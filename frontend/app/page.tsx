@@ -51,8 +51,8 @@ type PendingImage = { id: string; file: File; preview: string };
 type Msg = { role: "user" | "assistant"; content: string; attachments?: ImageAttachment[]; evidence?: EvidenceMap };
 type EvidenceMap = Record<string, Record<string, any>[]>;
 
-// [[panel:tool_name]]：LLM 在正文中锚定证据面板的位置（豆包/Gemini 式 inline 卡片）。
-// 兼容模型偶发输出的 [[panel:tool_name:subject_id]]，但只用 tool_name 做渲染键。
+// [[panel:tool_name]]：LLM 在正文中锚定证据面板的位置。
+// [[panel:tool_name:anchor]]：带 anchor 的单项面板，season_guide_brief 用 subject_id 锚定单个新番卡。
 const PANEL_MARK = /\[\[panel:([a-z_]+)(?::[^\]]*)?\]\]/g;
 
 function inlinePanelNames(content: string, evidence?: EvidenceMap): string[] {
@@ -74,26 +74,31 @@ function AssistantContent({
   evidence?: EvidenceMap;
   handlers: PanelHandlers;
 }) {
-  const parts = content.split(/\[\[panel:([a-z_]+)(?::[^\]]*)?\]\]/);
+  const marker = /\[\[panel:([a-z_]+)(?::([^\]]+))?\]\]/g;
   const used = new Set<string>();
   const nodes: ReactNode[] = [];
-  for (let i = 0; i < parts.length; i++) {
-    if (i % 2 === 0) {
-      if (parts[i].trim()) nodes.push(<Markdown text={parts[i]} key={`md-${i}`} />);
-      continue;
-    }
-    const name = parts[i];
+  let last = 0;
+  let idx = 0;
+  for (const m of content.matchAll(marker)) {
+    const start = m.index ?? 0;
+    const before = content.slice(last, start);
+    if (before.trim()) nodes.push(<Markdown text={before} key={`md-${idx++}`} />);
+    const name = m[1];
+    const anchor = (m[2] || "").trim() || undefined;
     const rows = evidence?.[name] ?? [];
-    if (!used.has(name) && rows.length && PANEL_LABELS[name]) {
-      used.add(name);
+    const key = anchor ? `${name}:${anchor}` : name;
+    if (!used.has(key) && rows.length && PANEL_LABELS[name]) {
+      used.add(key);
       nodes.push(
-        <div className="inline-panel" key={`panel-${name}-${i}`}>
-          {renderPanelByName(name, rows, handlers)}
+        <div className="inline-panel" key={`panel-${key}-${idx++}`}>
+          {renderPanelByName(name, rows, handlers, anchor)}
         </div>,
       );
     }
-    // 无数据/重复的标记直接吞掉，不渲染
+    last = start + m[0].length;
   }
+  const tail = content.slice(last);
+  if (tail.trim()) nodes.push(<Markdown text={tail} key={`md-${idx++}`} />);
   return <>{nodes}</>;
 }
 type SpoilerState = {
@@ -177,6 +182,7 @@ function evidenceSummary(evidence: EvidenceMap) {
     ["get_anime_release_feeds", "离线资源/RSS"],
     ["get_bangumi_index", "Bangumi目录"],
     ["review_subject", "评价矩阵"],
+    ["route_subject_sources", "源路由"],
     ["get_broadcast_calendar", "放送日历"],
     ["get_airing_progress", "追番进度"],
     ["watch_cockpit", "追番驾驶舱"],
@@ -284,7 +290,7 @@ function NotificationSettingsPanel({
       <div className="settings-head">
         <div>
           <div className="settings-title">主动提醒设置</div>
-          <div className="settings-sub">周报、每日追番提醒、站内收件箱、Webhook 和 Email 渠道统一在这里管理</div>
+          <div className="settings-sub">这里保留每周周报的快捷设置；每日追番、RSS、生日和 B站提醒请使用主动订阅中心。</div>
         </div>
         <button className="inline-action" onClick={onToggle} disabled={busy}>收起</button>
       </div>
@@ -302,10 +308,9 @@ function NotificationSettingsPanel({
             </label>
             <label className="setting-card">
               <span className="setting-line">
-                <input type="checkbox" checked={Boolean(sub.daily_enabled)} onChange={(e) => onChange("daily_enabled", e.target.checked)} />
-                <b>每日提醒</b>
+                <a className="inline-action" href="/settings/subscriptions">打开订阅中心</a>
               </span>
-              <span className="setting-copy">适合提醒今日更新、RSS 资源和追番进度。</span>
+              <span className="setting-copy">新版订阅系统统一管理 daily_airing、RSS、新视频和生日提醒。</span>
             </label>
             <label className="setting-field">
               <span>周报日</span>
@@ -316,10 +321,6 @@ function NotificationSettingsPanel({
             <label className="setting-field">
               <span>周报小时</span>
               <input type="number" min={0} max={23} value={Number(sub.hour ?? 9)} onChange={(e) => onChange("hour", Number(e.target.value))} />
-            </label>
-            <label className="setting-field">
-              <span>每日小时</span>
-              <input type="number" min={0} max={23} value={Number(sub.daily_hour ?? 9)} onChange={(e) => onChange("daily_hour", Number(e.target.value))} />
             </label>
             <label className="setting-field">
               <span>时区</span>
@@ -366,10 +367,6 @@ function NotificationSettingsPanel({
               <span>Webhook URL</span>
               <input type="url" value={String(sub.webhook_url ?? "")} onChange={(e) => onChange("webhook_url", e.target.value)} placeholder="https://..." />
             </label>
-            <label className="setting-field">
-              <span>每日提醒时区</span>
-              <input type="text" value={String(sub.daily_timezone ?? "Asia/Shanghai")} onChange={(e) => onChange("daily_timezone", e.target.value)} />
-            </label>
           </div>
           <details className="quiet-detail settings-webpush">
             <summary>Web Push 预留字段</summary>
@@ -408,6 +405,7 @@ function friendlyToolName(name: string) {
     get_anime_release_feeds: "聚合离线RSS",
     get_bangumi_index: "读取Bangumi目录",
     review_subject: "融合评价证据",
+    route_subject_sources: "规划源路由",
     route_image_source: "路由图片来源",
     extract_visual_text: "读取图片文字",
     recommend_by_visual_style: "分析视觉风格",
@@ -529,6 +527,7 @@ export default function Home() {
   const [evidenceMode, setEvidenceMode] = useState<"user" | "dev">("user");
   const [authNotice, setAuthNotice] = useState<AuthNotice | null>(null);
   const [uploadNotice, setUploadNotice] = useState<UploadNotice | null>(null);
+  const [shareNotice, setShareNotice] = useState<AuthNotice | null>(null);
   const [subscriptionOpen, setSubscriptionOpen] = useState(false);
   const [subscription, setSubscription] = useState<NotificationSubscription | null>(null);
   const [subscriptionNotice, setSubscriptionNotice] = useState<AuthNotice | null>(null);
@@ -1251,9 +1250,47 @@ export default function Home() {
     }
   }
 
+  async function createShareSnapshot(req: Record<string, any>) {
+    setShareNotice(null);
+    try {
+      if (!authSessionId.current || !csrfToken.current) await refreshAuthSession();
+      const res = await fetch(`${BACKEND}/share/snapshots`, {
+        method: "POST",
+        credentials: "include",
+        headers: csrfHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({
+          type: req.type,
+          title: req.title,
+          summary: req.summary || req.title || "",
+          payload: req.payload || {},
+          sources,
+          spoiler_level: req.spoiler_level || "none",
+          personalization_mode: req.personalization_mode || "public_generic",
+          include_personalized_reason: req.personalization_mode === "public_personalized",
+        }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok || !payload.ok) {
+        setShareNotice({ tone: "bad", text: payload.detail || payload.error || `生成分享页失败：HTTP ${res.status}` });
+        return;
+      }
+      const url = payload.url || payload.snapshot?.url;
+      if (url) {
+        await navigator.clipboard?.writeText(url).catch(() => undefined);
+        setShareNotice({ tone: "good", text: `分享页已生成，链接已复制：${url}` });
+        window.open(url, "_blank", "noopener,noreferrer");
+      } else {
+        setShareNotice({ tone: "good", text: "分享页已生成。" });
+      }
+    } catch (e) {
+      setShareNotice({ tone: "bad", text: `生成分享页失败：${String(e)}` });
+    }
+  }
+
   const hasEvidence = Object.values(evidence).some((rows) => list(rows).length > 0);
 
   const panelHandlerProps = {
+    onShareSnapshot: createShareSnapshot,
     onCritique: (q: string) => send(q),
     onConfirmAction: (id: string) => postAction("confirm", id),
     onCancelAction: (id: string) => postAction("cancel", id),
@@ -1280,6 +1317,8 @@ export default function Home() {
                 <button className="inline-action" onClick={toggleSubscriptionSettings} disabled={busy || subscriptionBusy}>
                   推送设置
                 </button>
+                <a className="inline-action" href="/share/mine">我的分享</a>
+                <a className="inline-action" href="/settings/subscriptions">订阅中心</a>
                 <button className="inline-action" onClick={logoutBangumi} disabled={busy}>退出</button>
               </>
             ) : (
@@ -1295,6 +1334,7 @@ export default function Home() {
             )}
           </div>
           {authNotice && <div className={`auth-notice ${authNotice.tone}`}>{authNotice.text}</div>}
+          {shareNotice && <div className={`auth-notice ${shareNotice.tone}`}>{shareNotice.text}</div>}
           <NotificationSettingsPanel
             open={subscriptionOpen}
             authenticated={Boolean(auth?.authenticated)}
@@ -1419,11 +1459,12 @@ export default function Home() {
               </div>
             </div>
           )}
-          {/* user 模式：底部只保留 memory 确认流（展示型面板已进消息内）；dev 模式：本轮全家桶便于调试 */}
+          {/* user 模式：底部保留未被正文锚定的面板；dev 模式：本轮全家桶便于调试 */}
           <EvidencePanels
             evidence={evidence}
             mode={evidenceMode}
-            excludeNames={evidenceMode === "user" ? Object.keys(PANEL_LABELS) : []}
+            collapsible={evidenceMode === "user"}
+            excludeNames={evidenceMode === "user" ? inlinePanelNames(answer, evidence) : []}
             {...panelHandlerProps}
           />
           {spoiler?.progress_episode != null && (

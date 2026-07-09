@@ -13,7 +13,8 @@ import signal
 from .auth import AuthStore
 from .memory import LongTermMemory
 from .config import settings
-from .weekly import DailyAiringService, WeeklyDigestService
+from .subscriptions import SubscriptionService, SubscriptionStore
+from .weekly import WeeklyDigestService
 
 
 async def main() -> None:
@@ -28,8 +29,8 @@ async def main() -> None:
     services = []
     if settings.weekly_scheduler_enabled:
         services.append(WeeklyDigestService(ltm, auth))
-    if settings.daily_airing_enabled:
-        services.append(DailyAiringService(ltm, auth))
+    if settings.subscription_scheduler_enabled:
+        services.append(SubscriptionService(SubscriptionStore(), ltm, auth))
     if not services:
         # Standalone worker is usually run with at least one scheduler enabled,
         # but keeping weekly as a default makes local smoke testing explicit.

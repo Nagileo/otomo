@@ -121,6 +121,46 @@ function EmptyHint({ text }: { text: string }) {
   return <div className="empty-hint">{text}</div>;
 }
 
+type ShareSnapshotType = "subject_dossier" | "watch_order" | "monthly_report" | "season_guide" | "watch_cockpit";
+type ShareSnapshotHandler = (req: {
+  type: ShareSnapshotType;
+  title: string;
+  summary?: string;
+  payload: AnyRecord;
+  spoiler_level?: "none" | "mild" | "full";
+  personalization_mode?: "public_generic" | "public_personalized" | "private_preview";
+}) => void;
+
+function ShareSnapshotButton({
+  type,
+  title,
+  payload,
+  onShareSnapshot,
+}: {
+  type: ShareSnapshotType;
+  title: string;
+  payload: AnyRecord;
+  onShareSnapshot?: ShareSnapshotHandler;
+}) {
+  if (!onShareSnapshot) return null;
+  return (
+    <button
+      type="button"
+      className="inline-action"
+      onClick={() => onShareSnapshot({
+        type,
+        title,
+        payload,
+        summary: title,
+        spoiler_level: "none",
+        personalization_mode: "public_generic",
+      })}
+    >
+      生成分享页
+    </button>
+  );
+}
+
 function ReviewEvidencePanel({ data }: { data: AnyRecord }) {
   const ratings = list(data.ratings);
   const aspects = list(data.aspect_summary);
@@ -225,6 +265,63 @@ function ReviewEvidencePanel({ data }: { data: AnyRecord }) {
 
       {list<string>(data.caveats).length > 0 && (
         <div className="caveats">{list<string>(data.caveats).map((c, i) => <span key={i}>{c}</span>)}</div>
+      )}
+    </Panel>
+  );
+}
+
+function SourceRoutingPanel({ data }: { data: AnyRecord }) {
+  const layers = data.source_layers || {};
+  const layerOrder = [
+    ["canonical", "事实层"],
+    ["metadata", "元数据层"],
+    ["reputation", "口碑层"],
+    ["discourse", "话语层"],
+    ["navigation", "导航/资源层"],
+  ];
+  return (
+    <Panel
+      title="跨媒介源路由"
+      subtitle={`${text(data.subject_type)} · ${text(data.intent)} · ${text(data.subject?.name, "未定锚")}`}
+    >
+      {data.decision && <p className="evidence-copy">{text(data.decision)}</p>}
+      {list<string>(data.recommended_tools).length > 0 && (
+        <div className="evidence-row">
+          {list<string>(data.recommended_tools).map((tool) => <Badge key={tool} tone="good">{tool}</Badge>)}
+        </div>
+      )}
+      <div className="taste-groups">
+        {layerOrder.map(([key, label]) => {
+          const sources = list(layers[key]);
+          return (
+            <div className="taste-group" key={key}>
+              <div className="section-title">{label}</div>
+              {sources.length ? (
+                <div className="compact-list">
+                  {sources.map((src, i) => (
+                    <span key={`${src.name}-${i}`}>
+                      <b>{text(src.name)}</b> · {text(src.role)}
+                      {src.recommended_next_tool ? ` · ${src.recommended_next_tool}` : ""}
+                      {src.can_answer_fact ? " · fact-ok" : ""}
+                      {src.risk ? ` · risk ${src.risk}` : ""}
+                    </span>
+                  ))}
+                </div>
+              ) : <EmptyHint text="本层暂无推荐源" />}
+            </div>
+          );
+        })}
+      </div>
+      {list<string>(data.blocked_uses).length > 0 && (
+        <>
+          <div className="section-title">禁用用法</div>
+          <div className="compact-list">
+            {list<string>(data.blocked_uses).map((n, i) => <span key={i}>{n}</span>)}
+          </div>
+        </>
+      )}
+      {list<string>(data.caveats).length > 0 && (
+        <div className="caveats">{list<string>(data.caveats).map((n, i) => <span key={i}>{n}</span>)}</div>
       )}
     </Panel>
   );
@@ -520,8 +617,31 @@ function BangumiIndexPanel({ data, onPrepareWrite }: { data: AnyRecord; onPrepar
   );
 }
 
-function SeasonGuidePanel({ data, onPrepareWrite }: { data: AnyRecord; onPrepareWrite?: PrepareWriteHandler }) {
+function SeasonGuidePanel({
+  data,
+  onPrepareWrite,
+  onShareSnapshot,
+  anchor,
+}: {
+  data: AnyRecord;
+  onPrepareWrite?: PrepareWriteHandler;
+  onShareSnapshot?: ShareSnapshotHandler;
+  anchor?: string;
+}) {
   const items = list(data.items);
+  const anchorKey = String(anchor ?? "").trim();
+  const norm = (v: any) => String(v ?? "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+  const anchoredItem = anchorKey
+    ? items.find((item) => (
+      String(item.subject_id ?? "") === anchorKey
+      || norm(item.title) === norm(anchorKey)
+      || norm(item.yuc_title) === norm(anchorKey)
+      || norm(item.title_jp) === norm(anchorKey)
+    ))
+    : null;
+  if (anchorKey && !anchoredItem) return null;
+  const visibleItems = anchoredItem ? [anchoredItem] : items;
+  const single = Boolean(anchoredItem);
   const renderGuideRoute = (video: AnyRecord, idx: number) => {
     const hit = list(video.verified_hits)[0] || null;
     const href = hit?.url || video.url || video.up_url || "";
@@ -556,16 +676,24 @@ function SeasonGuidePanel({ data, onPrepareWrite }: { data: AnyRecord; onPrepare
   };
   return (
     <Panel
-      title={`季番导视 · ${text(data.season)}`}
-      subtitle={`${data.personalized ? "已按用户画像分诊" : "非个性化导视"} · ${items.length} 部 · mode: ${text(data.mode, "guide")}`}
+      title={single ? `季番导视 · ${text(anchoredItem?.title)}` : `季番导视 · ${text(data.season)}`}
+      subtitle={`${data.personalized ? "已按用户画像分诊" : "非个性化导视"} · ${single ? "单部锚定" : `${items.length} 部`} · mode: ${text(data.mode, "guide")}`}
     >
+      {!single && <div className="panel-actions">
+        <ShareSnapshotButton
+          type="season_guide"
+          title={`季番导视 · ${text(data.season)}`}
+          payload={data}
+          onShareSnapshot={onShareSnapshot}
+        />
+      </div>}
       <div className="evidence-row">
         <Badge tone={data.mode === "hot" ? "warn" : "dim"}>{data.mode === "hot" ? "热播优先" : "口味导视"}</Badge>
         {list<string>(data.profile_tags).slice(0, 8).map((tag) => <Badge key={tag} tone="dim">{tag}</Badge>)}
         {list<string>(data.focus_tags).map((tag) => <Badge key={tag} tone="good">{tag}</Badge>)}
       </div>
       <div className="season-grid">
-        {items.map((item, i) => (
+        {visibleItems.map((item, i) => (
           <div className="season-card" key={`${item.subject_id}-${i}`}>
             {item.image ? <img src={item.image} alt="" /> : <div className="season-noimg" />}
             <div className="season-main">
@@ -633,7 +761,7 @@ function SeasonGuidePanel({ data, onPrepareWrite }: { data: AnyRecord; onPrepare
           </div>
         ))}
       </div>
-      {list(data.guide_videos).length > 0 && (
+      {!single && list(data.guide_videos).length > 0 && (
         <>
           <div className="section-title">季度导视源</div>
           <div className="guide-route-list global">
@@ -641,7 +769,7 @@ function SeasonGuidePanel({ data, onPrepareWrite }: { data: AnyRecord; onPrepare
           </div>
         </>
       )}
-      {list(data.guide_comment_digests).length > 0 && (
+      {!single && list(data.guide_comment_digests).length > 0 && (
         <>
           <div className="section-title">导视评论摘要</div>
           <div className="digest-list">
@@ -1075,7 +1203,7 @@ function WatchCopilotPanel({ data }: { data: AnyRecord }) {
   );
 }
 
-function WatchOrderPanel({ data }: { data: AnyRecord }) {
+function WatchOrderPanel({ data, onShareSnapshot }: { data: AnyRecord; onShareSnapshot?: ShareSnapshotHandler }) {
   const main = list(data.watch_order);
   const sides = list(data.side_stories);
   const alternates = list(data.alternate_routes);
@@ -1117,6 +1245,14 @@ function WatchOrderPanel({ data }: { data: AnyRecord }) {
   );
   return (
     <Panel title={`补番路线 · ${text(data.ip)}`} subtitle="按 Bangumi 关系边、播出日期和必要性整理">
+      <div className="panel-actions">
+        <ShareSnapshotButton
+          type="watch_order"
+          title={`补番路线 · ${text(data.ip)}`}
+          payload={data}
+          onShareSnapshot={onShareSnapshot}
+        />
+      </div>
       <div className="evidence-row">
         <Badge tone="good">主线 {main.length}</Badge>
         <Badge tone="dim">旁支 {sides.length}</Badge>
@@ -1158,7 +1294,7 @@ function WatchOrderPanel({ data }: { data: AnyRecord }) {
   );
 }
 
-function MonthlyWatchReportPanel({ data }: { data: AnyRecord }) {
+function MonthlyWatchReportPanel({ data, onShareSnapshot }: { data: AnyRecord; onShareSnapshot?: ShareSnapshotHandler }) {
   const sections = list(data.sections);
   const byTitle = new Map(sections.map((s) => [String(s.title || ""), s]));
   const summary = data.summary || {};
@@ -1212,6 +1348,14 @@ function MonthlyWatchReportPanel({ data }: { data: AnyRecord }) {
   };
   return (
     <Panel title={`月度报告 · @${text(data.username)}`} subtitle={`${data.year}-${String(data.month || "").padStart(2, "0")} · ${text(data.subject_type)}`}>
+      <div className="panel-actions">
+        <ShareSnapshotButton
+          type="monthly_report"
+          title={`月度报告 · @${text(data.username)} · ${data.year}-${String(data.month || "").padStart(2, "0")}`}
+          payload={data}
+          onShareSnapshot={onShareSnapshot}
+        />
+      </div>
       <div className="metric-grid">
         {metricRows.map(([label, value]) => (
           <div className="metric-card" key={String(label)}>
@@ -1251,7 +1395,17 @@ function MonthlyWatchReportPanel({ data }: { data: AnyRecord }) {
   );
 }
 
-function ProductSectionsPanel({ data, title }: { data: AnyRecord; title: string }) {
+function ProductSectionsPanel({
+  data,
+  title,
+  shareType,
+  onShareSnapshot,
+}: {
+  data: AnyRecord;
+  title: string;
+  shareType?: ShareSnapshotType;
+  onShareSnapshot?: ShareSnapshotHandler;
+}) {
   const subject = data.subject || data.seed || {};
   const sections = list(data.sections);
   const nodes = list(data.nodes);
@@ -1262,6 +1416,16 @@ function ProductSectionsPanel({ data, title }: { data: AnyRecord; title: string 
       title={title}
       subtitle={subject.name ? text(subject.name) : data.username ? `@${text(data.username)}` : text(data.season || data.month || data.today, "")}
     >
+      {shareType && (
+        <div className="panel-actions">
+          <ShareSnapshotButton
+            type={shareType}
+            title={`${title}${subject.name ? ` · ${text(subject.name)}` : ""}`}
+            payload={data}
+            onShareSnapshot={onShareSnapshot}
+          />
+        </div>
+      )}
       {Object.keys(subject).length > 0 && (
         <div className="subject-hero compact">
           {subject.image ? <img src={subject.image} alt="" /> : null}
@@ -1280,7 +1444,7 @@ function ProductSectionsPanel({ data, title }: { data: AnyRecord; title: string 
       {Object.keys(subscription).length > 0 && (
         <div className="evidence-row">
           <Badge tone={subscription.enabled ? "good" : "dim"}>周报 {subscription.enabled ? "on" : "off"}</Badge>
-          <Badge tone={subscription.daily_enabled ? "good" : "dim"}>每日 {subscription.daily_enabled ? "on" : "off"}</Badge>
+          <Badge tone="dim">每日提醒走订阅中心</Badge>
           <Badge tone="dim">push {text(subscription.push_grading, "normal")}</Badge>
           {list<string>(subscription.channels).map((ch) => <Badge key={ch} tone="dim">{ch}</Badge>)}
           {subscription.webhook_format ? <Badge tone="dim">{subscription.webhook_format}</Badge> : null}
@@ -1370,13 +1534,21 @@ function ProductSectionsPanel({ data, title }: { data: AnyRecord; title: string 
   );
 }
 
-function SubjectDossierPanel({ data }: { data: AnyRecord }) {
+function SubjectDossierPanel({ data, onShareSnapshot }: { data: AnyRecord; onShareSnapshot?: ShareSnapshotHandler }) {
   const subject = data.subject || {};
   const sections = list(data.sections);
   const byTitle = new Map(sections.map((s) => [String(s.title || ""), s]));
   const sectionNames = ["评价矩阵", "观看/购买入口", "OP/ED/音乐", "补番路线", "分集热度雷达", "跨媒体关系", "Release/RSS"];
   return (
     <Panel title="作品档案" subtitle={text(subject.name)}>
+      <div className="panel-actions">
+        <ShareSnapshotButton
+          type="subject_dossier"
+          title={`${text(subject.name)} 作品档案`}
+          payload={data}
+          onShareSnapshot={onShareSnapshot}
+        />
+      </div>
       <div className="subject-hero compact">
         {subject.image ? <img src={subject.image} alt="" /> : <div className="rec-noimg" />}
         <div>
@@ -1415,10 +1587,18 @@ function SubjectDossierPanel({ data }: { data: AnyRecord }) {
                       const official = list(item.official_sources);
                       const fallback = list(item.search_fallbacks);
                       return (
-                        <span key={i}>
-                          正版/官方入口 {official.length} 个
-                          {official[0] ? ` · ${text(official[0].label || official[0].site || official[0].source)}` : ""}
-                          {fallback.length ? ` · 兜底搜索 ${fallback.length}` : ""}
+                        <span key={i} className="stacked-line">
+                          <b>正版/官方入口 {official.length} 个 · 兜底搜索 {fallback.length}</b>
+                          {official.slice(0, 4).map((src, idx) => (
+                            <a href={src.url} target="_blank" rel="noreferrer" key={`${src.url}-${idx}`}>
+                              {text(src.label || src.site || src.source)}{src.regions ? ` · ${list<string>(src.regions).join("/")}` : ""}
+                            </a>
+                          ))}
+                          {!official.length && fallback.slice(0, 3).map((src, idx) => (
+                            <a href={src.url} target="_blank" rel="noreferrer" key={`${src.url}-${idx}`}>
+                              {text(src.label || src.source)}
+                            </a>
+                          ))}
                         </span>
                       );
                     }
@@ -1427,11 +1607,18 @@ function SubjectDossierPanel({ data }: { data: AnyRecord }) {
                       const fallback = list(item.fallback_items);
                       const links = list(item.search_links);
                       return (
-                        <span key={i}>
-                          RSS 组 {groups.length} 个
-                          {groups[0] ? ` · ${text(groups[0].source)} ${text(groups[0].subgroup, "")}` : ""}
-                          {fallback.length ? ` · fallback ${fallback.length}` : ""}
-                          {links.length ? ` · 搜索入口 ${links.length}` : ""}
+                        <span key={i} className="stacked-line">
+                          <b>RSS 组 {groups.length} 个 · fallback {fallback.length} 条 · 搜索入口 {links.length} 个</b>
+                          {groups.slice(0, 4).map((group, idx) => (
+                            <a href={group.rss_url || group.url || group.page_url} target="_blank" rel="noreferrer" key={`${group.source}-${group.subgroup}-${idx}`}>
+                              RSS · {text(group.source)} {text(group.subgroup, "")}
+                            </a>
+                          ))}
+                          {links.slice(0, 3).map((link, idx) => (
+                            <a href={link.url} target="_blank" rel="noreferrer" key={`${link.url}-${idx}`}>
+                              搜索 · {text(link.label || link.source)}
+                            </a>
+                          ))}
                         </span>
                       );
                     }
@@ -1445,7 +1632,8 @@ function SubjectDossierPanel({ data }: { data: AnyRecord }) {
                       );
                     }
                     if (name === "分集热度雷达") {
-                      return <span key={i}>EP {item.ep || item.sort} · {item.comments ?? 0} 讨论 · {text(item.name, "")}</span>;
+                      const ep = item.ep || item.sort || item.episode || item.episode_sort || "?";
+                      return <span key={i}>EP {ep} · {item.comments ?? 0} 讨论 · {text(item.name, "")}</span>;
                     }
                     if (name === "跨媒体关系") {
                       return <span key={i}>{text(item.relation)} · {text(item.name_cn || item.name)} · {text(item.type_name, "")}</span>;
@@ -1455,9 +1643,21 @@ function SubjectDossierPanel({ data }: { data: AnyRecord }) {
                       const sides = list(item.side_stories);
                       const skips = list(item.skip_candidates);
                       return (
-                        <span key={i}>
-                          主线 {order.length} 部 · 旁支 {sides.length} 部 · 可跳过 {skips.length} 部
-                          {order[0] ? ` · 入口 ${text(order[0].name)}` : ""}
+                        <span key={i} className="stacked-line">
+                          <b>主线 {order.length} 部 · 旁支 {sides.length} 部 · 可跳过 {skips.length} 部</b>
+                          {order.slice(0, 5).map((x, idx) => (
+                            <a href={x.id ? `https://bgm.tv/subject/${x.id}` : undefined} target="_blank" rel="noreferrer" key={`${x.id}-${idx}`}>
+                              {idx + 1}. {text(x.name)}{x.necessity ? ` · ${text(x.necessity)}` : ""}{x.date ? ` · ${x.date}` : ""}
+                            </a>
+                          ))}
+                          {sides.slice(0, 3).map((x, idx) => (
+                            <a href={x.id ? `https://bgm.tv/subject/${x.id}` : undefined} target="_blank" rel="noreferrer" key={`side-${x.id}-${idx}`}>
+                              旁支 · {text(x.name)}{x.necessity ? ` · ${text(x.necessity)}` : ""}
+                            </a>
+                          ))}
+                          {skips.slice(0, 3).map((x, idx) => (
+                            <span key={`skip-${x.id}-${idx}`}>可跳过 · {text(x.name)}{x.skip_advice ? ` · ${text(x.skip_advice)}` : ""}</span>
+                          ))}
                         </span>
                       );
                     }
@@ -3018,6 +3218,7 @@ function ClaimCheckPanel({ data }: { data: AnyRecord }) {
 
 export type PanelHandlers = {
   devMode?: boolean;
+  onShareSnapshot?: ShareSnapshotHandler;
   onCritique?: (q: string) => void;
   onConfirmAction?: (id: string) => void;
   onCancelAction?: (id: string) => void;
@@ -3059,6 +3260,7 @@ export const PANEL_LABELS: Record<string, string> = {
   recommend_subjects: "推荐候选",
   season_guide_brief: "季番导视",
   review_subject: "评价证据",
+  route_subject_sources: "源路由",
   compare_user_taste: "口味同步率",
   explore_voice_network: "声优网络",
   episode_buzz_radar: "分集雷达",
@@ -3081,7 +3283,7 @@ const MEMORY_KEYS = [
   "record_decision_log", "save_recommendation_list",
 ];
 
-export function renderPanelByName(name: string, rows: AnyRecord[], h: PanelHandlers): ReactNode | null {
+export function renderPanelByName(name: string, rows: AnyRecord[], h: PanelHandlers, anchor?: string): ReactNode | null {
   if (!rows.length) return null;
   if (DEV_ONLY_PANELS.has(name) && !h.devMode) return null;
   const render = (fn: (data: AnyRecord, i: number) => ReactNode) => <>{rows.map(fn)}</>;
@@ -3107,22 +3309,23 @@ export function renderPanelByName(name: string, rows: AnyRecord[], h: PanelHandl
     case "list_weekly_digest_inbox": return render((d, i) => <InboxPanel data={d} key={`${name}-${i}`} />);
     case "get_broadcast_calendar": return render((d, i) => <BroadcastCalendarPanel data={d} onPrepareWrite={h.onPrepareWrite} key={`${name}-${i}`} />);
     case "get_airing_progress": return render((d, i) => <AiringProgressPanel data={d} key={`${name}-${i}`} />);
-    case "watch_cockpit": return render((d, i) => <ProductSectionsPanel data={d} title="追番驾驶舱" key={`${name}-${i}`} />);
-    case "subject_dossier": return render((d, i) => <SubjectDossierPanel data={d} key={`${name}-${i}`} />);
+    case "watch_cockpit": return render((d, i) => <ProductSectionsPanel data={d} title="追番驾驶舱" shareType="watch_cockpit" onShareSnapshot={h.onShareSnapshot} key={`${name}-${i}`} />);
+    case "subject_dossier": return render((d, i) => <SubjectDossierPanel data={d} onShareSnapshot={h.onShareSnapshot} key={`${name}-${i}`} />);
     case "franchise_map": return render((d, i) => <ProductSectionsPanel data={d} title="IP 图谱" key={`${name}-${i}`} />);
-    case "monthly_watch_report": return render((d, i) => <MonthlyWatchReportPanel data={d} key={`${name}-${i}`} />);
+    case "monthly_watch_report": return render((d, i) => <MonthlyWatchReportPanel data={d} onShareSnapshot={h.onShareSnapshot} key={`${name}-${i}`} />);
     case "anime_music_themes": return render((d, i) => <AnimeMusicThemesPanel data={d} key={`${name}-${i}`} />);
     case "where_to_watch": return render((d, i) => <WhereToWatchPanel data={d} key={`${name}-${i}`} />);
     case "get_anime_release_feeds": return render((d, i) => <ReleaseFeedsPanel data={d} onPrepareDownloaderPush={h.onPrepareDownloaderPush} key={`${name}-${i}`} />);
     case "get_bangumi_index": return render((d, i) => <BangumiIndexPanel data={d} onPrepareWrite={h.onPrepareWrite} key={`${name}-${i}`} />);
     case "recommend_subjects": return render((d, i) => <RecommendPanel data={d} onCritique={h.onCritique} onPrepareWrite={h.onPrepareWrite} key={`${name}-${i}`} />);
-    case "season_guide_brief": return render((d, i) => <SeasonGuidePanel data={d} onPrepareWrite={h.onPrepareWrite} key={`${name}-${i}`} />);
+    case "season_guide_brief": return render((d, i) => <SeasonGuidePanel data={d} onPrepareWrite={h.onPrepareWrite} onShareSnapshot={h.onShareSnapshot} anchor={anchor} key={`${name}-${anchor || "all"}-${i}`} />);
     case "review_subject": return render((d, i) => <ReviewEvidencePanel data={d} key={`${name}-${i}`} />);
+    case "route_subject_sources": return render((d, i) => <SourceRoutingPanel data={d} key={`${name}-${i}`} />);
     case "compare_user_taste": return render((d, i) => <TasteAffinityPanel data={d} key={`${name}-${i}`} />);
     case "explore_voice_network": return render((d, i) => <ExplorerPanel data={d} key={`${name}-${i}`} />);
     case "episode_buzz_radar": return render((d, i) => <EpisodeRadarPanel data={d} key={`${name}-${i}`} />);
     case "search_anime_themes": return render((d, i) => <AnimeThemesPanel data={d} key={`${name}-${i}`} />);
-    case "plan_watch_order": return render((d, i) => <WatchOrderPanel data={d} key={`${name}-${i}`} />);
+    case "plan_watch_order": return render((d, i) => <WatchOrderPanel data={d} onShareSnapshot={h.onShareSnapshot} key={`${name}-${i}`} />);
     case "plan_watch_copilot": return render((d, i) => <WatchCopilotPanel data={d} key={`${name}-${i}`} />);
     case "build_weekly_digest": return render((d, i) => <WeeklyDigestPanel data={d} key={`${name}-${i}`} />);
     case "build_collection_dashboard": return render((d, i) => <CollectionDashboardPanel data={d} key={`${name}-${i}`} />);
@@ -3147,6 +3350,7 @@ export function EvidencePanels({
   mode = "user",
   excludeNames = [],
   collapsible = false,
+  onShareSnapshot,
   onCritique,
   onConfirmAction,
   onCancelAction,
@@ -3168,11 +3372,12 @@ export function EvidencePanels({
   onPrepareDownloaderPush?: PrepareDownloaderHandler;
   onVisualFeedback?: (payload: AnyRecord) => void;
   onVisualCorrectionSearch?: (query: string, subjectType?: string) => Promise<AnyRecord[]>;
+  onShareSnapshot?: ShareSnapshotHandler;
 }) {
   const devMode = mode === "dev";
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const handlers: PanelHandlers = {
-    devMode, onCritique, onConfirmAction, onCancelAction, onUndoAction,
+    devMode, onShareSnapshot, onCritique, onConfirmAction, onCancelAction, onUndoAction,
     onPrepareWrite, onPrepareDownloaderPush, onVisualFeedback, onVisualCorrectionSearch,
   };
   const exclude = new Set(excludeNames);

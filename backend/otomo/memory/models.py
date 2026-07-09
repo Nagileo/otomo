@@ -129,9 +129,6 @@ class WeeklyDigestSubscription(BaseModel):
     weekday: int = Field(0, ge=0, le=6, description="0=Monday")
     hour: int = Field(9, ge=0, le=23)
     timezone: str = "Asia/Shanghai"
-    daily_enabled: bool = False
-    daily_hour: int = Field(9, ge=0, le=23)
-    daily_timezone: str = "Asia/Shanghai"
     push_grading: Literal["brief", "normal", "detailed"] = "normal"
     limit: int = Field(8, ge=3, le=20)
     include_on_hold: bool = True
@@ -144,7 +141,6 @@ class WeeklyDigestSubscription(BaseModel):
     web_push_auth: str = ""
     last_delivery: list[dict] = Field(default_factory=list)
     last_run_key: str = ""
-    daily_last_run_key: str = ""
     updated_at: str = ""
 
 

@@ -34,6 +34,7 @@ from .tools.recommend import build_recommend_tools
 from .tools.release import build_release_tools
 from .tools.review import build_review_tools
 from .tools.season import build_season_tools
+from .tools.source_router import build_source_router_tools
 from .tools.spoiler import build_spoiler_tools
 from .tools.user_analysis import build_user_analysis_tools
 from .tools.videos import build_video_tools
@@ -107,6 +108,8 @@ def build_registry(
     for tool in build_review_tools(client):
         registry.register(tool)
     for tool in build_season_tools(client):
+        registry.register(tool)
+    for tool in build_source_router_tools(client):
         registry.register(tool)
     for tool in build_spoiler_tools():
         registry.register(tool)

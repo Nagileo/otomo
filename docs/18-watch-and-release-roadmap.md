@@ -153,7 +153,7 @@
 **验收**：订阅后下次周报含新种子；`forget` 后不再出现。
 
 ### D5 · 单集更新日推（竞品标配，只差一个日更 job）
-[weekly_daemon.py](../backend/otomo/weekly_daemon.py) 加 `DailyAiringService`（同进程同 loop）：开启订阅的用户跑 `get_airing_progress`（+D4 RSS 检查）→ 当日更新/新种子 → inbox + 既有 webhook/email 通道（`webhook_format` 适配已有）。幂等复用 `last_run_key` 模式。config：`daily_airing_enabled: bool = False`（订阅制默认关）。
+[weekly_daemon.py](../backend/otomo/weekly_daemon.py) 只启动统一 `SubscriptionService`：`daily_airing` 规则跑 `get_airing_progress`（+D4 RSS 检查）→ 当日更新/新种子 → inbox + 既有 webhook/email 通道（`webhook_format` 适配已有）。幂等复用 subscription `last_hit_key` 模式；不再保留旧版独立 DailyAiringService。
 **验收**：模拟 airdate=今天 → inbox"今日更新"；同日重跑不重复。
 
 ### D6 · qBittorrent 推送（opt-in，最后做）

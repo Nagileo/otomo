@@ -195,11 +195,39 @@ def _norm_music_title(value: str) -> str:
     return "".join(ch.lower() for ch in str(value or "") if ch.isalnum())
 
 
+def _norm_alias(value: str) -> str:
+    return "".join(ch.lower() for ch in str(value or "") if ch.isalnum())
+
+
+def _alias_match(candidate: str, aliases: list[str]) -> bool:
+    key = _norm_alias(candidate)
+    if not key:
+        return False
+    for alias in aliases:
+        ak = _norm_alias(alias)
+        if len(ak) < 4:
+            continue
+        if key == ak or key in ak or ak in key:
+            return True
+    return False
+
+
+def _find_music_title_match(song_title: str, music_links: list[BangumiMusicLink]) -> BangumiMusicLink | None:
+    song_key = _norm_music_title(song_title)
+    if not song_key:
+        return None
+    for music in music_links:
+        mkey = _norm_music_title(music.name)
+        if song_key and mkey and (song_key in mkey or mkey in song_key):
+            return music
+    return None
+
+
 def _theme_kind(text: str) -> str:
     s = str(text or "").upper()
-    if "OP" in s:
+    if "OP" in s or "片头" in str(text) or "片頭" in str(text) or "オープニング" in str(text):
         return "OP"
-    if "ED" in s:
+    if "ED" in s or "片尾" in str(text) or "エンディング" in str(text):
         return "ED"
     if any(k in s for k in ("OST", "SOUNDTRACK", "原声", "サントラ")):
         return "OST"
@@ -257,19 +285,43 @@ class AnimeMusicThemesTool(Tool):
                     url=f"https://bgm.tv/subject/{rel['id']}",
                 )
             )
-        at_res = await self.animethemes.run(AnimeThemesArgs(title=subject["name"] or args.title, limit=args.limit))
-        at_entries = [e.model_dump(mode="json", exclude_none=True) for e in (at_res.data.entries if at_res.ok and at_res.data else [])]
+        at_queries: list[str] = []
+        for q in (subject.get("name_jp"), subject.get("name"), args.title):
+            qs = str(q or "").strip()
+            if qs and qs not in at_queries:
+                at_queries.append(qs)
+        at_results = await gather_limited(
+            [self.animethemes.run(AnimeThemesArgs(title=q, limit=args.limit)) for q in at_queries[:3]],
+            host="animethemes",
+        )
+        at_entries: list[dict[str, Any]] = []
+        seen_at: set[tuple[str, str, str]] = set()
+        for res in at_results:
+            if isinstance(res, Exception) or not res.ok or not res.data:
+                continue
+            for entry in res.data.entries:
+                row = entry.model_dump(mode="json", exclude_none=True)
+                key = (str(row.get("anime_title") or ""), str(row.get("theme_type") or ""), str(row.get("song_title") or ""))
+                if key in seen_at:
+                    continue
+                seen_at.add(key)
+                at_entries.append(row)
         fused: list[dict[str, Any]] = []
+        visible_at_entries: list[dict[str, Any]] = []
+        hidden_at_entries = 0
+        subject_aliases = [
+            str(subject.get("name") or ""),
+            str(subject.get("name_jp") or ""),
+            str(args.title or ""),
+        ]
         for entry in at_entries:
-            song_key = _norm_music_title(entry.get("song_title", ""))
             kind = _theme_kind(f"{entry.get('theme_type', '')}{entry.get('sequence', '')}")
-            match = None
-            if song_key:
-                for music in music_links:
-                    mkey = _norm_music_title(music.name)
-                    if song_key and mkey and (song_key in mkey or mkey in song_key):
-                        match = music
-                        break
+            match = _find_music_title_match(str(entry.get("song_title") or ""), music_links)
+            anime_match = _alias_match(str(entry.get("anime_title") or ""), subject_aliases) or _alias_match(str(entry.get("slug") or ""), subject_aliases)
+            if not (match or anime_match):
+                hidden_at_entries += 1
+                continue
+            visible_at_entries.append(entry)
             fused.append({
                 "kind": kind,
                 "theme_type": entry.get("theme_type"),
@@ -280,7 +332,7 @@ class AnimeMusicThemesTool(Tool):
                 "video_url": entry.get("video_url") or "",
                 "matched_bangumi_music_id": match.id if match else None,
                 "matched_bangumi_music_name": match.name if match else "",
-                "mapping_note": "title_overlap" if match else "AnimeThemes 条目未与 Bangumi music 精确对齐",
+                "mapping_note": "Bangumi music 标题重叠" if match else "AnimeThemes 动画标题对齐",
             })
         # Bangumi 有 music relation 但 AnimeThemes 没匹配时，也保留为 fused entry，避免只看 OP/ED API 漏掉角色歌/OST。
         matched_ids = {x.get("matched_bangumi_music_id") for x in fused if x.get("matched_bangumi_music_id")}
@@ -298,21 +350,25 @@ class AnimeMusicThemesTool(Tool):
                 "rank": music.rank,
                 "mapping_note": "Bangumi relation music 条目",
             })
+        kind_order = {"OP": 0, "ED": 1, "OST": 2, "角色歌": 3, "music": 4}
+        fused.sort(key=lambda x: (kind_order.get(str(x.get("kind") or "music"), 9), str(x.get("song_title") or "")))
         notes = [
             "Bangumi music relation 是社区锚点，适合关联专辑/角色歌/OST；AnimeThemes 适合 OP/ED 曲目与视频入口。",
-            "AnimeThemes 与 Bangumi music 的对齐只在标题重叠时标记；未对齐不代表矛盾。",
+            "AnimeThemes 条目只有在动画标题或曲名能对齐时才会进入融合列表，避免中文检索误配到其他动画。",
         ]
         caveats = []
         if not music_links:
             caveats.append("Bangumi 未返回 music relation，可能条目未维护或音乐条目未关联。")
         if not at_entries:
             caveats.append("AnimeThemes 未返回 OP/ED 条目，可能未收录或标题检索失败。")
+        if hidden_at_entries:
+            caveats.append(f"AnimeThemes 返回的 {hidden_at_entries} 条结果未能与 Bangumi 条目/音乐条目对齐，已隐藏以避免误配。")
         return ToolResult(
             ok=True,
             data=AnimeMusicThemeResult(
                 subject=subject,
                 bangumi_music=music_links[: args.limit],
-                animethemes_entries=at_entries[: args.limit],
+                animethemes_entries=visible_at_entries[: args.limit],
                 fused=fused[: args.limit],
                 notes=notes,
                 caveats=caveats,
@@ -320,7 +376,7 @@ class AnimeMusicThemesTool(Tool):
             sources=[
                 Citation(title=subject["name"], url=f"https://bgm.tv/subject/{sid}", source="bangumi", image=subject.get("image")),
                 *[Citation(title=m.name, url=m.url, source="bangumi", image=m.image) for m in music_links[:4]],
-                *[Citation(title=e.get("song_title") or e.get("anime_title") or "AnimeThemes", url=e.get("page_url") or e.get("video_url") or "", source="animethemes") for e in at_entries[:4]],
+                *[Citation(title=e.get("song_title") or e.get("anime_title") or "AnimeThemes", url=e.get("page_url") or e.get("video_url") or "", source="animethemes") for e in visible_at_entries[:4]],
             ][:10],
         )
 

@@ -113,9 +113,6 @@ class ConfigureWeeklyDigestArgs(BaseModel):
     weekday: int = Field(0, ge=0, le=6, description="0=Monday")
     hour: int = Field(9, ge=0, le=23)
     timezone: str = "Asia/Shanghai"
-    daily_enabled: bool | None = Field(None, description="每日追番提醒是否启用；不传则保持原值")
-    daily_hour: int | None = Field(None, ge=0, le=23, description="每日提醒小时；不传则保持原值")
-    daily_timezone: str | None = Field(None, description="每日提醒时区；不传则保持原值")
     push_grading: Literal["brief", "normal", "detailed"] = Field("normal", description="推送内容粒度")
     limit: int = Field(8, ge=3, le=20)
     include_on_hold: bool = True
@@ -633,9 +630,6 @@ class ConfigureWeeklyDigestTool(Tool):
             weekday=args.weekday,
             hour=args.hour,
             timezone=args.timezone,
-            daily_enabled=old.daily_enabled if args.daily_enabled is None else args.daily_enabled,
-            daily_hour=old.daily_hour if args.daily_hour is None else args.daily_hour,
-            daily_timezone=old.daily_timezone if args.daily_timezone is None else args.daily_timezone,
             push_grading=args.push_grading or old.push_grading,
             limit=args.limit,
             include_on_hold=args.include_on_hold,
@@ -648,12 +642,10 @@ class ConfigureWeeklyDigestTool(Tool):
             web_push_auth=args.web_push_auth.strip() or old.web_push_auth,
             last_delivery=old.last_delivery,
             last_run_key=old.last_run_key,
-            daily_last_run_key=old.daily_last_run_key,
             updated_at=now_iso(),
         )
         self.ltm.save_user(mem)
-        daily_msg = "每日提醒开启" if mem.weekly_digest_subscription.daily_enabled else "每日提醒关闭"
-        message = ("已开启周报订阅。" if args.enabled else "已关闭周报订阅。") + f" {daily_msg}。"
+        message = ("已开启周报订阅。" if args.enabled else "已关闭周报订阅。") + " 每日追番/RSS/生日提醒请在主动订阅中心配置。"
         return ToolResult(
             ok=True,
             data=WeeklyDigestMemoryResult(

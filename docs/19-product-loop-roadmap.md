@@ -86,7 +86,7 @@ prompt 给一张场景路由表。**不新增工具**。
 显式工具：一个 IP 的全媒介结构（动画→漫画/轻小说原作→galgame→剧场版→音乐），relations 图谱数据现成，输出树状 + 各媒介 Bangumi 评分对比——图谱强项的展示型产品，配 FranchisePanel。
 
 ### C5 · 单集雷达进晨报
-`DailyAiringService`：在看条目当日有新集 → 顺手跑 episode_buzz_radar 最新集 → "昨晚第 8 集讨论量 3 倍于平均，无剧透摘要：……"进晨报。防剧透沿用 progress 硬过滤。
+统一订阅系统的 `daily_airing` 规则：在看条目当日有新集 → 顺手跑 episode_buzz_radar 最新集 → "昨晚第 8 集讨论量 3 倍于平均，无剧透摘要：……"进晨报。防剧透沿用 progress 硬过滤，不再保留独立 DailyAiringService。
 
 ### C6 · 月度报告
 年度报告（taste report）加 `period: "month"`：本月看完/新增/弃坑（含原因信号）/口味漂移对比上月。晨报月初推一次入口。

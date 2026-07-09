@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
 
 from otomo.auth import AuthStore
 from otomo.memory import LongTermMemory
+from otomo.subscriptions import CreateSubscriptionRuleRequest, SubscriptionSchedule, SubscriptionService, SubscriptionStore
 from otomo.tools.release.tool import (
     AnimeReleaseFeedsArgs,
     GetAnimeReleaseFeedsTool,
@@ -12,7 +12,6 @@ from otomo.tools.release.tool import (
 )
 from otomo.tools.watch.tool import WhereToWatchArgs, WhereToWatchTool
 from otomo.tools.yuc.tool import _parse as parse_yuc
-from otomo.weekly import DailyAiringService
 
 
 class FakeBangumi:
@@ -145,7 +144,6 @@ def test_release_tool_groups_mikan_items(monkeypatch):
 
 
 def test_daily_airing_service_writes_once_and_updates_rss(monkeypatch, tmp_path):
-    from otomo import config
     from otomo.memory.models import WatchPlanItem
 
     async def fake_fetch(_url, source):
@@ -162,12 +160,9 @@ def test_daily_airing_service_writes_once_and_updates_rss(monkeypatch, tmp_path)
             )[0]
         ]
 
-    monkeypatch.setattr(config.settings, "daily_airing_enabled", True, raising=False)
-    monkeypatch.setattr(config.settings, "daily_airing_hour", 9, raising=False)
-    monkeypatch.setattr("otomo.weekly.fetch_release_items_from_url", fake_fetch)
+    monkeypatch.setattr("otomo.subscriptions.fetch_release_items_from_url", fake_fetch)
     ltm = LongTermMemory(tmp_path)
     mem = ltm.load_user("alice")
-    mem.weekly_digest_subscription.enabled = True
     mem.watch_plan.append(
         WatchPlanItem(
             id="plan1",
@@ -178,13 +173,24 @@ def test_daily_airing_service_writes_once_and_updates_rss(monkeypatch, tmp_path)
         )
     )
     ltm.save_user(mem)
-    service = DailyAiringService(ltm, AuthStore(tmp_path / "auth"), client_factory=lambda _u, _t: FakeBangumi())
-    now = datetime(2026, 7, 5, 9, 10)
-    first = asyncio.run(service.run_due_once(now))
-    second = asyncio.run(service.run_due_once(now))
+    store = SubscriptionStore(str(tmp_path / "subs.sqlite3"))
+    rule = store.create(
+        CreateSubscriptionRuleRequest(
+            kind="daily_airing",
+            title="每日追番",
+            filters={"include_birthday": False, "include_radar": False, "include_rss": True},
+            schedule=SubscriptionSchedule(timezone="Asia/Shanghai", hour=9, minute=0),
+            channels=["inbox"],
+        ),
+        owner_key="user:alice",
+        username="alice",
+    )
+    service = SubscriptionService(store, ltm, AuthStore(tmp_path / "auth"), client_factory=lambda _u, _t: FakeBangumi())
+    first = asyncio.run(service.run_rule(rule))
+    second = asyncio.run(service.run_rule(rule))
     saved = ltm.load_user("alice")
-    assert first == 1
-    assert second == 0
+    assert first.status == "sent"
+    assert second.status == "skipped"
     assert saved.inbox[-1].kind == "daily_airing"
     assert saved.watch_plan[0].last_seen_pub_date
 

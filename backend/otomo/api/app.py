@@ -35,8 +35,15 @@ from ..quota import (
     estimate_tokens,
 )
 from ..session_store import SessionStore
+from ..share import CreateShareSnapshotRequest, ShareSnapshot, ShareSnapshotStore
+from ..subscriptions import (
+    CreateSubscriptionRuleRequest,
+    SubscriptionService,
+    SubscriptionStore,
+    UpdateSubscriptionRuleRequest,
+)
 from ..uploads import upload_store
-from ..weekly import DailyAiringService, WeeklyDigestService
+from ..weekly import WeeklyDigestService
 from ..agent.plan_execute import PlanExecuteRunner
 from ..agent.react import ReActRunner
 from ..tools.bangumi.client import SUBJECT_TYPE, BangumiClient
@@ -51,15 +58,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.ltm = LongTermMemory()
     app.state.auth = AuthStore()
     app.state.session_store = SessionStore()
+    app.state.share_store = ShareSnapshotStore()
+    app.state.subscription_store = SubscriptionStore()
     app.state.weekly_service = WeeklyDigestService(app.state.ltm, app.state.auth)
-    app.state.daily_airing_service = DailyAiringService(app.state.ltm, app.state.auth)
+    app.state.subscription_service = SubscriptionService(
+        app.state.subscription_store,
+        app.state.ltm,
+        app.state.auth,
+    )
     app.state.weekly_task = (
         asyncio.create_task(app.state.weekly_service.run_forever())
         if settings.weekly_scheduler_enabled else None
     )
-    app.state.daily_airing_task = (
-        asyncio.create_task(app.state.daily_airing_service.run_forever())
-        if settings.daily_airing_enabled else None
+    app.state.subscription_task = (
+        asyncio.create_task(app.state.subscription_service.run_forever())
+        if settings.subscription_scheduler_enabled else None
     )
     app.state.rate_limiter = RateLimiter()
     app.state.quota_store = TokenQuotaStore()
@@ -89,11 +102,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 await app.state.weekly_task
             except asyncio.CancelledError:
                 pass
-        if app.state.daily_airing_task is not None:
-            await app.state.daily_airing_service.stop()
-            app.state.daily_airing_task.cancel()
+        if app.state.subscription_task is not None:
+            await app.state.subscription_service.stop()
+            app.state.subscription_task.cancel()
             try:
-                await app.state.daily_airing_task
+                await app.state.subscription_task
             except asyncio.CancelledError:
                 pass
         await app.state.bangumi.aclose()
@@ -208,9 +221,6 @@ class NotificationSubscriptionUpdate(BaseModel):
     weekday: int | None = Field(None, ge=0, le=6)
     hour: int | None = Field(None, ge=0, le=23)
     timezone: str | None = None
-    daily_enabled: bool | None = None
-    daily_hour: int | None = Field(None, ge=0, le=23)
-    daily_timezone: str | None = None
     push_grading: Literal["brief", "normal", "detailed"] | None = None
     limit: int | None = Field(None, ge=3, le=20)
     include_on_hold: bool | None = None
@@ -312,6 +322,22 @@ def _check_chat_limits(request: Request, auth_session_id: str) -> None:
     limiter.cleanup()
 
 
+def _check_share_limits(request: Request, username: str) -> None:
+    limiter: RateLimiter = app.state.rate_limiter
+    ip = client_ip(request)
+    limiter.check(
+        f"share:ip:{ip}:hour",
+        limit=settings.rate_limit_share_ip_per_hour,
+        window_seconds=3600,
+    )
+    limiter.check(
+        f"share:user:{username}:hour",
+        limit=settings.rate_limit_share_user_per_hour,
+        window_seconds=3600,
+    )
+    limiter.cleanup()
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -341,6 +367,18 @@ async def weekly_run_due(request: Request, response: Response) -> dict[str, Any]
 
 def _subscription_public(sub: WeeklyDigestSubscription) -> dict[str, Any]:
     return sub.model_dump(mode="json")
+
+
+def _share_url(snapshot: ShareSnapshot) -> str:
+    return f"{settings.frontend_base_url.rstrip('/')}/share/{snapshot.type}/{snapshot.id}"
+
+
+def _share_public(snapshot: ShareSnapshot, *, include_owner: bool = False) -> dict[str, Any]:
+    payload = snapshot.model_dump(mode="json", exclude_none=True)
+    payload["url"] = _share_url(snapshot)
+    if not include_owner:
+        payload.pop("owner_key", None)
+    return payload
 
 
 @app.get("/notifications/subscription")
@@ -418,6 +456,140 @@ async def test_notification_subscription(
         "inbox": [x.model_dump(mode="json") for x in mem.inbox[-6:]],
         "memory": memory_summary(mem).model_dump(mode="json"),
     }
+
+
+@app.post("/share/snapshots")
+async def create_share_snapshot(
+    req: CreateShareSnapshotRequest,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    identity = _authenticated_identity(session.auth_session_id)
+    created_by = identity.username or str(identity.user_id or "")
+    _check_share_limits(request, created_by)
+    owner = f"user:{created_by}"
+    snapshot = app.state.share_store.create(req, owner_key=owner, created_by=created_by)
+    return {"ok": True, "id": snapshot.id, "url": _share_url(snapshot), "snapshot": _share_public(snapshot, include_owner=True)}
+
+
+@app.get("/share/snapshots/{share_id}")
+async def get_share_snapshot(share_id: str) -> dict[str, Any]:
+    snapshot = app.state.share_store.get(share_id)
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="分享页不存在、已过期或已撤销")
+    return {"ok": True, "snapshot": _share_public(snapshot)}
+
+
+@app.get("/share/mine")
+async def list_my_share_snapshots(
+    request: Request,
+    response: Response,
+    limit: int = 50,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    identity = _authenticated_identity(session.auth_session_id)
+    username = identity.username or str(identity.user_id or "")
+    rows = app.state.share_store.list_mine(f"user:{username}", limit=limit)
+    return {"ok": True, "snapshots": [_share_public(x, include_owner=True) for x in rows]}
+
+
+@app.delete("/share/snapshots/{share_id}")
+async def revoke_share_snapshot(share_id: str, request: Request, response: Response) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    identity = _authenticated_identity(session.auth_session_id)
+    username = identity.username or str(identity.user_id or "")
+    ok = app.state.share_store.revoke(share_id, f"user:{username}")
+    if not ok:
+        raise HTTPException(status_code=404, detail="分享页不存在或无权撤销")
+    return {"ok": True, "id": share_id}
+
+
+def _subscription_owner(session_id: str) -> tuple[str, str]:
+    identity = _authenticated_identity(session_id)
+    username = identity.username or str(identity.user_id or "")
+    return f"user:{username}", username
+
+
+@app.get("/subscriptions/rules")
+async def list_subscription_rules(request: Request, response: Response) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    owner, username = _subscription_owner(session.auth_session_id)
+    rules = app.state.subscription_store.list_rules(owner)
+    deliveries = app.state.subscription_store.list_deliveries(owner, limit=80)
+    return {
+        "ok": True,
+        "username": username,
+        "rules": [x.model_dump(mode="json", exclude={"owner_key"}) for x in rules],
+        "deliveries": [x.model_dump(mode="json", exclude={"owner_key"}) for x in deliveries],
+    }
+
+
+@app.post("/subscriptions/rules")
+async def create_subscription_rule(
+    req: CreateSubscriptionRuleRequest,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    owner, username = _subscription_owner(session.auth_session_id)
+    rule = app.state.subscription_store.create(req, owner_key=owner, username=username)
+    return {"ok": True, "rule": rule.model_dump(mode="json", exclude={"owner_key"})}
+
+
+@app.patch("/subscriptions/rules/{rule_id}")
+async def update_subscription_rule(
+    rule_id: str,
+    req: UpdateSubscriptionRuleRequest,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    owner, _ = _subscription_owner(session.auth_session_id)
+    rule = app.state.subscription_store.update(rule_id, owner, req)
+    if not rule:
+        raise HTTPException(status_code=404, detail="订阅不存在或无权修改")
+    return {"ok": True, "rule": rule.model_dump(mode="json", exclude={"owner_key"})}
+
+
+@app.delete("/subscriptions/rules/{rule_id}")
+async def delete_subscription_rule(rule_id: str, request: Request, response: Response) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    owner, _ = _subscription_owner(session.auth_session_id)
+    ok = app.state.subscription_store.delete(rule_id, owner)
+    if not ok:
+        raise HTTPException(status_code=404, detail="订阅不存在或无权删除")
+    return {"ok": True, "id": rule_id}
+
+
+@app.post("/subscriptions/rules/{rule_id}/test")
+async def test_subscription_rule(rule_id: str, request: Request, response: Response) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    owner, _ = _subscription_owner(session.auth_session_id)
+    rule = app.state.subscription_store.get(rule_id, owner)
+    if not rule:
+        raise HTTPException(status_code=404, detail="订阅不存在或无权测试")
+    record = await app.state.subscription_service.run_rule(rule, test=True)
+    return {"ok": True, "delivery": record.model_dump(mode="json", exclude={"owner_key"})}
+
+
+@app.get("/subscriptions/deliveries")
+async def list_subscription_deliveries(
+    request: Request,
+    response: Response,
+    rule_id: str | None = None,
+    limit: int = 80,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    owner, _ = _subscription_owner(session.auth_session_id)
+    rows = app.state.subscription_store.list_deliveries(owner, rule_id=rule_id, limit=limit)
+    return {"ok": True, "deliveries": [x.model_dump(mode="json", exclude={"owner_key"}) for x in rows]}
 
 
 @app.get("/auth/bangumi/login")
