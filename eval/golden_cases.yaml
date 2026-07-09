@@ -220,3 +220,74 @@
   expect_any: ["[[panel:"]
   expect_absent: ["| 评分 |", "|评分|"]
   note: 应调对比工具并在正文插 [[panel:]] 锚定标记；正文不得用 markdown 表格复述面板数据（方案C回归保护）
+
+# —— docs/17-20 招牌新能力（观看渠道/资源/巡礼/热播/驾驶舱/档案/源路由/音乐）——
+# 断言路由与面板，不赌易变事实；也是渐进式工具披露的端到端回归。
+- id: where_to_watch_bili
+  question: 《莉可丽丝》在B站能正版看吗？
+  kind: single_hop
+  expect_tools: ["where_to_watch"]
+  expect_panels: ["where_to_watch"]
+  note: 正版观看入口应走 where_to_watch，不该凭空断言平台
+
+- id: release_feeds_offline
+  question: 《孤独摇滚！》有什么下载资源或字幕组 RSS？
+  kind: single_hop
+  expect_tools: ["get_anime_release_feeds"]
+  forbid_tools: ["web_search"]
+  expect_any: ["字幕组", "RSS", "蜜柑", "资源"]
+  note: 离线资源走 get_anime_release_feeds；回答须说明只聚合链接、不下载不托管
+
+- id: pilgrimage_map_route
+  question: 《孤独摇滚！》的圣地巡礼取景地有哪些？
+  kind: single_hop
+  expect_tools: ["get_pilgrimage_map"]
+  forbid_tools: ["web_search"]
+  note: 圣地巡礼走 anitabi 的 get_pilgrimage_map；外部源限流时仍应命中路由
+
+- id: trending_now
+  question: 现在全站最火、大家都在追的番是什么？
+  kind: single_hop
+  expect_tools: ["get_trending_subjects"]
+  forbid_tools: ["web_search"]
+  note: 全站热门走 get_trending_subjects（网页版同源），不该 web 搜索
+
+- id: broadcast_today
+  question: 今天有哪些番更新？
+  kind: single_hop
+  expect_tools: ["get_broadcast_calendar"]
+  forbid_tools: ["web_search"]
+  note: 放送日历走 get_broadcast_calendar，不该 web 搜索
+
+- id: anime_op_music
+  question: 《孤独摇滚！》的 OP 主题曲叫什么、谁唱的？
+  kind: single_hop
+  expect_any: ["結束バンド", "青春", "OP", "主题曲"]
+  expect_tools: ["anime_music_themes"]
+  note: OP/ED 走 anime_music_themes（AnimeThemes 官方源），不拿 B站评论当事实
+
+- id: source_router_gal
+  question: 想认真评价一部 galgame，应该参考哪些来源、各自算什么层级？
+  kind: single_hop
+  expect_tools: ["route_subject_sources"]
+  expect_any: ["批判空间", "VNDB", "canonical", "口碑"]
+  note: 明确问"该看哪些源"才走 route_subject_sources；须分清 canonical/口碑/导航
+
+- id: subject_dossier_page
+  question: 给我一份《摇曳露营△》的完整作品档案。
+  kind: two_hop
+  expect_tools: ["subject_dossier"]
+  expect_panels: ["subject_dossier"]
+  note: 作品档案聚合页走 subject_dossier
+
+- id: franchise_map_ip
+  question: 《Fate》这个系列跨了哪些媒介、有哪些作品？
+  kind: two_hop
+  expect_tools: ["franchise_map"]
+  note: IP 跨媒介图谱走 franchise_map（relations 图谱），不逐个 search
+
+- id: watch_cockpit_open
+  question: 打开我的追番驾驶舱看看这周该追什么。
+  kind: two_hop
+  expect_tools: ["watch_cockpit"]
+  note: 一屏聚合"今天更新/进度/高能集/资源"走 watch_cockpit
