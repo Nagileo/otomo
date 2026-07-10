@@ -45,7 +45,13 @@ class WeeklyDigestService:
             sub = mem.weekly_digest_subscription
             if not sub.enabled:
                 continue
-            local_now = (now or datetime.now(_zone(sub.timezone))).astimezone(_zone(sub.timezone))
+            _tz = _zone(sub.timezone)
+            if now is None:
+                local_now = datetime.now(_tz)
+            elif now.tzinfo is None:
+                local_now = now.replace(tzinfo=_tz)  # naive 视为该时区墙钟，避免按系统时区误解释
+            else:
+                local_now = now.astimezone(_tz)
             if local_now.weekday() != sub.weekday or local_now.hour != sub.hour:
                 continue
             run_key = local_now.strftime("%G-W%V-%u-%H")

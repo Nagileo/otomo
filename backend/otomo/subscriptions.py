@@ -719,8 +719,19 @@ def default_subscription_title(kind: str) -> str:
     }.get(kind, "Otomo 订阅")
 
 
+def _localize(now: datetime | None, tzname: str) -> datetime:
+    """把 now 归一到目标时区。naive datetime 视为"已是该时区的墙钟时间"——不能用
+    .astimezone()，那会按运行机器系统时区解释（本地 UTC+8 vs CI UTC 不一致，曾致 CI 失败）。"""
+    tz = _zone(tzname)
+    if now is None:
+        return datetime.now(tz)
+    if now.tzinfo is None:
+        return now.replace(tzinfo=tz)
+    return now.astimezone(tz)
+
+
 def due_hit_key(rule: SubscriptionRule, now: datetime | None = None) -> str:
-    local_now = (now or datetime.now(_zone(rule.schedule.timezone))).astimezone(_zone(rule.schedule.timezone))
+    local_now = _localize(now, rule.schedule.timezone)
     if rule.schedule.interval_minutes:
         interval = max(5, int(rule.schedule.interval_minutes))
         bucket = int(local_now.timestamp()) // (interval * 60)
@@ -733,7 +744,7 @@ def due_hit_key(rule: SubscriptionRule, now: datetime | None = None) -> str:
 
 
 def is_rule_due(rule: SubscriptionRule, now: datetime | None = None) -> bool:
-    local_now = (now or datetime.now(_zone(rule.schedule.timezone))).astimezone(_zone(rule.schedule.timezone))
+    local_now = _localize(now, rule.schedule.timezone)
     if not rule.enabled:
         return False
     if _inside_quiet_hours(local_now, rule.quiet_hours):
