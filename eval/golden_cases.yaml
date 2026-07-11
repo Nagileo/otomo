@@ -291,3 +291,31 @@
   kind: two_hop
   expect_tools: ["watch_cockpit"]
   note: 一屏聚合"今天更新/进度/高能集/资源"走 watch_cockpit
+
+# —— docs/19 行为验收（R3 反馈闭环 / H2 热播模式 / R1 scenario）——
+- id: feedback_dislike_carries_over
+  kind: multi_turn
+  turns:
+    - question: 我不喜欢校园恋爱题材，以后别再推这类了。
+      expect_tools: ["remember_user_preference"]
+    - question: 再给我推荐几部动画吧。
+      expect_tools: ["recommend_subjects"]
+      expect_absent: ["败犬女主"]
+  note: R3 反馈闭环——dislike 写入长期记忆后，下一轮推荐读 mem.dislikes 生效；
+        「败犬女主」是该测试账号画像下校园恋爱类的稳定 top 候选（金丝雀断言）
+
+- id: season_hot_mode
+  question: 2026年7月现在什么番最热？我该追哪个？
+  kind: two_hop
+  expect_tools: ["season_guide_brief"]
+  expect_panels: ["season_guide_brief"]
+  forbid_tools: ["web_search"]
+  note: H2 热播导视——"最热+追哪个"应走 season_guide_brief(mode=hot) 而非 web 搜索
+
+- id: recommend_tonight_scenario
+  question: 今晚想找一部已经完结的短篇动画一口气看完，帮我挑一部。
+  kind: single_hop
+  expect_tools: ["recommend_subjects"]
+  forbid_tools: ["web_search"]
+  expect_any: ["完结", "集", "短"]
+  note: R1 场景化——今晚看一部应走 recommend_subjects(scenario=tonight)，完结/短篇约束体现在回答里

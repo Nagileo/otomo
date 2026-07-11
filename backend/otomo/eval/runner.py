@@ -114,7 +114,15 @@ async def main_async(args: argparse.Namespace) -> int:
 
     client = BangumiClient()
     moegirl = MoegirlClient()
-    runner = build_runner(client, moegirl, args.runner)
+    # 记忆沙箱：eval 里的偏好/反馈写入（"别再推校园恋爱"等 case）绝不能落进真实
+    # cache/ltm 污染日常画像；每次跑 eval 用一次性临时目录，case 内多轮读写自洽。
+    import tempfile
+
+    from ..memory import LongTermMemory
+
+    ltm = LongTermMemory(base_dir=Path(tempfile.mkdtemp(prefix="otomo-eval-ltm-")))
+    print(f"{DIM}ltm sandbox={ltm.base}{RESET}")
+    runner = build_runner(client, moegirl, args.runner, ltm=ltm)
     llm, model = get_llm(), settings.llm_model
     print(f"{DIM}runner={args.runner}{RESET}\n")
     results: list[CaseResult] = []
