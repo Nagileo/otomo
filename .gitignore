@@ -65,3 +65,5 @@ logs/
 # 浏览器导出的登录态 cookie（B站 SESSDATA 等，等同密码，绝不提交）
 cookies.txt
 *_cookies.txt
+# eval 自动生成的 case 是可再生工件（python -m otomo.eval.generate），不入库
+eval/generated_cases.yaml

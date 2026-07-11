@@ -1,7 +1,7 @@
 # Otomo Frontend
 
 Next.js (App Router) chat，消费后端 `/chat` 的 SSE：左侧流式对话 + 右侧执行轨迹 (trace)。
-后续按 docs/01 升级到 shadcn/ui + Vercel AI SDK。
+面板按域拆在 app/panels/（shared 原语 + media/visual/memory/recommend/product/report）。
 
 ## 跑起来
 
