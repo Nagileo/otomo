@@ -84,6 +84,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 app.state.session_store.cleanup_expired()
             except Exception:  # noqa: BLE001 - 清理失败不影响服务
                 pass
+            try:
+                upload_store.cleanup_expired()  # 上传图片 TTL，防 cache/uploads 无限膨胀
+            except Exception:  # noqa: BLE001
+                pass
             await asyncio.sleep(24 * 3600)
 
     app.state.session_cleanup_task = asyncio.create_task(_session_cleanup_loop())

@@ -99,6 +99,29 @@ class ImageUploadStore:
             return self.to_data_url(value.removeprefix("upload://"))
         return value
 
+    def cleanup_expired(self, ttl_days: int | None = None) -> int:
+        """删除超过 TTL 的上传文件（meta/bin 一视同仁，孤儿文件也清）。返回删除数。
+
+        上传只在识图当轮被 VLM 读取；TTL 后旧会话里的 preview_url 会 404，属预期
+        （类比聊天软件的附件过期）。ttl<=0 表示关闭清理。"""
+        import time
+
+        ttl = settings.upload_ttl_days if ttl_days is None else ttl_days
+        if ttl <= 0:
+            return 0
+        cutoff = time.time() - ttl * 86400
+        removed = 0
+        for p in self.base.iterdir():
+            if p.suffix not in {".json", ".bin"} or not p.is_file():
+                continue
+            try:
+                if p.stat().st_mtime < cutoff:
+                    p.unlink(missing_ok=True)
+                    removed += 1
+            except OSError:
+                continue
+        return removed
+
 
 upload_store = ImageUploadStore()
 

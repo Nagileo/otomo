@@ -311,3 +311,26 @@ def test_escape_hatch_step_tools_and_activation():
             assert "get_pilgrimage_map" in {s["function"]["name"] for s in sel.schemas()}
 
     asyncio.run(scenario())
+
+
+def test_upload_store_ttl_cleanup(tmp_path, monkeypatch):
+    """uploads TTL：过期的 meta+bin 成对删除、未过期保留、ttl<=0 关闭清理。"""
+    import base64
+    import os
+    import time
+
+    from otomo.uploads import ImageUploadStore
+
+    store = ImageUploadStore(base_dir=tmp_path)
+    png = base64.b64encode(b"\x89PNG-fake-payload").decode()
+    old = store.save_data_url(f"data:image/png;base64,{png}", filename="old.png")
+    fresh = store.save_data_url(f"data:image/png;base64,{png}", filename="new.png")
+    # 把 old 的两个文件 mtime 拨回 30 天前
+    past = time.time() - 30 * 86400
+    for p in store._paths(old.id):
+        os.utime(p, (past, past))
+    assert store.cleanup_expired(ttl_days=0) == 0  # 关闭清理
+    removed = store.cleanup_expired(ttl_days=14)
+    assert removed == 2  # old 的 json+bin
+    assert not any(p.exists() for p in store._paths(old.id))
+    assert all(p.exists() for p in store._paths(fresh.id))

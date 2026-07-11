@@ -116,6 +116,8 @@ class Settings(BaseSettings):
     # 渐进式工具披露：核心常驻 + 按查询词法选组 + load_tool_group 逃生舱。
     # 关掉则回到全量 96 工具塞给模型（对拍/排障用）。
     tool_progressive_disclosure_enabled: bool = True
+    # 上传图片保留天数（<=0 关闭清理）。识图只在当轮读取，过期后旧会话预览 404 属预期。
+    upload_ttl_days: int = 14
     http_timeout: float = 30.0
     cache_ttl: float = 300.0  # Bangumi 响应内存缓存秒数（A5 换 Redis）
     upload_max_image_bytes: int = 6 * 1024 * 1024
