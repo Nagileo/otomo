@@ -85,3 +85,29 @@ cd frontend && npm install && npm run dev                       # http://localho
 ## 许可证
 
 代码以 **MIT** 开源（见 [LICENSE](LICENSE)）。非商业、学习 / 研究用途；检索到的第三方内容遵循其各自许可证（见上文红线）。
+
+
+## MCP Server
+
+把 Otomo 的 ACGN 知识工具接进任何 MCP 客户端（Claude Desktop / Claude Code / Cursor…）——
+31 个只读工具：图谱检索、评价融合、季度导视、在哪看、资源 RSS、圣地巡礼、OP/ED、生日、IP 图谱、梗考据。
+
+```bash
+cd backend && pip install -e ".[mcp]"
+```
+
+Claude Desktop 配置（`claude_desktop_config.json`）：
+
+```json
+{
+  "mcpServers": {
+    "otomo": {
+      "command": "python",
+      "args": ["-m", "otomo.mcp_server"],
+      "cwd": "/path/to/otomo/backend"
+    }
+  }
+}
+```
+
+只暴露公共知识面：用户态（长期记忆、收藏写回、个性化画像）不经 MCP 暴露。
