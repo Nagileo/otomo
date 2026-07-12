@@ -358,3 +358,57 @@ def test_selector_exposes_write_tools_in_memory_plan_group():
             assert "execute_bangumi_write_action" not in names2
 
     _a.run(scenario())
+
+
+def test_trajectory_flywheel_log_feedback_export(tmp_path, monkeypatch):
+    """RL 轨迹飞轮：落轮次 → 记反馈 → 导出 SFT/DPO（脱敏、👎不进SFT、偏好成对）。"""
+    import json
+
+    from otomo import trajectory
+    from otomo.config import settings
+
+    monkeypatch.setattr(settings, "trajectory_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "trajectory_log_enabled", True)
+
+    common = dict(session_id="s1", owner="user:nagi", runner="adaptive")
+    msgs = [
+        {"role": "system", "content": "系统提示"},
+        {"role": "user", "content": "推荐点治愈番，我邮箱 a@b.com"},
+        {"role": "assistant", "content": "推荐《摇曳露营》 https://x.com/hook?token=abc123"},
+    ]
+    trajectory.log_turn(turn_id="t1", user_message="推荐点治愈番", final_answer="推荐《摇曳露营》",
+                        messages=msgs, tools_called=["recommend_subjects"], usage_tokens=1234, **common)
+    trajectory.log_turn(turn_id="t2", user_message="推荐点治愈番", final_answer="随便看点啥",
+                        messages=msgs, tools_called=[], usage_tokens=200, **common)
+    trajectory.record_feedback(turn_id="t1", session_id="s1", owner="user:nagi", rating="up")
+    trajectory.record_feedback(turn_id="t2", session_id="s1", owner="user:nagi", rating="down")
+
+    files = list(tmp_path.glob("*.jsonl"))
+    assert any(f.name == "feedback.jsonl" for f in files) and len(files) == 2
+    # owner 伪匿名
+    day = next(f for f in files if f.name != "feedback.jsonl")
+    rec = json.loads(day.read_text(encoding="utf-8").splitlines()[0])
+    assert "nagi" not in json.dumps(rec)
+
+    from scripts.export_trajectories import _scrub, load_all
+    turns, fb = load_all()
+    assert len(turns) == 2 and fb["t1"]["rating"] == "up" and fb["t2"]["rating"] == "down"
+    assert "<email>" in _scrub("a@b.com") and "token=<redacted>" in _scrub("u?token=abc")
+
+    # 导出行为：SFT 排除 👎；DPO 对成型
+    import subprocess, sys, os
+    env = {**os.environ, "TRAJECTORY_DIR": str(tmp_path)}
+    out = subprocess.run(
+        [sys.executable, "-m", "scripts.export_trajectories", "--sft", str(tmp_path / "sft.jsonl"), "--dpo", str(tmp_path / "dpo.jsonl")],
+        capture_output=True, text=True, env=env, cwd=str(pathlib_Path(__file__).resolve().parents[1]),
+    )
+    assert out.returncode == 0, out.stderr
+    sft = [json.loads(x) for x in (tmp_path / "sft.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(sft) == 1 and sft[0]["meta"]["turn_id"] == "t1"  # 👎 t2 被排除
+    assert all(m["role"] != "system" for m in sft[0]["messages"])  # 默认剥 system
+    assert "<email>" in json.dumps(sft[0], ensure_ascii=False)  # 脱敏生效
+    dpo = [json.loads(x) for x in (tmp_path / "dpo.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(dpo) == 1 and dpo[0]["meta"]["chosen_turn"] == "t1" and dpo[0]["meta"]["rejected_turn"] == "t2"
+
+
+from pathlib import Path as pathlib_Path  # noqa: E402

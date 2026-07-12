@@ -43,6 +43,7 @@ from ..subscriptions import (
     UpdateSubscriptionRuleRequest,
 )
 from ..uploads import upload_store
+from .. import trajectory
 from ..weekly import WeeklyDigestService
 from ..agent.plan_execute import PlanExecuteRunner
 from ..agent.react import ReActRunner
@@ -892,6 +893,29 @@ async def prepare_downloader_push(req: PrepareDownloaderPushRequest, request: Re
     )
 
 
+class AnswerFeedbackRequest(BaseModel):
+    session_id: str
+    turn_id: str
+    rating: Literal["up", "down"]
+    note: str = ""
+    auth_session_id: str | None = None
+
+
+@app.post("/feedback/answer")
+async def answer_feedback(req: AnswerFeedbackRequest, request: Request, response: Response) -> dict[str, Any]:
+    """答案级 👍👎（RL 轨迹飞轮的反馈信号，按 turn_id 关联轨迹 JSONL）。匿名也可反馈。"""
+    session = _ensure_auth_session(request, response, req.auth_session_id)
+    _require_csrf(request, session.auth_session_id)
+    record = trajectory.record_feedback(
+        turn_id=req.turn_id[:64],
+        session_id=req.session_id[:64],
+        owner=_session_owner(session.auth_session_id),
+        rating=req.rating,
+        note=req.note,
+    )
+    return {"ok": True, "feedback": record}
+
+
 @app.post("/feedback/visual")
 async def visual_feedback(req: VisualFeedbackRequest, request: Request, response: Response) -> dict[str, Any]:
     session = _ensure_auth_session(request, response, req.auth_session_id)
@@ -1059,17 +1083,24 @@ async def chat(req: ChatRequest, request: Request):
         attachments=stored_attachments,
     )
 
+    turn_id = uuid.uuid4().hex  # 轨迹/反馈关联键，meta 事件发给前端
+
     async def event_gen() -> AsyncIterator[dict]:
         meta = {
             "session_id": chat_session_id,
             "auth_session_id": session.auth_session_id,
             "runner": req.runner,
+            "turn_id": turn_id,
         }
         final_answer = ""
         evidence: dict[str, list[dict[str, Any]]] = {}
         sources: list[dict[str, Any]] = []
+        tools_called: list[str] = []
+        yield {"event": "meta", "data": json.dumps({"type": "meta", **meta}, ensure_ascii=False)}
         try:
             async for ev in traced_stream(runner, req.message, state, meta):
+                if ev.type == "tool_call":
+                    tools_called.append(ev.name)
                 if ev.type == "observation" and getattr(ev, "data", None):
                     evidence.setdefault(ev.name, []).append(ev.data)
                 elif ev.type == "claim_check":
@@ -1090,12 +1121,24 @@ async def chat(req: ChatRequest, request: Request):
                     evidence=evidence,
                     sources=sources,
                 )
+            tokens = 0
             try:
                 # 真实 usage 优先（llm.py 代理逐次累加）；provider 不回报时退回字符估算
                 tokens = collected_usage() or estimate_tokens(req.message, final_answer)
                 app.state.quota_store.record(quota_key, tokens)
             except Exception:  # noqa: BLE001 - quota 落盘失败不能吞掉已完成回答
                 pass
+            trajectory.log_turn(
+                turn_id=turn_id,
+                session_id=chat_session_id,
+                owner=session_owner,
+                runner=req.runner or "adaptive",
+                user_message=req.message,
+                final_answer=final_answer,
+                messages=getattr(state, "messages", None),
+                tools_called=tools_called,
+                usage_tokens=tokens,
+            )
             app.state.session_store.save_state(chat_session_id, session_owner, state)
             await client.aclose()
 

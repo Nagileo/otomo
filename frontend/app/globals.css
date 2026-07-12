@@ -1055,3 +1055,9 @@ a.card-title:hover { color: var(--accent); }
 .quiz-next { margin-top: 10px; padding: 6px 14px; border-radius: 8px; border: 1px solid var(--border, #2a2a32); background: transparent; color: inherit; cursor: pointer; }
 .quiz-next:disabled { opacity: 0.4; cursor: default; }
 .chip.on { border-color: #7c8cff; background: rgba(124, 140, 255, 0.18); }
+
+/* 答案级反馈（RL 轨迹飞轮信号） */
+.answer-feedback { display: flex; gap: 6px; margin-top: 8px; }
+.fb-btn { padding: 2px 10px; border-radius: 999px; border: 1px solid var(--border, #2a2a32); background: transparent; cursor: pointer; font-size: 13px; opacity: 0.55; transition: opacity .15s; }
+.fb-btn:hover { opacity: 1; }
+.fb-btn.on { opacity: 1; border-color: #7c8cff; background: rgba(124, 140, 255, 0.15); }

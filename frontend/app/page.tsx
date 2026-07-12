@@ -49,7 +49,7 @@ type ImageAttachment = {
   preview_url?: string;
 };
 type PendingImage = { id: string; file: File; preview: string };
-type Msg = { role: "user" | "assistant"; content: string; attachments?: ImageAttachment[]; evidence?: EvidenceMap };
+type Msg = { role: "user" | "assistant"; content: string; attachments?: ImageAttachment[]; evidence?: EvidenceMap; turnId?: string; feedback?: "up" | "down" };
 type EvidenceMap = Record<string, Record<string, any>[]>;
 
 // [[panel:tool_name]]：LLM 在正文中锚定证据面板的位置。
@@ -543,6 +543,7 @@ export default function Home() {
   const csrfToken = useRef("");
   const sessionId = useRef("");  // 多轮会话 id（首次发送时生成；"新对话"会重置）
   const lastQ = useRef("");      // 最近一次用户问题（剧透 followup chips 重发用）
+  const turnIdRef = useRef("");  // 本轮 turn_id（meta 事件下发，👍👎 反馈按它关联轨迹）
 
   // 新问题锚顶：发出消息后把该条用户消息滚到视口顶部，流式回答在其下方展开——
   // 否则长对话里视口停在旧位置，正在生成的内容整个在屏幕外（用户实测痛点）。
@@ -772,6 +773,29 @@ export default function Home() {
     return uploaded;
   }
 
+  async function sendAnswerFeedback(idx: number, rating: "up" | "down") {
+    const msg = messages[idx];
+    if (!msg?.turnId) return;
+    const next = msg.feedback === rating ? undefined : rating; // 再点一次取消
+    setMessages((m) => m.map((x, i) => (i === idx ? { ...x, feedback: next } : x)));
+    if (!next) return;
+    try {
+      await fetch(`${BACKEND}/feedback/answer`, {
+        method: "POST",
+        headers: csrfHeaders({ "Content-Type": "application/json" }),
+        credentials: "include",
+        body: JSON.stringify({
+          session_id: sessionId.current,
+          turn_id: msg.turnId,
+          rating: next,
+          auth_session_id: authSessionId.current,
+        }),
+      });
+    } catch {
+      /* 反馈失败静默：不打断阅读 */
+    }
+  }
+
   async function send(override?: string, spoilerMode?: string) {
     let q = (override ?? input).trim();
     const shouldUseImage = pendingImages.length > 0 && !override;
@@ -842,7 +866,7 @@ export default function Home() {
       const final = answerRef.current;
       if (final) {
         const turnEvidence = evidenceRef.current;
-        setMessages((m) => [...m, { role: "assistant", content: final, evidence: turnEvidence }]);
+        setMessages((m) => [...m, { role: "assistant", content: final, evidence: turnEvidence, turnId: turnIdRef.current || undefined }]);
       }
       setAnswer("");
       setBusy(false);
@@ -1011,6 +1035,9 @@ export default function Home() {
 
   function handleEvent(ev: any) {
     switch (ev.type) {
+      case "meta":
+        turnIdRef.current = ev.turn_id || "";
+        break;
       case "plan":
         setTrace((t) => [...t, { kind: "note", text: `📋 ${ev.summary}` }]);
         break;
@@ -1435,6 +1462,14 @@ export default function Home() {
               ) : (
                 <div className="bubble">
                   <AssistantContent content={m.content} evidence={m.evidence} handlers={panelHandlers} />
+                  {m.turnId && (
+                    <div className="answer-feedback">
+                      <button className={`fb-btn ${m.feedback === "up" ? "on" : ""}`} title="这条回答不错"
+                        onClick={() => sendAnswerFeedback(i, "up")}>👍</button>
+                      <button className={`fb-btn ${m.feedback === "down" ? "on" : ""}`} title="这条回答不行"
+                        onClick={() => sendAnswerFeedback(i, "down")}>👎</button>
+                    </div>
+                  )}
                   {m.evidence && (
                     <EvidencePanels
                       evidence={m.evidence}

@@ -118,6 +118,10 @@ class Settings(BaseSettings):
     tool_progressive_disclosure_enabled: bool = True
     # 上传图片保留天数（<=0 关闭清理）。识图只在当轮读取，过期后旧会话预览 404 属预期。
     upload_ttl_days: int = 14
+    # RL 轨迹飞轮：每轮对话的完整轨迹 + 👍👎 反馈落 JSONL（cache/trajectories/），
+    # 为未来 RL(SFT/DPO/拒绝采样) 攒真实分布语料；导出脱敏见 scripts/export_trajectories.py
+    trajectory_log_enabled: bool = True
+    trajectory_dir: str = "cache/trajectories"
     http_timeout: float = 30.0
     cache_ttl: float = 300.0  # Bangumi 响应内存缓存秒数（A5 换 Redis）
     upload_max_image_bytes: int = 6 * 1024 * 1024
