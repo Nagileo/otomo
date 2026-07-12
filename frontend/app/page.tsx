@@ -543,6 +543,17 @@ export default function Home() {
   const sessionId = useRef("");  // 多轮会话 id（首次发送时生成；"新对话"会重置）
   const lastQ = useRef("");      // 最近一次用户问题（剧透 followup chips 重发用）
 
+  // 新问题锚顶：发出消息后把该条用户消息滚到视口顶部，流式回答在其下方展开——
+  // 否则长对话里视口停在旧位置，正在生成的内容整个在屏幕外（用户实测痛点）。
+  useEffect(() => {
+    const last = messages.length - 1;
+    if (last >= 0 && messages[last]?.role === "user") {
+      requestAnimationFrame(() => {
+        document.getElementById(`msg-${last}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    }
+  }, [messages.length]);
+
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const authStatus = params.get("bangumi_auth");
@@ -1406,7 +1417,7 @@ export default function Home() {
             </div>
           )}
           {messages.map((m, i) => (
-            <div key={i} className={`msg ${m.role}`}>
+            <div key={i} id={`msg-${i}`} className={`msg ${m.role}`}>
               <div className="role">{m.role === "user" ? "你" : "Otomo"}</div>
               {m.role === "user" ? (
                 <div className="bubble">

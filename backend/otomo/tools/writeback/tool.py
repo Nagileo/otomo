@@ -75,7 +75,7 @@ class BangumiWriteActionResult(BaseModel):
 class ConfirmBangumiWriteArgs(BaseModel):
     username: str | None = Field(None, description="Bangumi 用户名；不传则使用当前 token 账号")
     action_id: str
-    confirmed: bool = Field(False, description="前端确认后必须传 true")
+    confirmed: bool = Field(False, description="用户已明确确认（前端按钮或对话中明确说确认/直接执行）时传 true")
 
 
 class CancelBangumiWriteArgs(BaseModel):
@@ -317,6 +317,24 @@ class PrepareBangumiWriteActionTool(Tool):
             episode_id = args.episode_id
 
         mem = self.ltm.load_user(username)
+        # 去重：同一作品同一操作同一 payload 已有 pending 时直接复用——
+        # 用户说"你没加入/再加一下"时 LLM 容易重复 prepare，堆出多个待确认、确认后重复写回。
+        dup = next(
+            (x for x in mem.pending_write_actions
+             if x.status == "pending" and x.operation == args.operation
+             and x.subject_id == subject_id and x.episode_id == episode_id and x.payload == payload),
+            None,
+        )
+        if dup is not None:
+            return ToolResult(
+                ok=True,
+                data=BangumiWriteActionResult(
+                    username=username,
+                    action=dup,
+                    warning="已存在相同的待确认动作（未重复创建）；用户确认后用它的 action_id 执行即可。",
+                    memory=_summ(mem),
+                ),
+            )
         action = PendingWriteAction(
             id=_new_id("wr"),
             operation=args.operation,
@@ -346,7 +364,7 @@ class PrepareBangumiWriteActionTool(Tool):
 
 class ExecuteBangumiWriteActionTool(Tool):
     name = "execute_bangumi_write_action"
-    description = "执行已准备且用户确认的 Bangumi 写回动作。只应由后端确认接口调用。"
+    description = ("执行已准备的 Bangumi 写回动作。仅当用户在当前对话中明确确认（说\"确认/直接加/写回吧\"等）或前端按钮触发时调用；未经用户明确确认绝不调用。多个待确认动作应逐个全部执行。")
     args_model = ConfirmBangumiWriteArgs
     result_model = ExecuteBangumiWriteResult
     is_write = True

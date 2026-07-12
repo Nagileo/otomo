@@ -1461,7 +1461,11 @@ async def step_tools(
         yield ProgressEvent(stage="tool_start", tool=tc.function.name, summary=f"开始执行 {tc.function.name}")
         progress_queue: asyncio.Queue[ProgressEvent] = asyncio.Queue()
         token = _TOOL_PROGRESS_QUEUE.set(progress_queue)
-        task = asyncio.create_task(registry.dispatch(tc.function.name, tc.function.arguments))
+        task = asyncio.create_task(
+            # allow_write=True：执行/撤销写回工具已对模型暴露（用户口头确认即执行的产品要求）。
+            # 三重护栏在工具层：confirmed=true 参数、动作必须已 prepare、prompt 明确确认规则。
+            registry.dispatch(tc.function.name, tc.function.arguments, allow_write=True)
+        )
         try:
             while not task.done():
                 try:

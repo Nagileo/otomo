@@ -98,8 +98,8 @@ TOOL_GROUPS: dict[str, dict[str, Any]] = {
     },
     "memory_plan": {
         "desc": "长期记忆写入/遗忘、决策日志、追番计划板、Bangumi 收藏写回（加想看/打分/进度）",
-        "tools": {"forget_user_memory", "record_decision_log", "list_watch_plan", "upsert_watch_plan_item", "prepare_bangumi_write_action", "cancel_bangumi_write_action"},
-        "keywords": ["记住", "别推", "别再", "想看", "计划", "加入", "标记", "打.{0,2}分", "看过", "追番计划", "忘掉", "别记"],
+        "tools": {"forget_user_memory", "record_decision_log", "list_watch_plan", "upsert_watch_plan_item", "prepare_bangumi_write_action", "cancel_bangumi_write_action", "execute_bangumi_write_action", "undo_bangumi_write_action"},
+        "keywords": ["记住", "别推", "别再", "想看", "在看", "计划", "加入", "标记", "打.{0,2}分", "看过", "追番计划", "忘掉", "别记", "确认", "写回", "同步", "撤销"],
     },
     "product_page": {
         "desc": "追番驾驶舱、作品档案页、IP 跨媒介图谱、月度报告、口味报告、收藏仪表盘、作品对比、补番顺序",
@@ -213,9 +213,9 @@ class ToolSelector:
     def schemas(self) -> list[dict[str, Any]]:
         """当前暴露给模型的工具 schema。始终含逃生舱（除非全量模式）。"""
         if not self.enabled:
-            return self.registry.openai_tools()
+            return self.registry.openai_tools(include_write=True)
         names = self.active_names()
-        schemas = self.registry.openai_tools_for(names)
+        schemas = self.registry.openai_tools_for(names, include_write=True)
         schemas.append(meta_tool_schema())
         return schemas
 

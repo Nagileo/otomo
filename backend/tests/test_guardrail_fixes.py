@@ -334,3 +334,27 @@ def test_upload_store_ttl_cleanup(tmp_path, monkeypatch):
     assert removed == 2  # old 的 json+bin
     assert not any(p.exists() for p in store._paths(old.id))
     assert all(p.exists() for p in store._paths(fresh.id))
+
+
+def test_selector_exposes_write_tools_in_memory_plan_group():
+    """口头确认写回：execute/undo 写工具经 memory_plan 组暴露给模型（护栏在工具层 confirmed 参数）。"""
+    import asyncio as _a
+    from otomo.factory import build_registry
+    from otomo.tools.bangumi.client import BangumiClient
+    from otomo.tools.moegirl.client import MoegirlClient
+    from otomo.memory import LongTermMemory
+    from otomo.agent.tool_router import ToolSelector
+
+    async def scenario():
+        async with BangumiClient() as c:
+            reg = build_registry(c, MoegirlClient(), LongTermMemory())
+            sel = ToolSelector(reg, "帮我把这部加入在看，直接确认写回")
+            names = {s["function"]["name"] for s in sel.schemas()}
+            assert "prepare_bangumi_write_action" in names
+            assert "execute_bangumi_write_action" in names  # 关键词"在看/确认/写回"命中 memory_plan
+            # 无关查询不暴露写工具
+            sel2 = ToolSelector(reg, "孤独摇滚是谁做的")
+            names2 = {s["function"]["name"] for s in sel2.schemas()}
+            assert "execute_bangumi_write_action" not in names2
+
+    _a.run(scenario())

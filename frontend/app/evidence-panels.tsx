@@ -191,7 +191,12 @@ export function EvidencePanels({
   const exclude = new Set(excludeNames);
   const names = availablePanelNames(evidence, devMode).filter((n) => !exclude.has(n));
   const memoryEvidence = MEMORY_KEYS.flatMap((k) => list(evidence[k]));
-  const memory = devMode ? memoryEvidence : memoryEvidence.filter(hasActionableMemory);
+  // 记忆快照是累积状态：一次回复内多次 prepare/记忆写入会各发一份完整快照，
+  // 全部渲染会把同一个「长期记忆」面板叠 N 遍（待确认 1→2→3→…）；只保留最新一份。
+  const latestMemory = memoryEvidence.length
+    ? [memoryEvidence.reduce((a, b) => (String(b?.updated ?? "") >= String(a?.updated ?? "") ? b : a))]
+    : [];
+  const memory = devMode ? latestMemory : latestMemory.filter(hasActionableMemory);
   if (!names.length && !memory.length) return null;
   const memoryNode = memory.map((data, i) => (
     <MemoryPanel data={data} key={`memory-${i}`} onConfirmAction={onConfirmAction} onCancelAction={onCancelAction} onUndoAction={onUndoAction} />

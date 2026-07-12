@@ -1044,3 +1044,6 @@ a.card-title:hover { color: var(--accent); }
 @media (max-width: 640px) {
   .pilgrimage-grid { grid-template-columns: repeat(2, 1fr); }
 }
+
+/* 新问题锚顶滚动时与视口顶部留白 */
+.msg { scroll-margin-top: 14px; }

@@ -45,25 +45,48 @@ class FakeBangumiClient:
         return {}
 
 
-def test_write_tools_are_not_model_visible(tmp_path):
+def test_write_tools_model_visible_but_gated(tmp_path):
+    """新设计：写工具对模型可见可调（用户口头确认即执行），护栏下移到工具层——
+    confirmed=false 拒绝、动作必须已 prepare；默认 dispatch(allow_write=False) 仍拦截。"""
     client = FakeBangumiClient()
     ltm = LongTermMemory(tmp_path)
     reg = ToolRegistry()
     reg.register(PrepareBangumiWriteActionTool(client, ltm))
     reg.register(ExecuteBangumiWriteActionTool(client, ltm))
 
-    names = {x["function"]["name"] for x in reg.openai_tools()}
-    assert "prepare_bangumi_write_action" in names
-    assert "execute_bangumi_write_action" not in names
+    names = {x["function"]["name"] for x in reg.openai_tools(include_write=True)}
+    assert "execute_bangumi_write_action" in names
 
-    blocked = asyncio.run(
-        reg.dispatch(
-            "execute_bangumi_write_action",
-            '{"action_id":"missing","confirmed":true}',
-        )
+    # 未确认 → 工具层拒绝
+    res = asyncio.run(
+        reg.dispatch("execute_bangumi_write_action", '{"action_id":"x","confirmed":false}', allow_write=True)
     )
-    assert not blocked.ok
-    assert "write tool" in (blocked.error or "")
+    assert not res.ok and "confirmed" in (res.error or "")
+    # 不存在的动作 → 拒绝（只能执行已 prepare 的）
+    res2 = asyncio.run(
+        reg.dispatch("execute_bangumi_write_action", '{"action_id":"missing","confirmed":true}', allow_write=True)
+    )
+    assert not res2.ok and "找不到" in (res2.error or "")
+    # 默认 dispatch 不带 allow_write 仍拦截（HTTP 面等非 agent 路径的保底）
+    blocked = asyncio.run(reg.dispatch("execute_bangumi_write_action", '{"action_id":"x","confirmed":true}'))
+    assert not blocked.ok and "write tool" in (blocked.error or "")
+
+
+def test_prepare_dedupes_same_pending_action(tmp_path):
+    """同一作品同一操作重复 prepare 不再堆积多个待确认（用户"再加一下"曾造出重复写回）。"""
+    client = FakeBangumiClient()
+    ltm = LongTermMemory(tmp_path)
+    tool = PrepareBangumiWriteActionTool(client, ltm)
+    a1 = asyncio.run(tool.run(PrepareBangumiWriteArgs(subject_id=1, collection_type=3, reason="加入在看")))
+    a2 = asyncio.run(tool.run(PrepareBangumiWriteArgs(subject_id=1, collection_type=3, reason="再加一下")))
+    assert a1.ok and a2.ok
+    assert a1.data.action.id == a2.data.action.id  # 复用同一个待确认动作
+    assert "已存在" in a2.data.warning
+    mem = ltm.load_user("Nagileo")
+    assert len([x for x in mem.pending_write_actions if x.status == "pending"]) == 1
+    # payload 不同（改成想看）→ 允许新动作
+    a3 = asyncio.run(tool.run(PrepareBangumiWriteArgs(subject_id=1, collection_type=1, reason="改想看")))
+    assert a3.ok and a3.data.action.id != a1.data.action.id
 
 
 def test_prepare_confirm_write_action_and_decision_log(tmp_path):
