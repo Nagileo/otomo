@@ -60,7 +60,7 @@ export const PANEL_LABELS: Record<string, string> = {
   watch_cockpit: "追番驾驶舱",
   subject_dossier: "作品档案",
   franchise_map: "IP 图谱",
-  monthly_watch_report: "月度报告",
+  monthly_watch_report: "观看报告",
   anime_music_themes: "OP/ED/音乐",
   where_to_watch: "观看/购买渠道",
   get_anime_release_feeds: "离线资源",
@@ -209,11 +209,19 @@ export function EvidencePanels({
       </div>
     );
   }
+  // 产品级面板（报告/驾驶舱/档案/图谱/对比/巡礼行程）本身就是回答的交付物：
+  // LLM 忘记输出 [[panel:]] 锚点时不能折叠成小 chip 藏起来，未锚定也自动展开。
+  const AUTO_EXPAND = new Set([
+    "monthly_watch_report", "watch_cockpit", "subject_dossier", "franchise_map",
+    "build_taste_report", "build_collection_dashboard", "compare_subjects", "plan_pilgrimage_trip",
+  ]);
+  const autoOpen = names.filter((n) => AUTO_EXPAND.has(n));
+  const chipNames = names.filter((n) => !AUTO_EXPAND.has(n));
   // 折叠模式：未被 inline 锚定的面板收成 chips，点开才展开（方案 A）
   return (
     <div className={`evidence-stack collapsed ${devMode ? "dev-mode" : "user-mode"}`}>
       <div className="panel-chips">
-        {names.map((n) => (
+        {chipNames.map((n) => (
           <button
             key={n}
             type="button"
@@ -224,7 +232,7 @@ export function EvidencePanels({
           </button>
         ))}
       </div>
-      {names.filter((n) => expanded[n]).map((n) => renderPanelByName(n, list(evidence[n]), handlers))}
+      {[...autoOpen, ...chipNames.filter((n) => expanded[n])].map((n) => renderPanelByName(n, list(evidence[n]), handlers))}
       {memoryNode}
     </div>
   );
