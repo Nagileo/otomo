@@ -92,6 +92,8 @@ class CaseResult(BaseModel):
     tools_called: list[str]
     metrics: Metrics = Field(default_factory=Metrics)
     turns: list[dict[str, Any]] = Field(default_factory=list)
+    infra_errors: int = 0  # runner 收到的 ErrorEvent 数（LLM/网络故障，区别于断言失败）
+    infra_error_note: str = ""  # 首条错误文本（判断可否重试：余额不足等重试无意义）
 
 
 # --------------------------------------------------------------------------- #

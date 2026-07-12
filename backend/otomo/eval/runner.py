@@ -17,7 +17,7 @@ from pathlib import Path
 
 import yaml
 
-from ..agent.contracts import AgentState, FinalEvent, ObservationEvent, ToolCallEvent
+from ..agent.contracts import AgentState, ErrorEvent, FinalEvent, ObservationEvent, ToolCallEvent
 from ..config import settings
 from ..factory import build_runner
 from ..llm import get_llm
@@ -40,11 +40,13 @@ def load_cases(path: Path) -> list[GoldenCase]:
     return [GoldenCase.model_validate(d) for d in data]
 
 
-async def _run_turn(runner, question: str, state: AgentState | None = None) -> tuple[str, list[ToolStep]]:
-    """跑一轮，收集结构化 trace（ToolCall 配对 Observation 的返回实体）。"""
+async def _run_turn(runner, question: str, state: AgentState | None = None) -> tuple[str, list[ToolStep], list[str]]:
+    """跑一轮，收集结构化 trace（ToolCall 配对 Observation 的返回实体）。
+    ErrorEvent 即时打印并计数——否则 LLM/网络故障静默成空答案，日志无从排障（CI 首跑教训）。"""
     answer = ""
     trace: list[ToolStep] = []
     pending: ToolStep | None = None
+    errors: list[str] = []
     async for ev in runner.stream(question, state):
         if isinstance(ev, ToolCallEvent):
             pending = ToolStep(name=ev.name, args=ev.args)
@@ -54,9 +56,12 @@ async def _run_turn(runner, question: str, state: AgentState | None = None) -> t
                 pending.has_data = ev.data is not None
                 trace.append(pending)
                 pending = None
+        elif isinstance(ev, ErrorEvent):
+            errors.append(ev.message)
+            print(f"  {RED}ERROR{RESET} {DIM}{ev.message[:300]}{RESET}")
         elif isinstance(ev, FinalEvent):
             answer = ev.answer
-    return answer, trace
+    return answer, trace, errors
 
 
 async def run_one(runner, case: GoldenCase, llm, model: str, client: BangumiClient) -> CaseResult:
@@ -68,8 +73,10 @@ async def run_one(runner, case: GoldenCase, llm, model: str, client: BangumiClie
         aggregate_checks: list[Check] = []
         last_answer = ""
         all_passed = True
+        infra_errs: list[str] = []
         for idx, turn in enumerate(case.turns, start=1):
-            answer, trace = await _run_turn(runner, turn.question, state)
+            answer, trace, errs = await _run_turn(runner, turn.question, state)
+            infra_errs.extend(errs)
             last_answer = answer
             all_tools.extend(step.name for step in trace)
             turn_case = GoldenCase(
@@ -99,10 +106,15 @@ async def run_one(runner, case: GoldenCase, llm, model: str, client: BangumiClie
             answer=last_answer,
             tools_called=all_tools,
             turns=turn_payloads,
+            infra_errors=len(infra_errs),
+            infra_error_note=(infra_errs[0][:200] if infra_errs else ""),
         )
 
-    answer, trace = await _run_turn(runner, case.question)
-    return await verify(case, answer, trace, llm, model, client)
+    answer, trace, errs = await _run_turn(runner, case.question)
+    result = await verify(case, answer, trace, llm, model, client)
+    result.infra_errors = len(errs)
+    result.infra_error_note = errs[0][:200] if errs else ""
+    return result
 
 
 async def main_async(args: argparse.Namespace) -> int:
@@ -127,10 +139,29 @@ async def main_async(args: argparse.Namespace) -> int:
     print(f"{DIM}runner={args.runner}{RESET}\n")
     results: list[CaseResult] = []
     try:
+        consecutive_infra = 0
         for case in cases:
             headline = case.question or f"{len(case.turns)} turns"
             print(f"{DIM}[{case.kind}] {case.id}{RESET}  {headline}")
             res = await run_one(runner, case, llm, model, client)
+            # LLM/网络故障（非断言失败）→ 退避重试整条 case（全新状态，无污染）。
+            # 余额不足/认证失败重试无意义，直接交给熔断。
+            def _nonretryable(note: str) -> bool:
+                return any(k in note for k in ("Insufficient Balance", "402", "401", "invalid_api_key"))
+            for wait in (30, 90):
+                if res.passed or not res.infra_errors or res.tools_called or _nonretryable(res.infra_error_note):
+                    break
+                print(f"  {DIM}infra 故障，{wait}s 后重试整条 case…{RESET}")
+                await asyncio.sleep(wait)
+                res = await run_one(runner, case, llm, model, client)
+            if res.infra_errors and not res.passed and not res.tools_called:
+                consecutive_infra += 1
+                if consecutive_infra >= 3:
+                    print(f"{RED}连续 {consecutive_infra} 条 case 因 infra 故障失败，判定环境不可用，提前中止（省 token）。{RESET}")
+                    results.append(res)
+                    break
+            else:
+                consecutive_infra = 0
             results.append(res)
             mark = f"{GREEN}PASS{RESET}" if res.passed else f"{RED}FAIL{RESET}"
             print(f"  {mark}  {DIM}tools={res.tools_called}{RESET}")
