@@ -1061,3 +1061,9 @@ a.card-title:hover { color: var(--accent); }
 .fb-btn { padding: 2px 10px; border-radius: 999px; border: 1px solid var(--border, #2a2a32); background: transparent; cursor: pointer; font-size: 13px; opacity: 0.55; transition: opacity .15s; }
 .fb-btn:hover { opacity: 1; }
 .fb-btn.on { opacity: 1; border-color: #7c8cff; background: rgba(124, 140, 255, 0.15); }
+
+/* 交付物面板：默认展开、可收起；收起后保留醒目全宽入口栏（区别于佐证类小 chip） */
+.deliverable { margin: 10px 0; border: 1px solid rgba(124, 140, 255, 0.35); border-radius: 12px; overflow: hidden; }
+.deliverable-bar { width: 100%; display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; background: rgba(124, 140, 255, 0.08); border: none; color: inherit; cursor: pointer; font-size: 14px; font-weight: 600; }
+.deliverable-bar:hover { background: rgba(124, 140, 255, 0.15); }
+.deliverable-hint { opacity: 0.6; font-size: 12px; font-weight: 400; }

@@ -232,7 +232,20 @@ export function EvidencePanels({
           </button>
         ))}
       </div>
-      {[...autoOpen, ...chipNames.filter((n) => expanded[n])].map((n) => renderPanelByName(n, list(evidence[n]), handlers))}
+      {autoOpen.map((n) => (
+        <div className="deliverable" key={`auto-${n}`}>
+          <button
+            type="button"
+            className="deliverable-bar"
+            onClick={() => setExpanded((prev) => ({ ...prev, [n]: prev[n] === false ? true : false }))}
+          >
+            <span className="deliverable-title">📊 {PANEL_LABELS[n] ?? n}</span>
+            <span className="deliverable-hint">{expanded[n] === false ? "已折叠 · 点击展开 ▾" : "收起 ▴"}</span>
+          </button>
+          {expanded[n] !== false && renderPanelByName(n, list(evidence[n]), handlers)}
+        </div>
+      ))}
+      {chipNames.filter((n) => expanded[n]).map((n) => renderPanelByName(n, list(evidence[n]), handlers))}
       {memoryNode}
     </div>
   );
