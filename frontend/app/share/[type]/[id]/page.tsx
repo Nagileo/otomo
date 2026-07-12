@@ -86,7 +86,7 @@ export default async function ShareSnapshotPage({ params }: { params: { id: stri
 function ShareBody({ type, payload }: { type: string; payload: AnyRecord }) {
   if (type === "subject_dossier") return <SubjectDossierShare data={payload} />;
   if (type === "watch_order") return <WatchOrderShare data={payload} />;
-  if (type === "monthly_report") return <MonthlyReportShare data={payload} />;
+  if (type === "monthly_report" || type === "yearly_wrapped") return <MonthlyReportShare data={payload} />;
   if (type === "season_guide") return <SeasonGuideShare data={payload} />;
   if (type === "watch_cockpit") return <GenericSectionsShare data={payload} title="追番驾驶舱" />;
   return <GenericSectionsShare data={payload} title="Otomo 分享页" />;
@@ -139,6 +139,7 @@ function WatchOrderShare({ data }: { data: AnyRecord }) {
 }
 
 function MonthlyReportShare({ data }: { data: AnyRecord }) {
+  const isYear = String(data.period) === "year";
   const summary = data.summary || {};
   const sections = list(data.sections);
   const metrics = [

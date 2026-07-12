@@ -3,16 +3,19 @@
 // 产品聚合域面板：月报、作品档案、驾驶舱分区、音乐主题曲、周报。
 
 import { type AnyRecord, type ShareSnapshotType, type ShareSnapshotHandler, list, text, Badge, Panel, EmptyHint, ShareSnapshotButton } from "./shared";
+import { _wrapText } from "./report";
 
 export function MonthlyWatchReportPanel({ data, onShareSnapshot }: { data: AnyRecord; onShareSnapshot?: ShareSnapshotHandler }) {
   const sections = list(data.sections);
   const byTitle = new Map(sections.map((s) => [String(s.title || ""), s]));
   const summary = data.summary || {};
+  const isYear = String(data.period) === "year";
+  const lbl = isYear ? "本年度" : "本月";
   const metricRows = [
     ["收藏总量", summary.collection_count],
-    ["本月更新", summary.month_updated_count],
-    ["本月完成", summary.completed_this_month],
-    ["本月均分", summary.month_avg_rate ?? "暂无"],
+    [`${lbl}更新`, summary.month_updated_count],
+    [`${lbl}完成`, summary.completed_this_month],
+    [`${lbl}均分`, summary.month_avg_rate ?? "暂无"],
     ["全量均分", summary.avg_user_rate ?? "暂无"],
     ["已评分", summary.rated_count],
   ];
@@ -57,14 +60,17 @@ export function MonthlyWatchReportPanel({ data, onShareSnapshot }: { data: AnyRe
     );
   };
   return (
-    <Panel title={`月度报告 · @${text(data.username)}`} subtitle={`${data.year}-${String(data.month || "").padStart(2, "0")} · ${text(data.subject_type)}`}>
+    <Panel title={`${isYear ? "年度观看报告" : "月度报告"} · @${text(data.username)}`} subtitle={`${isYear ? data.year : `${data.year}-${String(data.month || "").padStart(2, "0")}`} · ${text(data.subject_type)}`}>
       <div className="panel-actions">
         <ShareSnapshotButton
-          type="monthly_report"
-          title={`月度报告 · @${text(data.username)} · ${data.year}-${String(data.month || "").padStart(2, "0")}`}
+          type={isYear ? "yearly_wrapped" : "monthly_report"}
+          title={isYear ? `年度观看报告 · @${text(data.username)} · ${data.year}` : `月度报告 · @${text(data.username)} · ${data.year}-${String(data.month || "").padStart(2, "0")}`}
           payload={data}
           onShareSnapshot={onShareSnapshot}
         />
+        {isYear && (
+          <button className="ghost" onClick={() => exportWrappedCard(data)}>导出年度卡片</button>
+        )}
       </div>
       <div className="metric-grid">
         {metricRows.map(([label, value]) => (
@@ -74,10 +80,10 @@ export function MonthlyWatchReportPanel({ data, onShareSnapshot }: { data: AnyRe
           </div>
         ))}
       </div>
-      <div className="section-title">本月完成</div>
-      {renderSubjectCards("本月完成", 8)}
-      <div className="section-title">本月更新</div>
-      {renderSubjectCards("本月更新", 8)}
+      <div className="section-title">{lbl}完成</div>
+      {renderSubjectCards(`${lbl}完成`, 8)}
+      <div className="section-title">{lbl}更新</div>
+      {renderSubjectCards(`${lbl}更新`, 8)}
       <div className="taste-groups">
         <div className="taste-group">
           <div className="section-title">状态分布</div>
@@ -88,8 +94,8 @@ export function MonthlyWatchReportPanel({ data, onShareSnapshot }: { data: AnyRe
           {renderCompact("评分分布", "rating", "count")}
         </div>
         <div className="taste-group">
-          <div className="section-title">本月标签漂移</div>
-          {renderCompact("本月标签漂移", "tag", "month_count")}
+          <div className="section-title">{lbl}标签漂移</div>
+          {renderCompact(`${lbl}标签漂移`, "tag", "month_count")}
         </div>
         <div className="taste-group">
           <div className="section-title">Staff/CV/Studio</div>
@@ -501,3 +507,48 @@ export function WeeklyDigestPanel({ data }: { data: AnyRecord }) {
 }
 
 
+
+
+export function exportWrappedCard(data: AnyRecord): void {
+  const canvas = document.createElement("canvas");
+  canvas.width = 600; canvas.height = 800;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  const g = ctx.createLinearGradient(0, 0, 0, 800);
+  g.addColorStop(0, "#141225"); g.addColorStop(1, "#0d1b2a");
+  ctx.fillStyle = g; ctx.fillRect(0, 0, 600, 800);
+  ctx.fillStyle = "#c9a3ff"; ctx.font = "bold 28px sans-serif";
+  ctx.fillText(`Otomo · ${text(data.year)} 年度观看报告`, 40, 66);
+  ctx.fillStyle = "#ffffff"; ctx.font = "bold 22px sans-serif";
+  ctx.fillText(`@${text(data.username, "用户")} · ${text(data.subject_type, "anime")}`, 40, 106);
+  const summary = data.summary || {};
+  ctx.fillStyle = "#86efac"; ctx.font = "bold 52px sans-serif";
+  const bigN = String(summary.completed_this_month ?? 0);
+  ctx.fillText(bigN, 40, 190);
+  ctx.fillStyle = "#9aa4b2"; ctx.font = "16px sans-serif";
+  ctx.fillText("部完成", 50 + ctx.measureText(bigN).width * 3.3, 190);
+  ctx.fillText(`年度更新 ${summary.month_updated_count ?? 0} · 年度均分 ${summary.month_avg_rate ?? "-"} · 全量均分 ${summary.avg_user_rate ?? "-"}`, 40, 226);
+  const tags = list<any>(summary.month_top_tags).map((x) => (Array.isArray(x) ? x[0] : x?.tag)).filter(Boolean).slice(0, 6);
+  ctx.fillStyle = "#7c8cff"; ctx.font = "16px sans-serif";
+  let y = _wrapText(ctx, "年度标签：" + (tags.join(" · ") || "—"), 40, 266, 520, 24) + 18;
+  const sec = list<any>(data.sections).find((s) => String(s.title || "").includes("完成"));
+  const top = list<any>(sec?.items).slice(0, 8);
+  ctx.fillStyle = "#ffffff"; ctx.font = "bold 19px sans-serif";
+  ctx.fillText("年度十佳（按我的评分）", 40, y); y += 30;
+  ctx.font = "16px sans-serif";
+  top.forEach((it, i) => {
+    ctx.fillStyle = i < 3 ? "#fbbf24" : "#d1d5db";
+    y = _wrapText(ctx, `${i + 1}. ${text(it.name)}${it.rate ? ` · ${it.rate}分` : ""}`, 40, y, 520, 24) + 6;
+  });
+  const staff = list<any>(summary.top_staff).map((x) => (Array.isArray(x) ? x[0] : "")).filter(Boolean).slice(0, 3);
+  if (staff.length) {
+    ctx.fillStyle = "#9aa4b2"; ctx.font = "15px sans-serif";
+    y = _wrapText(ctx, "年度高频 staff：" + staff.join("、"), 40, y + 8, 520, 22);
+  }
+  ctx.fillStyle = "#6b7280"; ctx.font = "14px sans-serif";
+  ctx.fillText("Otomo · 番组搭子 —— 你的 ACGN 生活助手", 40, 768);
+  const a = document.createElement("a");
+  a.href = canvas.toDataURL("image/png");
+  a.download = `otomo-wrapped-${text(data.year)}.png`;
+  a.click();
+}

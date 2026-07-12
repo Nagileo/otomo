@@ -105,6 +105,7 @@ class FranchiseMapResult(BaseModel):
 
 class MonthlyWatchReportArgs(BaseModel):
     username: str | None = Field(None, description="Bangumi 用户名；不传则用当前账号")
+    period: Literal["month", "year"] = Field("month", description="月度报告或年度总结（Wrapped）")
     year: int | None = None
     month: int | None = Field(None, ge=1, le=12)
     subject_type: Literal["anime", "book", "music", "game", "real"] = "anime"
@@ -113,6 +114,7 @@ class MonthlyWatchReportArgs(BaseModel):
 
 class MonthlyWatchReportResult(BaseModel):
     username: str
+    period: str = "month"
     year: int
     month: int
     subject_type: str
@@ -624,7 +626,7 @@ class FranchiseMapTool(Tool):
 
 class MonthlyWatchReportTool(Tool):
     name = "monthly_watch_report"
-    description = "月度收藏报告：按用户 Bangumi 收藏生成评分、标签、媒介、完成/搁置/抛弃分布和下月建议。"
+    description = "月度/年度收藏报告：按用户 Bangumi 收藏生成评分、标签、完成/搁置分布与 staff 高频。period=year 即年度总结（Wrapped），适合分享。"
     args_model = MonthlyWatchReportArgs
     result_model = MonthlyWatchReportResult
 
@@ -669,10 +671,11 @@ class MonthlyWatchReportTool(Tool):
                 "image": _image(subj),
                 "updated_at": row.get("updated_at") or row.get("updatedAt") or "",
             }
-            if updated == f"{year}-{month:02d}":
+            in_window = updated.startswith(str(year)) if args.period == "year" else updated == f"{year}-{month:02d}"
+            if in_window:
                 updated_this_month.append(base_payload)
                 month_tag_counter.update(row_tags)
-            if row.get("type") == 2 and updated == f"{year}-{month:02d}":
+            if row.get("type") == 2 and in_window:
                 completed_this_month.append(base_payload)
             if row.get("type") in {4, 5}:
                 on_hold_or_dropped.append(base_payload)
@@ -706,13 +709,14 @@ class MonthlyWatchReportTool(Tool):
                         continue
                     if any(k in rel for k in ("动画制作", "制作", "导演", "监督", "脚本", "系列构成", "原作", "音乐", "声优", "配音")):
                         staff_counter[f"{rel}:{name}" if rel else name] += 1
+        label = "本年度" if args.period == "year" else "本月"
         sections = [
-            ProductSection(title="本月完成", items=top_completed, notes=["按收藏更新时间近似“本月完成”；Bangumi 没有独立观看完成日期。"]),
-            ProductSection(title="本月更新", items=recent_updates, notes=["包含评分、状态、进度或短评在本月有更新的条目。"]),
+            ProductSection(title=f"{label}完成", items=top_completed, notes=[f"按收藏更新时间近似“{label}完成”；Bangumi 没有独立观看完成日期。"]),
+            ProductSection(title=f"{label}更新", items=recent_updates, notes=[f"包含评分、状态、进度或短评在{label}有更新的条目。"]),
             ProductSection(title="状态分布", items=[{"status": _STATUS_NAME.get(k, k), "count": v} for k, v in by_status.items()], notes=["来自 Bangumi collection type。"]),
             ProductSection(title="评分分布", items=[{"rating": k, "count": rating_hist[k]} for k in sorted(rating_hist, key=lambda x: int(x), reverse=True)], notes=["只统计你有打分的收藏。"]),
             ProductSection(title="高频标签", items=[{"tag": k, "count": v} for k, v in tag_counter.most_common(12)], notes=["来自条目标签，不等同于用户主动打标。"]),
-            ProductSection(title="本月标签漂移", items=month_tag_lift[:12], notes=["lift>1 表示本月更新样本里该标签相对全量更集中。"]),
+            ProductSection(title=f"{label}标签漂移", items=month_tag_lift[:12], notes=["lift>1 表示本月更新样本里该标签相对全量更集中。"]),
             ProductSection(title="搁置/抛弃观察", items=sorted(on_hold_or_dropped, key=lambda x: str(x.get("updated_at") or ""), reverse=True)[: args.limit], notes=["只展示状态与短评样本；不能断言搁置/弃坑原因。"]),
             ProductSection(title="Staff/CV/Studio", items=[{"name": k, "count": v} for k, v in staff_counter.most_common(16)], notes=["对本月完成/更新样本拉 staff，控制 API 负载。"]),
         ]
@@ -722,6 +726,7 @@ class MonthlyWatchReportTool(Tool):
             ok=True,
             data=MonthlyWatchReportResult(
                 username=username,
+                period=args.period,
                 year=year,
                 month=month,
                 subject_type=args.subject_type,

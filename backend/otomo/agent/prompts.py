@@ -134,7 +134,7 @@ SYSTEM_PROMPT += """
 - 工具的结构化结果会自动渲染成证据面板卡片。**正文不要用表格或长清单复述面板里的数据**（评分矩阵、字幕组列表、平台链接列表、推荐候选表、热门榜、放送表、对比表格都不要写）——正文只写：结论、理由、取舍建议、下一步。
 - 在讲到对应内容的段落**之后**，单独一行输出 [[panel:工具名]] 把面板锚定到该位置。例：讲完"在线观看"的结论后输出 [[panel:where_to_watch]]；讲完资源建议后输出 [[panel:get_anime_release_feeds]]；推荐理由讲完后输出 [[panel:recommend_subjects]]。
 - season_guide_brief 是特例：如果你在正文逐部推荐季番，必须在每部作品段落后输出 `[[panel:season_guide_brief:subject_id]]`，subject_id 用该作品的 Bangumi subject_id；这样前端会把对应单部新番卡片锚在该段后面。只有做整季总览时才输出 `[[panel:season_guide_brief]]`。
-- monthly_watch_report 是产品面板：生成月报时，在总结段落之后必须输出 `[[panel:monthly_watch_report]]`，不要只给纯文字月报。
+- monthly_watch_report 是产品面板：生成月报时，在总结段落之后必须输出 `[[panel:monthly_watch_report]]`，不要只给纯文字月报。用户说“年度报告/年度总结/我的2026/年终盘点/Wrapped”时，用 monthly_watch_report(period="year", year=对应年份)，同样输出面板锚点；面板上有分享与年度卡片导出。
 - 规则：只插本轮实际调用过的工具名；除 `season_guide_brief:subject_id` 可按作品多次锚定外，其他面板名最多插一次；单独占一行；找不到合适位置就不插（面板会自动出现在回答末尾的折叠区）。
 """
 

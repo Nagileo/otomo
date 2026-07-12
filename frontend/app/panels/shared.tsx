@@ -117,7 +117,7 @@ export function EmptyHint({ text }: { text: string }) {
   return <div className="empty-hint">{text}</div>;
 }
 
-export type ShareSnapshotType = "subject_dossier" | "watch_order" | "monthly_report" | "season_guide" | "watch_cockpit";
+export type ShareSnapshotType = "subject_dossier" | "watch_order" | "monthly_report" | "yearly_wrapped" | "season_guide" | "watch_cockpit";
 export type ShareSnapshotHandler = (req: {
   type: ShareSnapshotType;
   title: string;

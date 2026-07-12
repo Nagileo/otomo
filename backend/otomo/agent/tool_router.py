@@ -104,7 +104,7 @@ TOOL_GROUPS: dict[str, dict[str, Any]] = {
     "product_page": {
         "desc": "追番驾驶舱、作品档案页、IP 跨媒介图谱、月度报告、口味报告、收藏仪表盘、作品对比、补番顺序",
         "tools": {"watch_cockpit", "subject_dossier", "franchise_map", "monthly_watch_report", "build_taste_report", "build_collection_dashboard", "compare_subjects", "plan_watch_order", "plan_watch_copilot"},
-        "keywords": ["档案", "驾驶舱", "系列", "ip", "月报", "月度", "报告", "仪表盘", "对比", "哪个好", "补番顺序", "观看顺序", "全貌", "总结"],
+        "keywords": ["档案", "驾驶舱", "系列", "ip", "月报", "月度", "年度", "年终", "wrapped", "我的20", "报告", "仪表盘", "对比", "哪个好", "补番顺序", "观看顺序", "全貌", "总结"],
     },
     "discovery_extra": {
         "desc": "今日角色生日、Bangumi 精选目录/清单",
