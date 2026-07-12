@@ -631,12 +631,12 @@ class RecommendTool(Tool):
         else:
             try:
                 me = await self.client.get_me()
+                username = me.get("username") or str(me.get("id"))
             except Exception:  # noqa: BLE001
-                return ToolResult(
-                    ok=False,
-                    error="未提供 username 且无法获取当前账号（需要有效 BANGUMI_TOKEN）；请改用 username 指定要推荐的用户。",
-                )
-            username = me.get("username") or str(me.get("id"))
+                # 匿名冷启动：未登录也能推荐——跳过收藏画像/图谱/CF/记忆，
+                # 用会话标签(tags/prefer_tags/scenario)+冷启动标签召回+质量重排。
+                username = ""
+
 
         scenario = args.scenario
         effective_cross_media = args.cross_media or scenario == "cross_media"
@@ -660,8 +660,12 @@ class RecommendTool(Tool):
             scenario_notes.append("跨媒体场景：从你喜欢的动画/书籍/game 关系边召回原作、改编、音乐等条目。")
 
         excluded = {int(x) for x in args.exclude_ids if x}
-        await emit_tool_progress(tool=self.name, summary=f"拉取 @{username} 的 {args.subject_type} 收藏", current=2, total=6)
-        items = await self.client.get_all_user_collections(username, stype, None, max_items=_MAX_COLLECT)
+        if username:
+            await emit_tool_progress(tool=self.name, summary=f"拉取 @{username} 的 {args.subject_type} 收藏", current=2, total=6)
+            items = await self.client.get_all_user_collections(username, stype, None, max_items=_MAX_COLLECT)
+        else:
+            await emit_tool_progress(tool=self.name, summary="匿名模式：跳过收藏画像，用会话口味标签推荐", current=2, total=6)
+            items = []
         if scenario == "backlog":
             seen = {
                 it["subject"]["id"]
@@ -679,7 +683,7 @@ class RecommendTool(Tool):
         feedback_excluded_ids: set[int] = set()
         feedback_summary: dict = {"positive": 0, "negative": 0, "excluded_ids": []}
         aspect_profile: UserAspectProfile | None = None
-        if self.ltm is not None:
+        if self.ltm is not None and username:
             mem = self.ltm.load_user(username)
             memory_dislikes = [it.value for it in mem.dislikes if it.value.strip()]
             recent_feedback = mem.feedback[-50:]

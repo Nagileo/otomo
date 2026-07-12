@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { TasteQuiz } from "./taste-quiz";
 import {
   EvidencePanels,
   MemoryBadge,
@@ -1402,6 +1403,7 @@ export default function Home() {
             <div className="welcome">
               <div className="welcome-title">你的 ACGN 生活助手</div>
               <div className="welcome-sub">推荐 · 评价 · 追番 · 资源 · 识图，都可以直接问。试试：</div>
+              {!auth?.authenticated && <TasteQuiz onDone={(q) => send(q)} disabled={busy} />}
               <div className="welcome-chips">
                 {[
                   "今天有什么番更新？",
