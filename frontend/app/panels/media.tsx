@@ -275,7 +275,20 @@ export function ReviewEvidencePanel({ data }: { data: AnyRecord }) {
         <>
           <div className="section-title">三圈层对比</div>
           <div className="rating-grid">
-            {groups.map((g, i) => (
+            {picks.length > 0 && (
+        <>
+          <div className="section-title">想看推荐 · TA 已看过你想看的</div>
+          <div className="compact-list">
+            {picks.map((x: AnyRecord, i: number) => (
+              <span key={`pick-${i}`}>
+                <a href={`https://bgm.tv/subject/${x.id}`} target="_blank" rel="noreferrer">{text(x.name)}</a>
+                {" "}<Badge tone={x.peer_rate >= 8 ? "good" : "dim"}>{x.peer_rate} 分</Badge>
+              </span>
+            ))}
+          </div>
+        </>
+      )}
+      {groups.map((g, i) => (
               <div className="rating-card" key={`${g.group}-${i}`}>
                 <div className="rating-source">{text(g.group)}</div>
                 <div className="card-meta">{text(g.role, "")}</div>
@@ -423,6 +436,33 @@ export function SourceRoutingPanel({ data }: { data: AnyRecord }) {
 
 export function TasteAffinityPanel({ data }: { data: AnyRecord }) {
   const affinity = data.affinity || {};
+  const matrix = list(data.matrix);
+  // friends_matrix 模式：全好友收缩排名表
+  if (matrix.length) {
+    return (
+      <Panel title={`好友口味排名 · @${text(data.username)}`} subtitle={`${text(data.subject_type)} · 贝叶斯收缩分（防小样本虚高）`}>
+        <div className="compact-list" style={{ display: "grid", gap: 6 }}>
+          {matrix.map((e, i) => (
+            <div key={`${e.username}-${i}`} style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+              <b style={{ minWidth: 22 }}>{i + 1}.</b>
+              <a href={`https://bgm.tv/user/${e.username}`} target="_blank" rel="noreferrer">@{text(e.username)}</a>
+              {e.shrunk_score != null ? (
+                <>
+                  <Badge tone={e.shrunk_score >= 70 ? "good" : e.shrunk_score >= 45 ? "dim" : "warn"}>
+                    {e.shrunk_score} 分 · Lv{e.sync_level}
+                  </Badge>
+                  <span style={{ opacity: 0.6, fontSize: 12 }}>共同评分 {e.common_rated}{e.sync_score !== e.shrunk_score ? ` · 原始 ${e.sync_score}` : ""}</span>
+                </>
+              ) : (
+                <span style={{ opacity: 0.6, fontSize: 12 }}>{text(e.note, "样本不足")}</span>
+              )}
+            </div>
+          ))}
+        </div>
+      </Panel>
+    );
+  }
+  const picks = list(affinity.wishlist_picks);
   const metrics = [
     ["评分同步", affinity.rating_similarity],
     ["收藏重叠", affinity.collection_similarity],
@@ -441,6 +481,15 @@ export function TasteAffinityPanel({ data }: { data: AnyRecord }) {
       title={`同步率 · ${text(data.username)} × ${text(data.peer_username)}`}
       subtitle={`${text(data.subject_type)} · ${affinity.common_rated ?? 0} 个共同评分 · ${affinity.common_collections ?? 0} 个共同收藏`}
     >
+      {affinity.sync_score != null && (
+        <div style={{ display: "flex", alignItems: "baseline", gap: 10, margin: "2px 0 10px" }}>
+          <span style={{ fontSize: 26, fontWeight: 700 }}>{affinity.sync_score} 分</span>
+          <Badge tone={affinity.sync_score >= 70 ? "good" : "dim"}>Lv{affinity.sync_level}</Badge>
+          <span style={{ opacity: 0.65, fontSize: 12 }}>
+            隐藏分同步（按各自评分分布归一）· 样本置信 {Math.round((affinity.sample_confidence || 0) * 100)}%
+          </span>
+        </div>
+      )}
       <div className="metric-grid">
         {metrics.map(([label, value]) => (
           <div className="metric-card" key={String(label)}>

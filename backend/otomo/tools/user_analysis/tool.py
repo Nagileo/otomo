@@ -57,8 +57,12 @@ class UserOpinionResult(BaseModel):
 
 class TasteCompareArgs(BaseModel):
     username: str | None = Field(None, description="目标用户；不传用当前账号")
-    peer_username: str = Field(..., description="要比较同步率的 Bangumi 用户名")
+    peer_username: str = Field("", description="要比较同步率的 Bangumi 用户名；mode=friends_matrix 时可不传")
     subject_type: Literal["anime", "book", "music", "game", "real"] = "anime"
+    mode: Literal["pair", "friends_matrix"] = Field(
+        "pair", description="pair=两人详细对比；friends_matrix=把我的全部好友按口味同步率排名（贝叶斯收缩防小样本虚高）"
+    )
+    friends_limit: int = Field(10, ge=1, le=20, description="friends_matrix 模式最多比较的好友数")
 
 
 class SharedRatingItem(BaseModel):
@@ -68,6 +72,24 @@ class SharedRatingItem(BaseModel):
     peer_rate: int
     delta: int = 0
     image: str | None = None
+
+
+class WishlistPick(BaseModel):
+    """我想看、对方已看过并打分的作品——好友对比里最可执行的切面（借鉴 Shadow 组件"想看推荐"）。"""
+    id: int
+    name: str
+    peer_rate: int
+    image: str | None = None
+
+
+class FriendSyncEntry(BaseModel):
+    username: str
+    nickname: str = ""
+    sync_score: int | None = None       # 隐藏分余弦归一 0-100
+    shrunk_score: int | None = None     # 贝叶斯收缩分：μ + n/(n+k)·(score-μ)，防小样本虚高
+    sync_level: int | None = None       # Lv1-10
+    common_rated: int = 0
+    note: str = ""
 
 
 class PeerAffinity(BaseModel):
@@ -91,6 +113,12 @@ class PeerAffinity(BaseModel):
     confidence: Literal["low", "medium", "high"] = "low"
     confidence_reasons: list[str] = Field(default_factory=list)
     peer_weight: float = 0.0
+    # —— Shadow 式综合评级（隐藏分=各自评分分布的百分位，抹平"严苛党 vs 送分党"的习惯差）——
+    hidden_cosine: float | None = None      # 中心化隐藏分余弦（-1..1）
+    sync_score: int | None = None           # 归一 0-100 的综合同步分
+    sync_level: int | None = None           # Lv1-10
+    sample_confidence: float = 0.0          # 样本量置信度 0-1（50 个共同评分≈满）
+    wishlist_picks: list[WishlistPick] = Field(default_factory=list)
     liked_together: list[SharedRatingItem] = Field(default_factory=list)
     disliked_together: list[SharedRatingItem] = Field(default_factory=list)
     biggest_disagreements: list[SharedRatingItem] = Field(default_factory=list)
@@ -101,7 +129,8 @@ class TasteCompareResult(BaseModel):
     username: str
     peer_username: str
     subject_type: str
-    affinity: PeerAffinity
+    affinity: PeerAffinity | None = None
+    matrix: list[FriendSyncEntry] = Field(default_factory=list)
     caveats: list[str] = Field(default_factory=list)
 
 
@@ -248,6 +277,42 @@ def _collection_value(item: dict) -> float:
     """
     rate = item.get("rate") or 0
     return float(rate) / 10.0 if rate else 0.55
+
+
+def _percentile_map(rated: dict[int, dict]) -> dict[int, float]:
+    """评分 → 自分布中位百分位（-0.5..0.5）。Shadow 组件的"隐藏分"：
+    同一个 7 分，严苛党可能是 90 百分位、送分党只是 40 百分位——先归一再比较。"""
+    counts: dict[int, int] = {}
+    for it in rated.values():
+        r = int(it.get("rate") or 0)
+        if 1 <= r <= 10:
+            counts[r] = counts.get(r, 0) + 1
+    total = sum(counts.values())
+    if not total:
+        return {}
+    out: dict[int, float] = {}
+    cum = 0
+    for r in range(1, 11):
+        c = counts.get(r, 0)
+        out[r] = (cum + c / 2) / total - 0.5
+        cum += c
+    return out
+
+
+def _shadow_curve(x: float) -> float:
+    """Shadow 的余弦→分数映射（0..1 三次曲线），拉开高分段区分度。"""
+    x = max(0.0, min(1.0, x))
+    return (261 * x - 185 * x ** 2 + 50 * x ** 3) / 126
+
+
+def _sync_level(score: int) -> int:
+    return max(1, min(10, (score + 4) // 10))
+
+
+def _sample_confidence(n: int, target: int = 50) -> float:
+    if n <= 0:
+        return 0.0
+    return min(1.0, math.log(1 + 8 * n / target) / math.log(9))
 
 
 def _cosine(a: dict[int, float], b: dict[int, float], keys: set[int]) -> float:
@@ -405,6 +470,28 @@ def _build_affinity(peer_username: str, own_items: list[dict], peer_items: list[
     else:
         explanation = "共同评分不呈同步，推荐时不应给这个 peer 太高权重。"
 
+    # —— Shadow 式隐藏分综合评级 ——
+    own_pct = _percentile_map(own_rated_items)
+    peer_pct = _percentile_map(peer_rated_items)
+    own_hidden = {sid: own_pct.get(int(own_rated_items[sid].get("rate") or 0), 0.0) for sid in common}
+    peer_hidden = {sid: peer_pct.get(int(peer_rated_items[sid].get("rate") or 0), 0.0) for sid in common}
+    hidden_cos = _cosine(own_hidden, peer_hidden, common) if common else 0.0
+    sync_score = round(_shadow_curve(hidden_cos) * 100) if common else None
+    sample_conf = _sample_confidence(len(common))
+    # —— 想看推荐：我想看(type=1)、对方已打分 ——
+    own_wishlist_ids = {sid for item in own_items if (sid := _subject_id(item)) and int(item.get("type") or 0) == 1}
+    picks = sorted(
+        (
+            WishlistPick(
+                id=sid,
+                name=_subject_name(peer_rated_items[sid]),
+                peer_rate=int(peer_rated_items[sid].get("rate") or 0),
+                image=_subject_image(peer_rated_items[sid]),
+            )
+            for sid in own_wishlist_ids & set(peer_rated_items)
+        ),
+        key=lambda x: -x.peer_rate,
+    )[:10]
     return PeerAffinity(
         username=peer_username,
         rating_similarity=round(base, 4),
@@ -426,6 +513,11 @@ def _build_affinity(peer_username: str, own_items: list[dict], peer_items: list[
         confidence=confidence,
         confidence_reasons=confidence_reasons,
         peer_weight=round(peer_weight, 4),
+        hidden_cosine=round(hidden_cos, 4) if common else None,
+        sync_score=sync_score,
+        sync_level=_sync_level(sync_score) if sync_score is not None else None,
+        sample_confidence=round(sample_conf, 3),
+        wishlist_picks=picks,
         liked_together=liked,
         disliked_together=disliked,
         biggest_disagreements=disagreements,
@@ -636,6 +728,10 @@ class CompareUserTasteTool(Tool):
     async def run(self, args: TasteCompareArgs) -> ToolResult[TasteCompareResult]:
         username = await _username(self.client, args.username)
         stype = SUBJECT_TYPE[args.subject_type]
+        if args.mode == "friends_matrix":
+            return await self._friends_matrix(username, stype, args)
+        if not args.peer_username:
+            return ToolResult(ok=False, error="pair 模式需要 peer_username；比较全部好友请用 mode=friends_matrix")
         own, peer = await gather_limited(
             [
                 self.client.get_all_user_collections(username, stype, None, max_items=_MAX_ITEMS),
@@ -661,6 +757,62 @@ class CompareUserTasteTool(Tool):
                 Citation(title=f"Bangumi @{username}", url=f"https://bgm.tv/user/{username}", source="bangumi"),
                 Citation(title=f"Bangumi @{args.peer_username}", url=f"https://bgm.tv/user/{args.peer_username}", source="bangumi"),
             ],
+        )
+
+    async def _friends_matrix(self, username: str, stype: int, args: TasteCompareArgs) -> ToolResult[TasteCompareResult]:
+        """全好友口味排名（借鉴 Shadow 组件"全缓存好友评级"）：隐藏分余弦打分 +
+        贝叶斯收缩（μ 取好友分数中位数，k=10）防止 3 个共同评分的 100 分虚高压过 80 个的 85 分。"""
+        try:
+            friends, _url = await _fetch_friends(username, args.friends_limit)
+        except (httpx.HTTPError, httpx.TransportError) as e:
+            return ToolResult(ok=False, error=f"好友页抓取失败：{type(e).__name__}")
+        if not friends:
+            return ToolResult(ok=False, error="没有抓到好友（好友页为空或页面结构变化）")
+        own_items = await self.client.get_all_user_collections(username, stype, None, max_items=_MAX_ITEMS)
+        names = [f.username if hasattr(f, "username") else str(f.get("username") or f) for f in friends[: args.friends_limit]]
+        peers = await gather_limited(
+            [self.client.get_all_user_collections(n, stype, None, max_items=_MAX_ITEMS) for n in names],
+            host="bangumi",
+            return_exceptions=True,
+        )
+        entries: list[FriendSyncEntry] = []
+        for name, items in zip(names, peers, strict=False):
+            if isinstance(items, Exception):
+                entries.append(FriendSyncEntry(username=name, note=f"收藏读取失败：{type(items).__name__}"))
+                continue
+            aff = _build_affinity(name, own_items, items)
+            entries.append(FriendSyncEntry(
+                username=name,
+                sync_score=aff.sync_score,
+                sync_level=aff.sync_level,
+                common_rated=aff.common_rated,
+            ))
+        scored = [e for e in entries if e.sync_score is not None]
+        if scored:
+            vals = sorted(x.sync_score for x in scored)
+            mid = len(vals) // 2
+            mu = vals[mid] if len(vals) % 2 else round((vals[mid - 1] + vals[mid]) / 2)
+        else:
+            mu = 50
+        k = 10
+        for e in scored:
+            n = max(0, e.common_rated)
+            e.shrunk_score = round(mu + (n / (n + k)) * (e.sync_score - mu))
+            e.sync_level = _sync_level(e.shrunk_score)
+        entries.sort(key=lambda e: (e.shrunk_score is not None, e.shrunk_score or -1, e.common_rated), reverse=True)
+        return ToolResult(
+            ok=True,
+            data=TasteCompareResult(
+                username=username,
+                peer_username="",
+                subject_type=args.subject_type,
+                matrix=entries,
+                caveats=[
+                    f"排名用贝叶斯收缩分（μ=好友中位数 {mu}，k={k}）：共同评分越少越向中位回归，防小样本虚高。",
+                    "好友列表来自网页解析（非官方 API）；只统计公开收藏。",
+                ],
+            ),
+            sources=[Citation(title=f"Bangumi @{username} 好友", url=f"https://bgm.tv/user/{username}/friends", source="bangumi")],
         )
 
 

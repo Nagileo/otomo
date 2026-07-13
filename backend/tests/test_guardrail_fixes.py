@@ -412,3 +412,69 @@ def test_trajectory_flywheel_log_feedback_export(tmp_path, monkeypatch):
 
 
 from pathlib import Path as pathlib_Path  # noqa: E402
+
+
+def test_shadow_style_taste_sync():
+    """Shadow 式口味对比：隐藏分百分位归一、综合评级、想看推荐、收缩排名。"""
+    from otomo.tools.user_analysis.tool import (
+        _build_affinity, _percentile_map, _sample_confidence, _shadow_curve, _sync_level,
+    )
+
+    def item(sid, rate, type_=2, name=""):
+        return {"subject_id": sid, "rate": rate, "type": type_,
+                "subject": {"id": sid, "name_cn": name or f"作品{sid}", "tags": []}}
+
+    # 百分位：严苛党的 7 分应比送分党的 7 分位置更高
+    strict = {i: item(i, r) for i, r in enumerate([3, 4, 5, 5, 6, 7], 1)}   # 7 是最高分
+    generous = {i: item(i, r) for i, r in enumerate([7, 8, 8, 9, 9, 10], 1)}  # 7 是最低分
+    assert _percentile_map(strict)[7] > 0.3 and _percentile_map(generous)[7] < -0.3
+
+    assert _shadow_curve(1.0) == 1.0 and _shadow_curve(0.0) == 0.0
+    assert _sync_level(100) == 10 and _sync_level(0) == 1
+    assert _sample_confidence(50) == 1.0 and 0 < _sample_confidence(5) < 1
+
+    # 完全同向的两人：高同步分；想看推荐拿到对方打过分的我的想看
+    own = [item(i, r) for i, r in [(1, 9), (2, 8), (3, 3), (4, 10)]] + [item(99, 0, type_=1)]
+    peer = [item(i, r) for i, r in [(1, 10), (2, 9), (3, 2), (4, 9)]] + [item(99, 8, name="想看的那部")]
+    aff = _build_affinity("peer", own, peer)
+    assert aff.sync_score is not None and aff.sync_score >= 80
+    assert aff.sync_level == _sync_level(aff.sync_score)
+    assert len(aff.wishlist_picks) == 1 and aff.wishlist_picks[0].peer_rate == 8
+
+
+def test_friends_matrix_shrinkage_ranking(monkeypatch):
+    """好友矩阵：小样本高分被收缩到中位附近，大样本稳定分排前。"""
+    import asyncio as _a
+
+    from otomo.tools.user_analysis import tool as ua
+
+    def item(sid, rate, type_=2):
+        return {"subject_id": sid, "rate": rate, "type": type_,
+                "subject": {"id": sid, "name_cn": f"作品{sid}", "tags": []}}
+
+    my_items = [item(i, 7 + (i % 3)) for i in range(1, 61)]
+    # A：60 个共同评分、约 75% 一致（大样本高同步但非满分）；B：3 个完全一致（小样本满分）；C：反向（垫底）
+    friend_a = [item(i, (9 - (i % 3)) if i % 4 == 0 else (7 + (i % 3))) for i in range(1, 61)]
+    friend_b = [item(i, 7 + (i % 3)) for i in range(1, 4)]
+    friend_c = [item(i, 9 - (i % 3)) for i in range(1, 41)]
+    collections = {"me": my_items, "a": friend_a, "b": friend_b, "c": friend_c}
+
+    class FakeClient:
+        async def get_me(self):
+            return {"username": "me"}
+        async def get_all_user_collections(self, username, stype, ct, max_items=0):
+            return collections[username]
+
+    async def fake_friends(username, limit):
+        return [{"username": "a"}, {"username": "b"}, {"username": "c"}], f"https://bgm.tv/user/{username}/friends"
+
+    monkeypatch.setattr(ua, "_fetch_friends", fake_friends)
+    tool = ua.CompareUserTasteTool(FakeClient())
+    res = _a.run(tool.run(ua.TasteCompareArgs(mode="friends_matrix", friends_limit=5)))
+    assert res.ok and res.data and len(res.data.matrix) == 3
+    by_name = {e.username: e for e in res.data.matrix}
+    a, b, c = by_name["a"], by_name["b"], by_name["c"]
+    assert res.data.matrix[-1].username == "c"  # 反向口味垫底
+    assert b.shrunk_score < b.sync_score  # 小样本满分被往中位拉
+    assert abs(a.shrunk_score - a.sync_score) <= 2  # 大样本几乎不动
+    assert b.sync_score == 100 and b.shrunk_score < 100
