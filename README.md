@@ -15,6 +15,12 @@
 - **新番导视**：Bangumi 季番 + yuc 放送表 + B站白名单导视，按你的口味分诊（必追 / 可等 / 不适合）。
 - **长期记忆**：记住你的偏好 / 避雷 / 观看进度 / 推荐反馈，跨会话生效；每条带来源和置信度，可随时遗忘。
 - **防剧透**：识别"看到第 N 集 / 别剧透 / 可以剧透"，分集讨论按进度过滤。
+- **看番通路**：在哪看（bangumi-data + yuc 正版入口）→ 离线资源（蜜柑 / DMHY / ACGNX / VCB 的 RSS·磁力·BD 聚合，只给链接不碰下载）→ 一键推送 qBittorrent（前端确认制）。
+- **收藏写回**：对话里说"加入在看 / 打 8 分 / 看完了"，生成待确认动作，**口头说"确认"即写回 Bangumi**（可撤销）。
+- **产品面板**：追番驾驶舱、作品档案页、IP 跨媒介图谱、月度 / 年度观看报告（**年度 Wrapped 卡片可导出成图分享**）、圣地巡礼地图与行程规划、今日角色生日。
+- **识图与视频**：截图识番（trace.moe + SauceNAO + OCR/VLM 聚合路由）、B站导视视频内容总结（字幕 / 弹幕 / 评论 / ASR）、Pixiv 插画入口。
+- **分享与订阅**：报告 / 导视 / 驾驶舱一键生成可公开分享页（递归脱敏）；每日追番 / 生日 / RSS 更新 / 周报按规则推送到 inbox / 邮件 / Telegram / Discord / 飞书 / Server酱。
+- **免登录冷启动**：30 秒口味速配（题材 × 雷点 × 场景），不绑 Bangumi 也能拿到个性化推荐。
 - **探索与发现**：角色声优网络漫游、口味报告人格卡、评分预测、萌点（标签组合）检索、分集口碑雷达、好友同步率、弃坑分析、追番副驾。
 
 ## 为什么这么做
@@ -28,7 +34,8 @@ Otomo 想做的是一个**垂直、可溯源**的搭子：事实尽量落到 can
 ```
 backend/        Python + FastAPI agent 后端
                 手搓 ReAct / Plan-Execute / Adaptive 三种 runner（+ LangGraph 对照实现），
-                ~50 个自建工具（Bangumi 图谱 / 推荐 / 评价 / 记忆 / 探索…），SSE 流式输出
+                96+ 自建工具（图谱 / 推荐 / 评价 / 资源 / 巡礼 / 记忆…）+ 渐进式工具披露，
+                SSE 流式输出；另可作为 MCP Server 把 31 个只读工具接进 Claude / Cursor
 frontend/       Next.js 对话前端：消费 SSE，渲染流式答案 / 执行 trace / 结构化证据面板 / 来源卡片
 recsys-offline/ 离线推荐：评测套件 + CF / MF / LTR，Bangumi 原生 CF 闭环（导出 i2i 反哺在线召回）
 docs/           方案与设计文档
@@ -57,6 +64,10 @@ cd frontend && npm install && npm run dev                       # http://localho
 
 - **Agent**：手搓 ReAct / Plan-Execute / Adaptive 三 runner，输出结构化事件流（plan / tool_call / observation / state / answer），不外露裸 CoT；另有 LangGraph 对照实现共用同一套工具与契约。事件协议借鉴 AG-UI 的分类。
 - **工具**：全部自建（不接 Bangumi-MCP），typed 入参 / 出参；外部源（批判空间 / yuc / B站 / 好友页）带 TTL 缓存与失败降级。
+- **工具披露**：96 工具不全量塞给模型——23 个核心常驻 + 15 个域工具组按查询词法注入 + `load_tool_group` 逃生舱，单轮工具 schema 从 ~26k token 降到 ~7k（-70%），详见 [docs/21](docs/21-architecture-evolution-notes.md)。
+- **写回信任模型**：真实写操作三层护栏（confirmed 参数 / 仅执行已准备动作 / prompt 明确确认规则），对话内口头确认即执行、默认通道仍拦截。
+- **评测**：136 单元测试 + 47 条 golden 行为验收（断言路由 / 面板 / 越界，不赌易变事实，CI 手动触发）+ 离线推荐 leave-N-out 评测（HR@K/NDCG@K 量化各召回通道贡献）。
+- **数据飞轮**：部署期每轮对话轨迹 + 👍👎 反馈落盘（伪匿名），一键导出脱敏 SFT / DPO 语料，为后训练阶段攒真实分布数据。
 - **记忆**：短期会话状态（剧透 / 上轮推荐）+ 文件式长期记忆（结构化偏好，写入走 consolidation 而非追加）。
 - **RAG**：BM25 + bge dense 混合召回 + reranker 精排；萌娘 `ai-train=no` 的内容只临时检索、不入库。
 - **评测**：图谱级 verifier（canonical 实体对齐 / set-F1 / 路径有效率 / 幻觉感知）+ golden cases（含"该调哪些工具 / 不该调 / 结构化面板是否产出"维度）。
