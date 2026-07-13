@@ -275,20 +275,7 @@ export function ReviewEvidencePanel({ data }: { data: AnyRecord }) {
         <>
           <div className="section-title">三圈层对比</div>
           <div className="rating-grid">
-            {picks.length > 0 && (
-        <>
-          <div className="section-title">想看推荐 · TA 已看过你想看的</div>
-          <div className="compact-list">
-            {picks.map((x: AnyRecord, i: number) => (
-              <span key={`pick-${i}`}>
-                <a href={`https://bgm.tv/subject/${x.id}`} target="_blank" rel="noreferrer">{text(x.name)}</a>
-                {" "}<Badge tone={x.peer_rate >= 8 ? "good" : "dim"}>{x.peer_rate} 分</Badge>
-              </span>
-            ))}
-          </div>
-        </>
-      )}
-      {groups.map((g, i) => (
+            {groups.map((g, i) => (
               <div className="rating-card" key={`${g.group}-${i}`}>
                 <div className="rating-source">{text(g.group)}</div>
                 <div className="card-meta">{text(g.role, "")}</div>
@@ -509,6 +496,19 @@ export function TasteAffinityPanel({ data }: { data: AnyRecord }) {
         </div>
       )}
       <div className="taste-groups">
+        {picks.length > 0 && (
+          <>
+            <div className="section-title">想看推荐 · TA 已看过你想看的</div>
+            <div className="compact-list">
+              {picks.map((x: AnyRecord, i: number) => (
+                <span key={`pick-${i}`}>
+                  <a href={`https://bgm.tv/subject/${x.id}`} target="_blank" rel="noreferrer">{text(x.name)}</a>
+                  {" "}<Badge tone={x.peer_rate >= 8 ? "good" : "dim"}>{x.peer_rate} 分</Badge>
+                </span>
+              ))}
+            </div>
+          </>
+        )}
         {groups.map(([label, key]) => (
           <div className="taste-group" key={key}>
             <div className="section-title">{label}</div>
