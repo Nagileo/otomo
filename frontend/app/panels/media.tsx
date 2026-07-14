@@ -894,6 +894,7 @@ export function SeasonGuidePanel({
                 <Badge tone={item.hotness_level === "surge" || item.hotness_level === "hot" ? "warn" : item.hotness_level === "warm" ? "dim" : "dim"}>
                   heat {text(item.hotness_level, "none")} {pct(item.hotness)}
                 </Badge>
+                {item.pre_air_wish != null && <Badge tone="dim">播前期待 {item.pre_air_wish}</Badge>}
               </div>
               {list(item.verticals).length > 0 && (
                 <div className="evidence-row tight">
