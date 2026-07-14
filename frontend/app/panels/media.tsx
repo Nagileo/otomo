@@ -5,6 +5,7 @@
 // WhereToWatch/ReleaseFeed/BangumiIndex/Explorer/EpisodeRadar）后续搬迁至此；
 // 新媒体域面板一律写在本文件。
 
+import { useState } from "react";
 import { Badge, Panel, list, text, type AnyRecord } from "./shared";
 import { type ShareSnapshotHandler, type PrepareWriteHandler, type PrepareDownloaderHandler, fmtScore, clsBySignal, pct, EmptyHint, ShareSnapshotButton } from "./shared";
 
@@ -1306,6 +1307,72 @@ export function RatingMoversPanel({ data }: { data: AnyRecord }) {
         </>
       )}
       {list(data.caveats).map((c, i) => <div className="card-note" key={`c-${i}`}>{text(c)}</div>)}
+    </Panel>
+  );
+}
+
+
+export function OmikujiPanel({ data }: { data: AnyRecord }) {
+  const tone = data.fortune === "大吉" ? "good" : data.fortune === "末吉" ? "warn" : "dim";
+  return (
+    <Panel title={`今日番签 · ${text(data.date)}`} subtitle={data.from_pool === "wishlist" ? "抽自你的想看列表" : "抽自经典池"}>
+      <div style={{ display: "flex", gap: 14, alignItems: "flex-start" }}>
+        {data.image && <img src={text(data.image)} alt="" style={{ width: 88, borderRadius: 8 }} />}
+        <div>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+            <span style={{ fontSize: 30, fontWeight: 800 }}>{text(data.fortune)}</span>
+            <Badge tone={tone}>幸运标签：{text(data.lucky_tag)}</Badge>
+          </div>
+          <div style={{ marginTop: 6, fontSize: 16 }}>
+            今日之番：<a href={`https://bgm.tv/subject/${data.subject_id}`} target="_blank" rel="noreferrer"><b>{text(data.subject_name)}</b></a>
+          </div>
+          <ul style={{ margin: "8px 0 0", paddingLeft: 18 }}>
+            {list<string>(data.advice).map((a, i) => <li key={i} style={{ fontSize: 13, opacity: 0.85 }}>{a}</li>)}
+          </ul>
+        </div>
+      </div>
+      <div className="card-note">同一天重复抽签结果不变——今日运势只有一次。</div>
+    </Panel>
+  );
+}
+
+export function QuizPanel({ data }: { data: AnyRecord }) {
+  const questions = list(data.questions);
+  const [picked, setPicked] = useState<Record<number, number>>({});
+  const answered = Object.keys(picked).length;
+  const correct = questions.reduce((n: number, q: AnyRecord, i: number) => n + (picked[i] === q.answer_index ? 1 : 0), 0);
+  return (
+    <Panel title="ACGN 小测验" subtitle={data.source === "my_watched" ? "题目出自你看过的作品" : "经典池出题"}>
+      {questions.map((q: AnyRecord, qi: number) => {
+        const done = picked[qi] !== undefined;
+        return (
+          <div key={qi} style={{ marginBottom: 12 }}>
+            <div style={{ fontWeight: 600, marginBottom: 6 }}>{qi + 1}. {text(q.q)}</div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {list<string>(q.options).map((opt, oi) => {
+                const isAnswer = oi === q.answer_index;
+                const isPicked = picked[qi] === oi;
+                const style: Record<string, string | number> = {
+                  padding: "4px 12px", borderRadius: 8, cursor: done ? "default" : "pointer",
+                  border: "1px solid var(--border, #2a2a32)", background: "transparent", color: "inherit", fontSize: 13,
+                };
+                if (done && isAnswer) { style.borderColor = "#4ade80"; style.background = "rgba(74,222,128,.15)"; }
+                else if (done && isPicked) { style.borderColor = "#f87171"; style.background = "rgba(248,113,113,.15)"; }
+                return (
+                  <button key={oi} style={style} disabled={done}
+                    onClick={() => setPicked((p) => ({ ...p, [qi]: oi }))}>{opt}</button>
+                );
+              })}
+            </div>
+            {done && <div className="card-note" style={{ marginTop: 4 }}>{picked[qi] === q.answer_index ? "✅ " : "❌ "}{text(q.explain)}</div>}
+          </div>
+        );
+      })}
+      {answered === questions.length && questions.length > 0 && (
+        <div style={{ fontWeight: 700, fontSize: 15 }}>
+          🎉 {correct}/{questions.length} 正确{correct === questions.length ? " —— 全对，浓度惊人！" : correct >= questions.length / 2 ? " —— 有两把刷子" : " —— 该补番了"}
+        </div>
+      )}
     </Panel>
   );
 }

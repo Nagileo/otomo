@@ -41,6 +41,7 @@ SubscriptionKind = Literal[
     "rss_release",
     "birthday",
     "bili_up_video",
+    "rating_alert",
 ]
 SubscriptionChannel = Literal["inbox", "email", "webhook"]
 SubscriptionTemplate = Literal["brief", "normal", "detailed"]
@@ -461,10 +462,48 @@ class SubscriptionService:
                 return await self._rss_payload(rule)
             if rule.kind == "bili_up_video":
                 return await self._bili_payload(rule)
+            if rule.kind == "rating_alert":
+                return await self._rating_alert_payload(rule, client)
             raise ValueError(f"unsupported subscription kind: {rule.kind}")
         finally:
             if hasattr(client, "aclose"):
                 await client.aclose()
+
+    async def _rating_alert_payload(self, rule: SubscriptionRule, client: Any) -> dict[str, Any]:
+        """口碑哨兵：我的在看/想看条目命中 netaba.re 近30天涨跌榜时提醒。
+        docs/19 曾把"即时告警"划为不做——这是**日报级**的克制版，归入现有订阅节奏。"""
+        from .tools.netabare.tool import RatingMoversArgs, RatingMoversTool
+
+        username = rule.username
+        if not username:
+            return {"sections": [], "caveats": ["rating_alert 需要绑定用户名"]}
+        movers = await RatingMoversTool().run(RatingMoversArgs(direction="all", limit=10))
+        if not movers.ok or movers.data is None:
+            return {"sections": [], "caveats": [movers.error or "涨跌榜获取失败"]}
+        items = await client.get_all_user_collections(username, 2, None, max_items=1000)
+        mine: dict[int, str] = {}
+        _STATUS = {1: "想看", 2: "看过", 3: "在看", 4: "搁置"}
+        watch_types = set(rule.filters.get("watch_types") or [1, 3])  # 默认盯 想看+在看
+        for item in items:
+            subj = item.get("subject") or {}
+            sid = subj.get("id")
+            if sid and int(item.get("type") or 0) in watch_types:
+                mine[int(sid)] = _STATUS.get(int(item.get("type") or 0), "")
+        lines: list[dict[str, Any]] = []
+        for board, label, emoji in ((movers.data.up, "评分上涨", "📈"), (movers.data.down, "评分下跌", "📉")):
+            for m in board:
+                if m.subject_id in mine:
+                    lines.append({
+                        "id": m.subject_id,
+                        "name": m.title,
+                        "summary": f"{emoji} 你{mine[m.subject_id]}的《{m.title}》近30天{label} {abs(m.delta_score)} 分"
+                                   + (f"（现 {m.current_score}，{m.rating_total} 人评分）" if m.current_score is not None else ""),
+                        "url": f"https://bgm.tv/subject/{m.subject_id}",
+                    })
+        return {
+            "sections": [{"title": "口碑异动", "items": lines}] if lines else [],
+            "caveats": ["异动数据来自 netaba.re 近30天快照；无命中时不推送。"],
+        }
 
     async def _daily_airing_payload(self, rule: SubscriptionRule, client: BangumiClient, *, mutate: bool) -> dict[str, Any]:
         if not rule.username:
@@ -716,6 +755,7 @@ def default_subscription_title(kind: str) -> str:
         "rss_release": "RSS 新资源提醒",
         "birthday": "今日角色生日",
         "bili_up_video": "B站导视/漫评新视频",
+        "rating_alert": "口碑哨兵：你的番评分异动",
     }.get(kind, "Otomo 订阅")
 
 

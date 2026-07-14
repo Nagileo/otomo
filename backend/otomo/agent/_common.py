@@ -502,6 +502,8 @@ _PANEL_TOOLS = {
     "get_trending_subjects",
     "get_subject_trend",
     "get_rating_movers",
+    "anime_omikuji",
+    "generate_acgn_quiz",
     "get_character_birthdays",
     "compare_subjects",
     "get_pilgrimage_map",

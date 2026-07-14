@@ -13,6 +13,7 @@ const KINDS = [
   ["monthly_report", "月报"],
   ["rss_release", "RSS 新资源"],
   ["birthday", "生日提醒"],
+  ["rating_alert", "口碑哨兵（在看/想看的番评分异动）"],
   ["bili_up_video", "B站导视/漫评"],
 ] as const;
 const CHANNELS = [

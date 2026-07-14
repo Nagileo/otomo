@@ -597,3 +597,75 @@ def test_friends_pulse_aggregation(monkeypatch):
     assert p.wishlist_hot[0].subject_id == 200 and p.wishlist_hot[0].count == 3
     assert [e.subject_id for e in p.top_rated] == [300]   # 400 单人评分被过滤
     assert p.top_rated[0].avg_rate == 8.5
+
+
+def test_rating_alert_subscription_payload(monkeypatch):
+    """口碑哨兵：我的在看/想看 ∩ 涨跌榜 → 提醒行；无命中→空 sections（不推送）。"""
+    import asyncio as _a
+
+    from otomo import subscriptions as subs
+    from otomo.subscriptions import SubscriptionRule, SubscriptionSchedule
+    from otomo.tools.netabare import tool as nb
+
+    class FakeMovers:
+        async def run(self, args):
+            from otomo.agent.contracts import ToolResult
+            data = nb.RatingMoversResult(
+                up=[nb.MoverItem(subject_id=100, title="涨的番", delta_score=1.5, current_score=8.0, rating_total=500)],
+                down=[nb.MoverItem(subject_id=200, title="崩的番", delta_score=-2.0, current_score=6.1, rating_total=900)],
+            )
+            return ToolResult(ok=True, data=data)
+
+    monkeypatch.setattr(nb, "RatingMoversTool", lambda: FakeMovers())
+
+    class FakeClient:
+        async def get_all_user_collections(self, username, stype, ct, max_items=0):
+            return [
+                {"type": 3, "subject": {"id": 200, "name_cn": "崩的番"}},   # 在看 → 命中 down
+                {"type": 1, "subject": {"id": 999, "name_cn": "无关"}},    # 想看但不在榜
+            ]
+        async def aclose(self): ...
+
+    svc = subs.SubscriptionService.__new__(subs.SubscriptionService)
+    rule = SubscriptionRule(id="r1", owner_key="o", username="me", kind="rating_alert",
+                            schedule=SubscriptionSchedule(timezone="Asia/Shanghai", hour=9))
+    payload = _a.run(svc._rating_alert_payload(rule, FakeClient()))
+    lines = payload["sections"][0]["items"]
+    assert len(lines) == 1 and lines[0]["id"] == 200
+    assert "在看" in lines[0]["summary"] and "下跌 2.0" in lines[0]["summary"]
+
+    class EmptyClient(FakeClient):
+        async def get_all_user_collections(self, *a, **k):
+            return []
+    payload2 = _a.run(svc._rating_alert_payload(rule, EmptyClient()))
+    assert payload2["sections"] == []  # 无命中不生成 section → run_rule 判空跳过推送
+
+
+def test_omikuji_deterministic_and_quiz_shape():
+    """番签同日同签；quiz 选项含答案且四选一、正文外不泄题。"""
+    import asyncio as _a
+
+    from otomo.tools.fun.tool import AcgnQuizTool, AnimeOmikujiTool, OmikujiArgs, QuizArgs
+
+    class FakeClient:
+        async def get_me(self):
+            return {"username": "me"}
+        async def get_all_user_collections(self, username, stype, ct, max_items=0):
+            if ct == 1:  # 想看
+                return [{"subject": {"id": i, "name_cn": f"想看{i}", "tags": [{"name": "治愈"}]}} for i in range(1, 9)]
+            return [{"subject": {"id": 100 + i, "name_cn": f"看过{i}", "date": f"20{10 + i}-01-01"}} for i in range(1, 12)]
+        async def get_subject_persons(self, sid):
+            return [{"relation": "动画制作", "name": f"公司{sid % 5}"}]
+
+    o = AnimeOmikujiTool(FakeClient())
+    r1 = _a.run(o.run(OmikujiArgs()))
+    r2 = _a.run(o.run(OmikujiArgs()))
+    assert r1.ok and r2.ok
+    assert r1.data.subject_id == r2.data.subject_id and r1.data.fortune == r2.data.fortune  # 同日确定性
+    assert r1.data.from_pool == "wishlist"
+
+    q = _a.run(AcgnQuizTool(FakeClient()).run(QuizArgs(count=5)))
+    assert q.ok and len(q.data.questions) == 5
+    for question in q.data.questions:
+        assert len(question.options) == 4 and len(set(question.options)) == 4
+        assert 0 <= question.answer_index < 4

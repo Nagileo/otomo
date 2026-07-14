@@ -109,8 +109,8 @@ TOOL_GROUPS: dict[str, dict[str, Any]] = {
     },
     "discovery_extra": {
         "desc": "今日角色生日、Bangumi 精选目录/清单",
-        "tools": {"get_character_birthdays", "get_bangumi_index", "explore_voice_network"},
-        "keywords": ["生日", "目录", "清单", "声优网络", "配过", "同台", "谁配"],
+        "tools": {"get_character_birthdays", "get_bangumi_index", "explore_voice_network", "anime_omikuji", "generate_acgn_quiz"},
+        "keywords": ["生日", "目录", "清单", "声优网络", "配过", "同台", "谁配", "抽签", "番签", "运势", "签", "考考", "出题", "quiz", "答题", "猜"],
     },
     "digest": {
         "desc": "周报生成/配置、收件箱查看",
