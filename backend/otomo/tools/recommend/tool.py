@@ -312,6 +312,7 @@ class RecommendArgs(BaseModel):
     use_series: bool = Field(True, description="系列入口回溯：若推荐项是续集而你没看前作，自动换成入口作（别莫名其妙推你第二季）")
     use_external_recall: bool = Field(True, description="game/galgame 推荐时，是否用批判空间排行做前置召回并映射回 Bangumi")
     use_curation: bool = Field(True, description="是否用精选 Bangumi 目录作为低权重策展召回")
+    use_friends: bool = Field(False, description="好友圈社交召回：好友们想看/高分的未看作品进候选（要抓好友收藏，较慢；用户提到好友/圈子时开启）")
     enrich_evidence: bool = Field(True, description="为推荐结果补充统一评价证据；game 会补批判空间/VNDB，默认开启")
     use_aspect_profile: bool = Field(True, description="是否读取长期记忆中的 aspect 好球区/雷区参与 rerank 与解释")
     exclude_ids: list[int] = Field(default_factory=list, max_length=80, description="本轮要排除的 Bangumi subject_id；用于 critiquing 换一批")
@@ -462,6 +463,60 @@ class RecommendTool(Tool):
                     c = cand[nbr_sid] = _blank_id()
                 c["cf"] += 1.0 / (1 + rank)
                 c["cf_from"].add(sid)
+
+    async def _friends_recall(self, cand: dict, stype: int, username: str, seen: set[int]) -> None:
+        """好友圈社交召回：好友们想看（≥2 人）或打了高分（≥2 人评分且均分≥8）的未看作品。
+        经典 RecSys 社交信号通道——比全站 CF 更贴近"我的圈子"。失败静默。"""
+        from ..user_analysis.tool import _fetch_friends
+
+        try:
+            friends, _url = await _fetch_friends(username, 10)
+        except Exception:  # noqa: BLE001
+            return
+        names = [f.username if hasattr(f, "username") else str(f.get("username") or f) for f in friends[:10]]
+        if not names:
+            return
+        peers = await gather_limited(
+            [self.client.get_all_user_collections(n, stype, None, max_items=800) for n in names],
+            host="bangumi",
+            return_exceptions=True,
+        )
+        wish: dict[int, dict] = {}
+        rated: dict[int, dict] = {}
+        for name, items in zip(names, peers, strict=False):
+            if isinstance(items, Exception):
+                continue
+            for item in items:
+                subj = item.get("subject") or {}
+                sid = subj.get("id")
+                if not sid or int(sid) in seen:
+                    continue
+                sid = int(sid)
+                t = int(item.get("type") or 0)
+                rate = int(item.get("rate") or 0)
+                if t == 1:
+                    slot = wish.setdefault(sid, {"subj": subj, "n": 0})
+                    slot["n"] += 1
+                if rate > 0:
+                    slot = rated.setdefault(sid, {"subj": subj, "rates": []})
+                    slot["rates"].append(rate)
+        for sid, slot in wish.items():
+            if slot["n"] < 2:
+                continue
+            c = cand.setdefault(sid, _blank(slot["subj"]))
+            c["tags"].update(_tag_names(slot["subj"]))
+            c["friends"] = f"{slot['n']} 位好友都想看"
+            c["external_boost"] = max(c.get("external_boost", 0.0), min(0.15 + 0.05 * slot["n"], 0.35))
+        for sid, slot in rated.items():
+            if len(slot["rates"]) < 2:
+                continue
+            avg = sum(slot["rates"]) / len(slot["rates"])
+            if avg < 8:
+                continue
+            c = cand.setdefault(sid, _blank(slot["subj"]))
+            c["tags"].update(_tag_names(slot["subj"]))
+            c["friends"] = f"好友圈 {len(slot['rates'])} 人均分 {avg:.1f}"
+            c["external_boost"] = max(c.get("external_boost", 0.0), min(0.2 + (avg - 8) * 0.1, 0.4))
 
     async def _cross_media_recall(self, cand: dict, target_stype: int, source_items: list[dict], seen: set[int]) -> None:
         seeds = sorted(source_items, key=lambda it: -(it.get("rate") or 0))[:_CF_SEEDS]
@@ -780,6 +835,9 @@ class RecommendTool(Tool):
                 )
                 curation_hits += 1
 
+        if args.use_friends and username:
+            await self._friends_recall(cand, stype, username, seen)
+
         # 用户最爱作品（按评分降序）——图谱召回与协同召回共用作种子
         fav_sorted = sorted(watched, key=lambda it: -(it.get("rate") or 0))
         fav_ids = [it["subject"]["id"] for it in fav_sorted if it.get("subject", {}).get("id")]
@@ -1015,6 +1073,8 @@ class RecommendTool(Tool):
                 why_recalled.append("标签召回：" + "、".join(sorted(c["matched"])[:4]))
             if c["graph"]:
                 why_recalled.append("图谱召回：" + "、".join(sorted(c["graph"])[:2]))
+            if c.get("friends"):
+                why_recalled.append("好友圈信号：" + str(c["friends"]))
             if c.get("cf_from"):
                 why_recalled.extend(cf_reason(c)[:1])
             if c.get("external"):

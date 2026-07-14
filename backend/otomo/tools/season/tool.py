@@ -108,6 +108,7 @@ class YearAnimeResult(BaseModel):
 class SeasonGuideItem(BaseModel):
     subject_id: int
     title: str
+    pre_air_wish: int | None = None   # 开播前想看数（netaba.re 快照，期待度；hot 模式 top 条目才补）
     title_jp: str | None = None
     yuc_title: str | None = None
     match_confidence: float = 0.0
@@ -407,6 +408,24 @@ class SeasonGuideBriefTool(Tool):
             sig.level = "surge" if sig.hotness >= 0.78 else "hot" if sig.hotness >= 0.55 else "warm" if sig.hotness >= 0.25 else "none"
         return signals
 
+    async def _enrich_pre_air_hype(self, items: list["SeasonGuideItem"]) -> None:
+        """hot 模式 top 条目补开播前期待度（netaba.re 播前 wish 快照）。
+        失败静默——期待度是加分信息，不能拖垮导视主流程。"""
+        from ..netabare.tool import SubjectTrendArgs, SubjectTrendTool
+
+        tool = SubjectTrendTool()
+        results = await gather_limited(
+            [tool.run(SubjectTrendArgs(subject_id=item.subject_id)) for item in items],
+            host="netabare",
+            return_exceptions=True,
+        )
+        for item, res in zip(items, results, strict=False):
+            if isinstance(res, Exception) or not getattr(res, "ok", False) or res.data is None:
+                continue
+            if res.data.pre_air_wish:
+                item.pre_air_wish = res.data.pre_air_wish
+                item.hotness_evidence.append(f"开播前想看 {res.data.pre_air_wish} 人")
+
     async def _profile_tags(self, username: str | None) -> tuple[bool, list[str]]:
         try:
             user = username
@@ -559,6 +578,7 @@ class SeasonGuideBriefTool(Tool):
         dropped = len(item_results) - len(items)
         if args.mode == "hot":
             items.sort(key=lambda x: (-(x.hotness * 0.7 + min(x.fit_score / 8.0, 1.0) * 0.3), -x.hotness, -(x.bangumi_score or 0)))
+            await self._enrich_pre_air_hype(items[:12])
         else:
             items.sort(key=lambda x: (-_fit_rank(x.fit), -x.fit_score, -x.hotness, -(x.bangumi_score or 0)))
 

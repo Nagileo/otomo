@@ -501,6 +501,14 @@ class SubjectDossierTool(Tool):
                 self.music.run(AnimeMusicThemesArgs(subject_id=sid, title=subject["name"], limit=12)),
             ])
         results = await gather_limited(jobs, host="bangumi")
+        # 口碑走势（netaba.re）：独立 host 槽避免与 bangumi 批次嵌套；失败静默不拖垮档案
+        from ..netabare.tool import SubjectTrendArgs, SubjectTrendTool
+
+        trend_res = await gather_limited(
+            [SubjectTrendTool(self.client).run(SubjectTrendArgs(subject_id=sid, days=365))],
+            host="netabare",
+            return_exceptions=True,
+        )
         sections: list[ProductSection] = []
         sources = [Citation(title=subject["name"], url=f"https://bgm.tv/subject/{sid}", source="bangumi", image=subject.get("image"))]
         for res in results:
@@ -523,6 +531,24 @@ class SubjectDossierTool(Tool):
                 sections.append(ProductSection(title="跨媒体关系", items=payload.get("relations", []), notes=["用于原作/改编/续作/音乐等追溯。"]))
             elif name == "AnimeMusicThemeResult":
                 sections.append(ProductSection(title="OP/ED/音乐", items=payload.get("fused", []), notes=payload.get("notes", [])[:2]))
+        trend = trend_res[0] if trend_res else None
+        if not isinstance(trend, Exception) and getattr(trend, "ok", False) and trend.data is not None:
+            tp = trend.data
+            sections.append(ProductSection(
+                title="口碑走势",
+                items=[{
+                    "summary": tp.summary,
+                    "current_score": tp.current_score,
+                    "score_change_30d": tp.score_change_30d,
+                    "score_change_90d": tp.score_change_90d,
+                    "pre_air_wish": tp.pre_air_wish,
+                    "rating_std": tp.rating_std,
+                    "controversy": tp.controversy,
+                    "netabare_url": tp.netabare_url,
+                }],
+                notes=["走势数据来自 netaba.re 每日快照（近一年窗口）；分布统计取 Bangumi 官方实时。"],
+            ))
+            sources.append(Citation(title=f"netaba.re · {tp.title}", url=tp.netabare_url, source="netabare"))
         return ToolResult(
             ok=True,
             data=SubjectDossierResult(
