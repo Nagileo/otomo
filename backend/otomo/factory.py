@@ -63,7 +63,7 @@ def build_registry(
         registry.register(tool)
     for tool in build_discovery_tools(client):
         registry.register(tool)
-    for tool in build_netabare_tools():
+    for tool in build_netabare_tools(client):
         registry.register(tool)
     for tool in build_curation_tools(client):
         registry.register(tool)

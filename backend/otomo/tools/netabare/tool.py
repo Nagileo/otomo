@@ -47,9 +47,10 @@ class SubjectTrendResult(BaseModel):
     score_change_90d: float | None = None
     collect_change_30d: int | None = None
     pre_air_wish: int | None = None       # 开播前最后一个快照的想看数（期待度）
-    rating_distribution: dict[str, int] = Field(default_factory=dict)  # 最新快照的 1-10 分布（柱状图用）
+    rating_distribution: dict[str, int] = Field(default_factory=dict)  # 1-10 分布（柱状图用）
     rating_std: float | None = None       # 分布标准差
     controversy: str = ""                 # 争议度标签（按标准差分档的启发式，非官方口径）
+    distribution_source: str = "netabare"  # bangumi=官方实时 / netabare=快照(滞后~1天)。实测两者仅差滞后
     first_recorded: str = ""
     last_recorded: str = ""
     summary: str = ""
@@ -194,6 +195,10 @@ class SubjectTrendTool(Tool):
     args_model = SubjectTrendArgs
     result_model = SubjectTrendResult
 
+    def __init__(self, bangumi_client: Any | None = None) -> None:
+        # 分布图的 canonical 源：官方实时 rating.count（netaba 快照滞后 1-2 天，且新番可能未建档）
+        self._bangumi = bangumi_client
+
     async def run(self, args: SubjectTrendArgs) -> ToolResult[SubjectTrendResult]:
         cache_key = f"trend:{args.subject_id}"
         payload = _CACHE.get(cache_key)
@@ -212,6 +217,21 @@ class SubjectTrendTool(Tool):
         data = build_trend(args.subject_id, payload, days=args.days)
         if args.title and (not data.title or data.title.startswith("subject ")):
             data.title = args.title
+        # 分布优先官方实时（实测 netaba 快照与官方仅差 1-2 天滞后；新番官方先有数据）
+        if self._bangumi is not None:
+            try:
+                subject = await self._bangumi.get_subject(args.subject_id)
+                counts = (subject.get("rating") or {}).get("count") or {}
+                if counts:
+                    dist, std = _distribution_stats({"count": counts})
+                    data.rating_distribution = dist
+                    data.rating_std = std
+                    data.controversy = _controversy_label(std)
+                    data.distribution_source = "bangumi"
+                    if not data.title or data.title.startswith("subject "):
+                        data.title = subject.get("name_cn") or subject.get("name") or data.title
+            except Exception:  # noqa: BLE001 — 官方源失败退回快照分布
+                pass
         return ToolResult(
             ok=True,
             data=data,
@@ -316,5 +336,5 @@ class RatingMoversTool(Tool):
         )
 
 
-def build_netabare_tools() -> list[Tool]:
-    return [SubjectTrendTool(), RatingMoversTool()]
+def build_netabare_tools(bangumi_client: Any | None = None) -> list[Tool]:
+    return [SubjectTrendTool(bangumi_client), RatingMoversTool()]
