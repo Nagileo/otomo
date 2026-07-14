@@ -63,6 +63,8 @@ class TasteCompareArgs(BaseModel):
         "pair", description="pair=两人详细对比；friends_matrix=把我的全部好友按口味同步率排名（贝叶斯收缩防小样本虚高）"
     )
     friends_limit: int = Field(10, ge=1, le=20, description="friends_matrix 模式最多比较的好友数")
+    like_threshold: int | None = Field(None, ge=2, le=10, description="好评线（rate>该值算好评）；不传按各自评分分布自动均衡三档")
+    dislike_threshold: int | None = Field(None, ge=1, le=9, description="差评线（rate<=该值算差评）；不传自动均衡")
 
 
 class SharedRatingItem(BaseModel):
@@ -119,6 +121,9 @@ class PeerAffinity(BaseModel):
     sync_level: int | None = None           # Lv1-10
     sample_confidence: float = 0.0          # 样本量置信度 0-1（50 个共同评分≈满）
     wishlist_picks: list[WishlistPick] = Field(default_factory=list)
+    watching_together: list[WishlistPick] = Field(default_factory=list)  # 双方都在看（type=3）——共同追新
+    own_thresholds: tuple[int, int] | None = None    # (差评线, 好评线)，自动均衡或用户指定
+    peer_thresholds: tuple[int, int] | None = None
     liked_together: list[SharedRatingItem] = Field(default_factory=list)
     disliked_together: list[SharedRatingItem] = Field(default_factory=list)
     biggest_disagreements: list[SharedRatingItem] = Field(default_factory=list)
@@ -309,6 +314,29 @@ def _sync_level(score: int) -> int:
     return max(1, min(10, (score + 4) // 10))
 
 
+def _auto_thresholds(rated: dict[int, dict]) -> tuple[int, int]:
+    """Shadow 的自适应阈值：按该用户自己的评分分布，把差/中/好切成尽量均衡的三档。
+    返回 (low, high)：rate<=low 差评，<=high 中评，>high 好评。送分党的"好评线"自然比严苛党高。"""
+    counts = [0] * 11
+    for it in rated.values():
+        r = int(it.get("rate") or 0)
+        if 1 <= r <= 10:
+            counts[r] += 1
+    total = sum(counts)
+    if total == 0:
+        return 4, 7
+    best, best_diff = (4, 7), float("inf")
+    for low in range(1, 9):
+        for high in range(low + 1, 10):
+            lo = sum(counts[1:low + 1])
+            mid = sum(counts[low + 1:high + 1])
+            hi = sum(counts[high + 1:])
+            diff = max(lo, mid, hi) - min(lo, mid, hi)
+            if diff < best_diff:
+                best, best_diff = (low, high), diff
+    return best
+
+
 def _sample_confidence(n: int, target: int = 50) -> float:
     if n <= 0:
         return 0.0
@@ -395,7 +423,7 @@ def _shared_item(own: dict, peer: dict) -> SharedRatingItem:
     )
 
 
-def _build_affinity(peer_username: str, own_items: list[dict], peer_items: list[dict]) -> PeerAffinity:
+def _build_affinity(peer_username: str, own_items: list[dict], peer_items: list[dict], *, like_threshold: int | None = None, dislike_threshold: int | None = None) -> PeerAffinity:
     own_rated_items = _rated_items(own_items)
     peer_rated_items = _rated_items(peer_items)
     own_vec = {sid: _rating_value(item.get("rate")) for sid, item in own_rated_items.items()}
@@ -443,14 +471,33 @@ def _build_affinity(peer_username: str, own_items: list[dict], peer_items: list[
     ) * _confidence_factor(confidence)
 
     shared = [_shared_item(own_rated_items[sid], peer_rated_items[sid]) for sid in common]
+    # 好评/差评线：默认按各自分布自动均衡（严苛党的 7 分可能已是他的"好评"），args 可显式覆盖
+    own_lo, own_hi = _auto_thresholds(own_rated_items)
+    peer_lo, peer_hi = _auto_thresholds(peer_rated_items)
+    if like_threshold is not None:
+        own_hi = peer_hi = like_threshold - 1
+    if dislike_threshold is not None:
+        own_lo = peer_lo = dislike_threshold
     liked = sorted(
-        [x for x in shared if x.user_rate >= 8 and x.peer_rate >= 8],
+        [x for x in shared if x.user_rate > own_hi and x.peer_rate > peer_hi],
         key=lambda x: (-x.user_rate - x.peer_rate, x.delta, x.name),
     )[:5]
     disliked = sorted(
-        [x for x in shared if x.user_rate <= 5 and x.peer_rate <= 5],
+        [x for x in shared if 0 < x.user_rate <= own_lo and 0 < x.peer_rate <= peer_lo],
         key=lambda x: (x.user_rate + x.peer_rate, x.delta, x.name),
     )[:5]
+    # 共同追新：双方都标了"在看"（type=3）
+    own_watching = {sid for item in own_items if (sid := _subject_id(item)) and int(item.get("type") or 0) == 3}
+    peer_watching_items = {sid: item for item in peer_items if (sid := _subject_id(item)) and int(item.get("type") or 0) == 3}
+    watching = [
+        WishlistPick(
+            id=sid,
+            name=_subject_name(peer_watching_items[sid]),
+            peer_rate=int(peer_watching_items[sid].get("rate") or 0),
+            image=_subject_image(peer_watching_items[sid]),
+        )
+        for sid in sorted(own_watching & set(peer_watching_items))
+    ][:12]
     disagreements = sorted(shared, key=lambda x: (-x.delta, -max(x.user_rate, x.peer_rate), x.name))[:5]
     common_collections = len(common_collection_ids)
 
@@ -518,6 +565,9 @@ def _build_affinity(peer_username: str, own_items: list[dict], peer_items: list[
         sync_level=_sync_level(sync_score) if sync_score is not None else None,
         sample_confidence=round(sample_conf, 3),
         wishlist_picks=picks,
+        watching_together=watching,
+        own_thresholds=(own_lo, own_hi),
+        peer_thresholds=(peer_lo, peer_hi),
         liked_together=liked,
         disliked_together=disliked,
         biggest_disagreements=disagreements,
@@ -740,7 +790,7 @@ class CompareUserTasteTool(Tool):
             host="bangumi",
             return_exceptions=False,
         )
-        affinity = _build_affinity(args.peer_username, own, peer)
+        affinity = _build_affinity(args.peer_username, own, peer, like_threshold=args.like_threshold, dislike_threshold=args.dislike_threshold)
         return ToolResult(
             ok=True,
             data=TasteCompareResult(

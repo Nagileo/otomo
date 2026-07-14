@@ -478,3 +478,33 @@ def test_friends_matrix_shrinkage_ranking(monkeypatch):
     assert b.shrunk_score < b.sync_score  # 小样本满分被往中位拉
     assert abs(a.shrunk_score - a.sync_score) <= 2  # 大样本几乎不动
     assert b.sync_score == 100 and b.shrunk_score < 100
+
+
+def test_adaptive_thresholds_and_watching_together():
+    """Shadow 补偷：自适应好评/差评线按各自分布均衡；共同追新=双方 type=3 交集。"""
+    from otomo.tools.user_analysis.tool import _auto_thresholds, _build_affinity
+
+    def item(sid, rate, type_=2):
+        return {"subject_id": sid, "rate": rate, "type": type_,
+                "subject": {"id": sid, "name_cn": f"作品{sid}", "tags": []}}
+
+    # 送分党（8-10 扎堆）的三档线应明显高于严苛党（3-7）
+    generous = {i: item(i, r) for i, r in enumerate([8, 8, 9, 9, 9, 10, 10, 10, 10], 1)}
+    strict = {i: item(i, r) for i, r in enumerate([3, 4, 4, 5, 5, 6, 6, 7, 7], 1)}
+    g_lo, g_hi = _auto_thresholds(generous)
+    s_lo, s_hi = _auto_thresholds(strict)
+    assert g_hi > s_hi and g_lo > s_lo
+
+    # 送分党的 9 分与严苛党的 6 分同档（各自的"中/好"边界附近），硬编码 8/4 会漏掉严苛党的好评
+    own = [item(1, 6), item(2, 7), item(3, 3), item(4, 5), item(5, 4), item(6, 7)]
+    peer = [item(1, 9), item(2, 10), item(3, 8), item(4, 8), item(5, 8), item(6, 10)]
+    own += [item(10, 0, 3), item(11, 0, 3)]      # 我在看 10/11
+    peer += [item(10, 0, 3), item(12, 0, 3)]     # 对方在看 10/12 → 共同追新 = 10
+    aff = _build_affinity("peer", own, peer)
+    assert aff.own_thresholds is not None and aff.peer_thresholds is not None
+    assert aff.own_thresholds[1] < aff.peer_thresholds[1]  # 严苛党好评线更低
+    assert any(x.user_rate == 7 for x in aff.liked_together)  # 严苛党的 7 分进了共同好评
+    assert [w.id for w in aff.watching_together] == [10]
+    # 显式覆盖阈值生效
+    aff2 = _build_affinity("peer", own, peer, like_threshold=10)
+    assert all(x.user_rate >= 10 for x in aff2.liked_together) or not aff2.liked_together

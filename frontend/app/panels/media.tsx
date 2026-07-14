@@ -450,6 +450,7 @@ export function TasteAffinityPanel({ data }: { data: AnyRecord }) {
     );
   }
   const picks = list(affinity.wishlist_picks);
+  const watching = list(affinity.watching_together);
   const metrics = [
     ["评分同步", affinity.rating_similarity],
     ["收藏重叠", affinity.collection_similarity],
@@ -496,6 +497,18 @@ export function TasteAffinityPanel({ data }: { data: AnyRecord }) {
         </div>
       )}
       <div className="taste-groups">
+        {watching.length > 0 && (
+          <>
+            <div className="section-title">共同追新 · 双方都在看</div>
+            <div className="compact-list">
+              {watching.map((x: AnyRecord, i: number) => (
+                <span key={`watch-${i}`}>
+                  <a href={`https://bgm.tv/subject/${x.id}`} target="_blank" rel="noreferrer">{text(x.name)}</a>
+                </span>
+              ))}
+            </div>
+          </>
+        )}
         {picks.length > 0 && (
           <>
             <div className="section-title">想看推荐 · TA 已看过你想看的</div>
