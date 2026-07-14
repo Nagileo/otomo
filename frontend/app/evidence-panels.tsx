@@ -2,7 +2,7 @@
 
 import { useState, type ReactNode } from "react";
 
-import { BirthdayPanel, ComparePanel, PilgrimagePanel, PilgrimageTripPanel, TrendingPanel } from "./panels/media";
+import { BirthdayPanel, ComparePanel, PilgrimagePanel, PilgrimageTripPanel, SubjectTrendPanel, TrendingPanel } from "./panels/media";
 import { InboxPanel } from "./panels/memory";
 import { PixivPanel } from "./panels/visual";
 
@@ -61,6 +61,7 @@ export const PANEL_LABELS: Record<string, string> = {
   subject_dossier: "作品档案",
   franchise_map: "IP 图谱",
   monthly_watch_report: "观看报告",
+  get_subject_trend: "口碑走势",
   anime_music_themes: "OP/ED/音乐",
   where_to_watch: "观看/购买渠道",
   get_anime_release_feeds: "离线资源",
@@ -110,6 +111,7 @@ export function renderPanelByName(name: string, rows: AnyRecord[], h: PanelHandl
     case "get_pixiv_artist_portfolio":
       return render((d, i) => <PixivPanel data={d} key={`${name}-${i}`} />);
     case "get_trending_subjects": return render((d, i) => <TrendingPanel data={d} key={`${name}-${i}`} />);
+    case "get_subject_trend": return render((d, i) => <SubjectTrendPanel data={d} key={`${name}-${i}`} />);
     case "get_character_birthdays": return render((d, i) => <BirthdayPanel data={d} key={`${name}-${i}`} />);
     case "compare_subjects": return render((d, i) => <ComparePanel data={d} key={`${name}-${i}`} />);
     case "get_pilgrimage_map": return render((d, i) => <PilgrimagePanel data={d} key={`${name}-${i}`} />);

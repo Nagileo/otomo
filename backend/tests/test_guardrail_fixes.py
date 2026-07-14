@@ -508,3 +508,39 @@ def test_adaptive_thresholds_and_watching_together():
     # 显式覆盖阈值生效
     aff2 = _build_affinity("peer", own, peer, like_threshold=10)
     assert all(x.user_rate >= 10 for x in aff2.liked_together) or not aff2.liked_together
+
+
+def test_netabare_trend_build_and_downsample():
+    """Netaba.re 走势：加权均分计算、降采样保首尾、30天变化与播前期待度。"""
+    from datetime import datetime, timedelta, timezone
+
+    from otomo.tools.netabare.tool import TrendPoint, build_trend, downsample
+
+    now = datetime.now(timezone.utc)
+    def rec(days_ago, wish=0, collect=0, doing=0, counts=None):
+        return {
+            "recordedAt": (now - timedelta(days=days_ago)).strftime("%Y-%m-%dT00:00:00.000Z"),
+            "collect": {"wish": wish, "collect": collect, "doing": doing},
+            **({"rating": {"count": counts, "total": sum(counts.values())}} if counts else {}),
+        }
+
+    payload = {
+        "subject": {"name": "test", "name_cn": "测试番", "air_date": (now - timedelta(days=100)).strftime("%Y-%m-%dT00:00:00.000Z")},
+        "history": [
+            rec(120, wish=500),                                # 播前：期待度 500
+            rec(60, collect=1000, counts={"8": 100}),          # 均分 8.0
+            rec(40, collect=2000, counts={"8": 100, "6": 100}),# 均分 7.0
+            rec(1, collect=3000, counts={"8": 100, "10": 100}),# 均分 9.0
+        ],
+    }
+    data = build_trend(1, payload)
+    assert data.title == "测试番"
+    assert data.current_score == 9.0
+    assert data.pre_air_wish == 500
+    assert data.score_change_30d == 2.0   # 40天前快照 7.0 → 9.0
+    assert data.collect_change_30d == 1000
+    assert data.first_recorded < data.last_recorded
+
+    pts = [TrendPoint(date=f"2026-01-{i:02d}") for i in range(1, 10)] * 30  # 270 点
+    ds = downsample(pts, 60)
+    assert len(ds) <= 61 and ds[0].date == pts[0].date and ds[-1].date == pts[-1].date

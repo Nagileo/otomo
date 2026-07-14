@@ -500,6 +500,7 @@ _PANEL_TOOLS = {
     "search_pixiv_illusts",
     "get_pixiv_artist_portfolio",
     "get_trending_subjects",
+    "get_subject_trend",
     "get_character_birthdays",
     "compare_subjects",
     "get_pilgrimage_map",

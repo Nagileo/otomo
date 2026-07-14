@@ -88,8 +88,8 @@ TOOL_GROUPS: dict[str, dict[str, Any]] = {
     },
     "review_extra": {
         "desc": "galgame 圈层评分（批判空间/EGS/VNDB）、英文圈/音乐元数据评分、分集口碑、私评情感",
-        "tools": {"get_subject_comments", "get_episode_comments", "episode_buzz_radar", "rank_erogamescape", "search_erogamescape", "search_visual_novels", "search_anilist", "analyze_user_opinions"},
-        "keywords": ["评价", "口碑", "怎么样", "好不好", "值不值", "争议", "打分", "评分", "批判空间", "egs", "vndb", "galgame", "gal", "哪几集", "名场面", "高能"],
+        "tools": {"get_subject_comments", "get_episode_comments", "episode_buzz_radar", "rank_erogamescape", "search_erogamescape", "search_visual_novels", "search_anilist", "analyze_user_opinions", "get_subject_trend"},
+        "keywords": ["评价", "口碑", "怎么样", "好不好", "值不值", "争议", "打分", "评分", "批判空间", "egs", "vndb", "galgame", "gal", "哪几集", "名场面", "高能", "走势", "崩", "涨", "跌", "变化", "期待"],
     },
     "user_analysis": {
         "desc": "好友列表、口味同步率对比、弃坑/搁置分析",

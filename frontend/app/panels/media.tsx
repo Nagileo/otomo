@@ -1173,3 +1173,50 @@ export function ExplorerPanel({ data }: { data: AnyRecord }) {
 }
 
 
+
+
+export function SubjectTrendPanel({ data }: { data: AnyRecord }) {
+  const pts = list(data.points).filter((p: AnyRecord) => p.score != null);
+  const W = 560, H = 150, PAD = 34;
+  const scores = pts.map((p: AnyRecord) => Number(p.score));
+  const collects = list(data.points).map((p: AnyRecord) => Number(p.collect_total || 0));
+  const sMin = Math.min(...scores, 10), sMax = Math.max(...scores, 0);
+  const cMax = Math.max(...collects, 1);
+  const x = (i: number, n: number) => PAD + (i / Math.max(1, n - 1)) * (W - PAD * 2);
+  const yScore = (v: number) => H - 22 - ((v - sMin) / Math.max(0.1, sMax - sMin)) * (H - 44);
+  const yCollect = (v: number) => H - 22 - (v / cMax) * (H - 44);
+  const scoreLine = pts.map((p: AnyRecord, i: number) => `${x(i, pts.length).toFixed(1)},${yScore(Number(p.score)).toFixed(1)}`).join(" ");
+  const allPts = list(data.points);
+  const collectLine = allPts.map((p: AnyRecord, i: number) => `${x(i, allPts.length).toFixed(1)},${yCollect(Number(p.collect_total || 0)).toFixed(1)}`).join(" ");
+  const chg = (v: any) => (v == null ? null : (
+    <Badge tone={Number(v) >= 0 ? "good" : "warn"}>{Number(v) >= 0 ? "+" : ""}{v}</Badge>
+  ));
+  return (
+    <Panel
+      title={`口碑走势 · ${text(data.title)}`}
+      subtitle={`netaba.re 每日快照 · ${text(data.first_recorded)} ~ ${text(data.last_recorded)}`}
+    >
+      <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap", marginBottom: 6 }}>
+        {data.current_score != null && <span style={{ fontSize: 22, fontWeight: 700 }}>{data.current_score}</span>}
+        {data.score_change_30d != null && <span style={{ fontSize: 12, opacity: 0.75 }}>30天 {chg(data.score_change_30d)}</span>}
+        {data.score_change_90d != null && <span style={{ fontSize: 12, opacity: 0.75 }}>90天 {chg(data.score_change_90d)}</span>}
+        {data.pre_air_wish != null && <span style={{ fontSize: 12, opacity: 0.75 }}>开播前想看 {data.pre_air_wish} 人</span>}
+      </div>
+      {pts.length >= 2 && (
+        <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto" }} aria-label="评分与收藏走势">
+          <polyline points={collectLine} fill="none" stroke="#5b6b8c" strokeWidth="1.4" opacity="0.55" />
+          <polyline points={scoreLine} fill="none" stroke="#7c8cff" strokeWidth="2" />
+          <text x={PAD} y={H - 6} fontSize="10" fill="currentColor" opacity="0.6">{text(pts[0]?.date)}</text>
+          <text x={W - PAD} y={H - 6} fontSize="10" fill="currentColor" opacity="0.6" textAnchor="end">{text(pts[pts.length - 1]?.date)}</text>
+          <text x={PAD - 4} y={yScore(sMax) + 4} fontSize="10" fill="#7c8cff" textAnchor="end">{sMax.toFixed(1)}</text>
+          <text x={PAD - 4} y={yScore(sMin) + 4} fontSize="10" fill="#7c8cff" textAnchor="end">{sMin.toFixed(1)}</text>
+        </svg>
+      )}
+      <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>
+        <span style={{ color: "#7c8cff" }}>━ 均分</span>　<span style={{ color: "#5b6b8c" }}>━ 收藏总数（归一）</span>
+        　<a href={text(data.netabare_url)} target="_blank" rel="noreferrer">netaba.re 详情 →</a>
+      </div>
+      {list(data.caveats).map((c, i) => <div className="card-note" key={i}>{text(c)}</div>)}
+    </Panel>
+  );
+}
