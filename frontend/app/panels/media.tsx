@@ -424,6 +424,36 @@ export function SourceRoutingPanel({ data }: { data: AnyRecord }) {
 export function TasteAffinityPanel({ data }: { data: AnyRecord }) {
   const affinity = data.affinity || {};
   const matrix = list(data.matrix);
+  const pulse = data.pulse;
+  // friends_pulse 模式：好友圈聚合三榜
+  if (pulse) {
+    const boardNode = (title: string, items: any[], showRate: boolean) => (
+      <>
+        <div className="section-title">{title}</div>
+        {items.length ? (
+          <div className="compact-list" style={{ display: "grid", gap: 5 }}>
+            {items.map((e: AnyRecord, i: number) => (
+              <div key={`${title}-${i}`} style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
+                <Badge tone={e.count >= 3 ? "good" : "dim"}>{showRate && e.avg_rate != null ? `${e.avg_rate} 分` : `${e.count} 人`}</Badge>
+                <a href={`https://bgm.tv/subject/${e.subject_id}`} target="_blank" rel="noreferrer">{text(e.name)}</a>
+                {e.my_status && <Badge tone="dim">我：{e.my_status}</Badge>}
+                <span style={{ opacity: 0.55, fontSize: 12 }}>{list(e.friends).slice(0, 4).map((f) => `@${f}`).join(" ")}{e.count > 4 ? " …" : ""}</span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <EmptyHint text="暂无聚合结果" />
+        )}
+      </>
+    );
+    return (
+      <Panel title={`好友圈动态 · @${text(data.username)}`} subtitle={`${text(data.subject_type)} · 聚合 ${pulse.friends_counted} 位好友的公开收藏`}>
+        {boardNode("🔥 好友都在追", list(pulse.watching_hot), false)}
+        {boardNode("⭐ 好友都想看", list(pulse.wishlist_hot), false)}
+        {boardNode("🏆 好友圈高分（≥2 人评分）", list(pulse.top_rated), true)}
+      </Panel>
+    );
+  }
   // friends_matrix 模式：全好友收缩排名表
   if (matrix.length) {
     return (
@@ -1212,11 +1242,69 @@ export function SubjectTrendPanel({ data }: { data: AnyRecord }) {
           <text x={PAD - 4} y={yScore(sMin) + 4} fontSize="10" fill="#7c8cff" textAnchor="end">{sMin.toFixed(1)}</text>
         </svg>
       )}
+      {Object.keys(data.rating_distribution || {}).length > 0 && (() => {
+        const dist = data.rating_distribution as Record<string, number>;
+        const maxN = Math.max(...Object.values(dist), 1);
+        return (
+          <div style={{ marginTop: 8 }}>
+            <div className="section-title">评分分布{data.rating_std != null ? ` · 标准差 ${data.rating_std}` : ""}{data.controversy ? ` · ${data.controversy}` : ""}</div>
+            <div style={{ display: "flex", alignItems: "flex-end", gap: 4, height: 72 }}>
+              {Array.from({ length: 10 }, (_, i) => 10 - i).map((r) => {
+                const n = Number(dist[String(r)] || 0);
+                return (
+                  <div key={r} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }} title={`${r} 分：${n} 人`}>
+                    <div style={{ width: "100%", height: `${Math.max(2, (n / maxN) * 56)}px`, background: "#7c8cff", opacity: 0.35 + 0.65 * (n / maxN), borderRadius: 2 }} />
+                    <span style={{ fontSize: 10, opacity: 0.6 }}>{r}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })()}
       <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>
         <span style={{ color: "#7c8cff" }}>━ 均分</span>　<span style={{ color: "#5b6b8c" }}>━ 收藏总数（归一）</span>
         　<a href={text(data.netabare_url)} target="_blank" rel="noreferrer">netaba.re 详情 →</a>
       </div>
       {list(data.caveats).map((c, i) => <div className="card-note" key={i}>{text(c)}</div>)}
+    </Panel>
+  );
+}
+
+
+export function RatingMoversPanel({ data }: { data: AnyRecord }) {
+  const boards: [string, string, AnyRecord[]][] = [
+    ["📈 口碑上涨", "good", list(data.up)],
+    ["📉 口碑下跌", "warn", list(data.down)],
+    ["🏁 近期完结", "dim", list(data.done)],
+  ];
+  const analysis = data.season_analysis || {};
+  const sections: [string, string][] = [["score", "评分格局"], ["rank", "排名变化"], ["divisive", "争议作品"], ["popularity", "热度观察"]];
+  return (
+    <Panel title="口碑异动榜 · 近 30 天" subtitle="netaba.re 每日快照 · 第三方数据">
+      {boards.map(([title, tone, items]) => items.length > 0 && (
+        <div key={title}>
+          <div className="section-title">{title}</div>
+          <div className="compact-list" style={{ display: "grid", gap: 4 }}>
+            {items.map((e: AnyRecord, i: number) => (
+              <div key={`${title}-${i}`} style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                <Badge tone={tone}>{e.delta_score > 0 ? "+" : ""}{e.delta_score}</Badge>
+                <a href={`https://bgm.tv/subject/${e.subject_id}`} target="_blank" rel="noreferrer">{text(e.name || e.title)}</a>
+                {e.current_score != null && <span style={{ opacity: 0.6, fontSize: 12 }}>现 {e.current_score}（{e.rating_total} 人）</span>}
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+      {sections.some(([k]) => analysis[k]) && (
+        <>
+          <div className="section-title">当季评分格局（netaba.re AI 分析，第三方观点）</div>
+          {sections.map(([k, label]) => analysis[k] && (
+            <p className="card-note" key={k} style={{ whiteSpace: "pre-wrap" }}><b>{label}：</b>{analysis[k]}</p>
+          ))}
+        </>
+      )}
+      {list(data.caveats).map((c, i) => <div className="card-note" key={`c-${i}`}>{text(c)}</div>)}
     </Panel>
   );
 }

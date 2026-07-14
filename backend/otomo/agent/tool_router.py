@@ -78,7 +78,7 @@ TOOL_GROUPS: dict[str, dict[str, Any]] = {
     },
     "season_hot": {
         "desc": "季度新番表、放送日历、追番进度、全站热门/热播榜",
-        "tools": {"list_season_anime", "list_year_anime", "list_yuc_season", "get_airing_progress", "get_trending_subjects"},
+        "tools": {"list_season_anime", "list_year_anime", "list_yuc_season", "get_airing_progress", "get_trending_subjects", "get_rating_movers"},
         "keywords": ["新番", "这季", "本季", "几月", "放送", "追什么", "热播", "热门", "最热", "最火", "火爆", "热度", "排行", "榜", "时间表", "追番", "在追", "更新", "开播", "落后", "现在.{0,4}看"],
     },
     "recommend_extra": {
@@ -88,13 +88,14 @@ TOOL_GROUPS: dict[str, dict[str, Any]] = {
     },
     "review_extra": {
         "desc": "galgame 圈层评分（批判空间/EGS/VNDB）、英文圈/音乐元数据评分、分集口碑、私评情感",
-        "tools": {"get_subject_comments", "get_episode_comments", "episode_buzz_radar", "rank_erogamescape", "search_erogamescape", "search_visual_novels", "search_anilist", "analyze_user_opinions", "get_subject_trend"},
+        "tools": {"get_subject_comments", "get_episode_comments", "episode_buzz_radar", "rank_erogamescape", "search_erogamescape", "search_visual_novels", "search_anilist", "analyze_user_opinions", "get_subject_trend", "get_rating_movers"},
         "keywords": ["评价", "口碑", "怎么样", "好不好", "值不值", "争议", "打分", "评分", "批判空间", "egs", "vndb", "galgame", "gal", "哪几集", "名场面", "高能", "走势", "崩", "涨", "跌", "变化", "期待"],
     },
     "user_analysis": {
         "desc": "好友列表、口味同步率对比、弃坑/搁置分析",
         "tools": {"compare_user_taste", "list_bangumi_friends", "analyze_abandoned_subjects"},
-        "keywords": ["好友", "同步率", "口味.{0,4}像", "和.{1,8}像", "弃坑", "搁置", "抛弃"],
+        # friends_pulse/matrix 都走 compare_user_taste
+        "keywords": ["好友", "同步率", "口味.{0,4}像", "和.{1,8}像", "弃坑", "搁置", "抛弃", "圈子", "都在看", "都在追", "都想看"],
     },
     "memory_plan": {
         "desc": "长期记忆写入/遗忘、决策日志、追番计划板、Bangumi 收藏写回（加想看/打分/进度）",

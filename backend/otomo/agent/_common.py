@@ -501,6 +501,7 @@ _PANEL_TOOLS = {
     "get_pixiv_artist_portfolio",
     "get_trending_subjects",
     "get_subject_trend",
+    "get_rating_movers",
     "get_character_birthdays",
     "compare_subjects",
     "get_pilgrimage_map",

@@ -59,8 +59,10 @@ class TasteCompareArgs(BaseModel):
     username: str | None = Field(None, description="目标用户；不传用当前账号")
     peer_username: str = Field("", description="要比较同步率的 Bangumi 用户名；mode=friends_matrix 时可不传")
     subject_type: Literal["anime", "book", "music", "game", "real"] = "anime"
-    mode: Literal["pair", "friends_matrix"] = Field(
-        "pair", description="pair=两人详细对比；friends_matrix=把我的全部好友按口味同步率排名（贝叶斯收缩防小样本虚高）"
+    mode: Literal["pair", "friends_matrix", "friends_pulse"] = Field(
+        "pair",
+        description="pair=两人详细对比；friends_matrix=全好友按口味同步率排名；"
+        "friends_pulse=好友圈聚合视图——哪部番好友们都在追/都想看/圈内高分（'我好友都在看什么'）",
     )
     friends_limit: int = Field(10, ge=1, le=20, description="friends_matrix 模式最多比较的好友数")
     like_threshold: int | None = Field(None, ge=2, le=10, description="好评线（rate>该值算好评）；不传按各自评分分布自动均衡三档")
@@ -82,6 +84,24 @@ class WishlistPick(BaseModel):
     name: str
     peer_rate: int
     image: str | None = None
+
+
+class PulseEntry(BaseModel):
+    """好友圈聚合条目：一部作品在我的好友圈里的状态。"""
+    subject_id: int
+    name: str
+    image: str | None = None
+    count: int = 0                       # 命中好友数
+    friends: list[str] = Field(default_factory=list)
+    avg_rate: float | None = None        # 好友均分（top_rated 榜用）
+    my_status: str = ""                  # 我的状态：在看/看过/想看/未收藏…
+
+
+class FriendsPulse(BaseModel):
+    watching_hot: list[PulseEntry] = Field(default_factory=list)   # 好友圈在追榜
+    wishlist_hot: list[PulseEntry] = Field(default_factory=list)   # 好友圈想看榜
+    top_rated: list[PulseEntry] = Field(default_factory=list)      # 好友圈高分榜（≥2 人评分）
+    friends_counted: int = 0
 
 
 class FriendSyncEntry(BaseModel):
@@ -136,6 +156,7 @@ class TasteCompareResult(BaseModel):
     subject_type: str
     affinity: PeerAffinity | None = None
     matrix: list[FriendSyncEntry] = Field(default_factory=list)
+    pulse: FriendsPulse | None = None
     caveats: list[str] = Field(default_factory=list)
 
 
@@ -780,6 +801,8 @@ class CompareUserTasteTool(Tool):
         stype = SUBJECT_TYPE[args.subject_type]
         if args.mode == "friends_matrix":
             return await self._friends_matrix(username, stype, args)
+        if args.mode == "friends_pulse":
+            return await self._friends_pulse(username, stype, args)
         if not args.peer_username:
             return ToolResult(ok=False, error="pair 模式需要 peer_username；比较全部好友请用 mode=friends_matrix")
         own, peer = await gather_limited(
@@ -807,6 +830,91 @@ class CompareUserTasteTool(Tool):
                 Citation(title=f"Bangumi @{username}", url=f"https://bgm.tv/user/{username}", source="bangumi"),
                 Citation(title=f"Bangumi @{args.peer_username}", url=f"https://bgm.tv/user/{args.peer_username}", source="bangumi"),
             ],
+        )
+
+    async def _friends_pulse(self, username: str, stype: int, args: TasteCompareArgs) -> ToolResult[TasteCompareResult]:
+        """好友圈聚合（用户提名，Shadow 想看推荐/共同追新的多好友升维）：
+        按作品聚合好友们的 在看/想看/评分——"哪部番我的好友都在追"。"""
+        try:
+            friends, _url = await _fetch_friends(username, args.friends_limit)
+        except (httpx.HTTPError, httpx.TransportError) as e:
+            return ToolResult(ok=False, error=f"好友页抓取失败：{type(e).__name__}")
+        if not friends:
+            return ToolResult(ok=False, error="没有抓到好友（好友页为空或页面结构变化）")
+        own_items = await self.client.get_all_user_collections(username, stype, None, max_items=_MAX_ITEMS)
+        my_status = {}
+        _STATUS = {1: "想看", 2: "看过", 3: "在看", 4: "搁置", 5: "抛弃"}
+        for item in own_items:
+            if sid := _subject_id(item):
+                my_status[sid] = _STATUS.get(int(item.get("type") or 0), "")
+        names = [f.username if hasattr(f, "username") else str(f.get("username") or f) for f in friends[: args.friends_limit]]
+        peers = await gather_limited(
+            [self.client.get_all_user_collections(n, stype, None, max_items=_MAX_ITEMS) for n in names],
+            host="bangumi",
+            return_exceptions=True,
+        )
+        watching: dict[int, dict] = {}
+        wishing: dict[int, dict] = {}
+        rated: dict[int, dict] = {}
+        counted = 0
+        for name, items in zip(names, peers, strict=False):
+            if isinstance(items, Exception):
+                continue
+            counted += 1
+            for item in items:
+                sid = _subject_id(item)
+                if not sid:
+                    continue
+                t = int(item.get("type") or 0)
+                rate = int(item.get("rate") or 0)
+                base = {"name": _subject_name(item), "image": _subject_image(item)}
+                if t == 3:
+                    slot = watching.setdefault(sid, {**base, "friends": [], "rates": []})
+                    slot["friends"].append(name)
+                elif t == 1:
+                    slot = wishing.setdefault(sid, {**base, "friends": [], "rates": []})
+                    slot["friends"].append(name)
+                if rate > 0:
+                    slot = rated.setdefault(sid, {**base, "friends": [], "rates": []})
+                    slot["friends"].append(name)
+                    slot["rates"].append(rate)
+
+        def board(pool: dict[int, dict], *, need_rates: bool = False, top: int = 12) -> list[PulseEntry]:
+            entries = []
+            for sid, slot in pool.items():
+                if need_rates and len(slot["rates"]) < 2:
+                    continue  # 高分榜至少 2 人评分，防单人样本
+                entries.append(PulseEntry(
+                    subject_id=sid,
+                    name=slot["name"],
+                    image=slot["image"],
+                    count=len(slot["friends"]),
+                    friends=slot["friends"][:8],
+                    avg_rate=round(sum(slot["rates"]) / len(slot["rates"]), 2) if slot["rates"] else None,
+                    my_status=my_status.get(sid, ""),
+                ))
+            key = (lambda e: (-(e.avg_rate or 0), -e.count)) if need_rates else (lambda e: (-e.count, -(e.avg_rate or 0)))
+            return sorted(entries, key=key)[:top]
+
+        pulse = FriendsPulse(
+            watching_hot=board(watching),
+            wishlist_hot=board(wishing),
+            top_rated=board(rated, need_rates=True),
+            friends_counted=counted,
+        )
+        return ToolResult(
+            ok=True,
+            data=TasteCompareResult(
+                username=username,
+                peer_username="",
+                subject_type=args.subject_type,
+                pulse=pulse,
+                caveats=[
+                    f"聚合了 {counted} 位好友的公开收藏（上限 {args.friends_limit}）；高分榜要求至少 2 人评分。",
+                    "好友列表来自网页解析（非官方 API）。",
+                ],
+            ),
+            sources=[Citation(title=f"Bangumi @{username} 好友", url=f"https://bgm.tv/user/{username}/friends", source="bangumi")],
         )
 
     async def _friends_matrix(self, username: str, stype: int, args: TasteCompareArgs) -> ToolResult[TasteCompareResult]:

@@ -47,6 +47,9 @@ class SubjectTrendResult(BaseModel):
     score_change_90d: float | None = None
     collect_change_30d: int | None = None
     pre_air_wish: int | None = None       # 开播前最后一个快照的想看数（期待度）
+    rating_distribution: dict[str, int] = Field(default_factory=dict)  # 最新快照的 1-10 分布（柱状图用）
+    rating_std: float | None = None       # 分布标准差
+    controversy: str = ""                 # 争议度标签（按标准差分档的启发式，非官方口径）
     first_recorded: str = ""
     last_recorded: str = ""
     summary: str = ""
@@ -62,6 +65,32 @@ def _score_of(rating: dict[str, Any] | None) -> tuple[float | None, int]:
     if total <= 0:
         return None, 0
     return round(sum(r * c for r, c in counts.items()) / total, 2), total
+
+
+def _controversy_label(std: float | None) -> str:
+    if std is None:
+        return ""
+    if std < 1.0:
+        return "口碑集中"
+    if std < 1.3:
+        return "基本一致"
+    if std < 1.6:
+        return "略有分歧"
+    if std < 2.0:
+        return "莫衷一是"
+    return "两极分化"
+
+
+def _distribution_stats(rating: dict[str, Any] | None) -> tuple[dict[str, int], float | None]:
+    if not rating or not rating.get("count"):
+        return {}, None
+    counts = {str(k): int(v) for k, v in rating["count"].items()}
+    total = sum(counts.values())
+    if total <= 1:
+        return counts, None
+    mean = sum(int(r) * c for r, c in counts.items()) / total
+    var = sum(c * (int(r) - mean) ** 2 for r, c in counts.items()) / total
+    return counts, round(var ** 0.5, 4)
 
 
 def _point(rec: dict[str, Any]) -> TrendPoint:
@@ -131,10 +160,15 @@ def build_trend(subject_id: int, payload: dict[str, Any], days: int = 0) -> Subj
     if pre_air and pre_air.wish:
         bits.append(f"开播前想看 {pre_air.wish} 人")
 
+    last_raw = next((rec for rec in reversed(history) if rec.get("rating")), None)
+    distribution, std = _distribution_stats((last_raw or {}).get("rating"))
     return SubjectTrendResult(
         subject_id=subject_id,
         title=title,
         points=downsample(points),
+        rating_distribution=distribution,
+        rating_std=std,
+        controversy=_controversy_label(std),
         current_score=last.score if last else None,
         score_change_30d=score_30,
         score_change_90d=score_90,
@@ -185,5 +219,102 @@ class SubjectTrendTool(Tool):
         )
 
 
+class RatingMoversArgs(BaseModel):
+    direction: str = Field("all", description="up=近30天口碑上涨最快 / down=下跌最快（崩） / done=近期完结表现 / all=三榜都给")
+    limit: int = Field(8, ge=1, le=10, description="每榜条数")
+    include_season_analysis: bool = Field(False, description="是否附带当季评分格局分析（netaba.re 的 AI 生成文本）")
+    season_year: int | None = Field(None, description="季度分析年份；默认当前季")
+    season_month: int | None = Field(None, ge=1, le=12, description="季度分析月份（1/4/7/10）")
+
+
+class MoverItem(BaseModel):
+    subject_id: int
+    title: str
+    delta_score: float           # 30 天均分变化（正=涨，负=崩）
+    current_score: float | None = None
+    rating_total: int = 0
+
+
+class RatingMoversResult(BaseModel):
+    up: list[MoverItem] = Field(default_factory=list)
+    down: list[MoverItem] = Field(default_factory=list)
+    done: list[MoverItem] = Field(default_factory=list)
+    season_analysis: dict[str, str] = Field(default_factory=dict)  # score/rank/divisive/popularity 四篇
+    caveats: list[str] = Field(default_factory=list)
+
+
+def _mover(entry: dict[str, Any]) -> MoverItem:
+    subject = entry.get("subject") or {}
+    history = entry.get("history") or []
+    last_score, last_total = (None, 0)
+    for rec in reversed(history):
+        sc, tot = _score_of(rec.get("rating"))
+        if sc is not None:
+            last_score, last_total = sc, tot
+            break
+    return MoverItem(
+        subject_id=int(entry.get("bgmId") or 0),
+        title=subject.get("name_cn") or subject.get("name") or f"subject {entry.get('bgmId')}",
+        delta_score=round(float(entry.get("score") or 0), 2),
+        current_score=last_score,
+        rating_total=last_total,
+    )
+
+
+class RatingMoversTool(Tool):
+    name = "get_rating_movers"
+    description = (
+        "近 30 天口碑异动榜（netaba.re）：评分上涨最快 / 下跌最快（崩了）/ 近期完结作品表现；"
+        "可附带当季评分格局分析。回答'最近什么番口碑崩了/黑马是谁/这季评分格局'类问题。"
+    )
+    args_model = RatingMoversArgs
+    result_model = RatingMoversResult
+
+    async def run(self, args: RatingMoversArgs) -> ToolResult[RatingMoversResult]:
+        payload = _CACHE.get("trending")
+        try:
+            async with httpx.AsyncClient(
+                timeout=settings.http_timeout, headers={"User-Agent": settings.bangumi_user_agent}
+            ) as client:
+                if payload is None:
+                    resp = await client.get(f"{_API}/trending")
+                    resp.raise_for_status()
+                    payload = resp.json()
+                    _CACHE.set("trending", payload)
+                analysis: dict[str, str] = {}
+                if args.include_season_analysis:
+                    now = datetime.now(timezone.utc)
+                    year = args.season_year or now.year
+                    month = args.season_month or ((now.month - 1) // 3 * 3 + 1)
+                    key = f"season:{year}:{month}"
+                    analysis = _CACHE.get(key) or {}
+                    if not analysis:
+                        r2 = await client.get(f"{_API}/season/{year}/{month}/analysis")
+                        if r2.status_code == 200:
+                            analysis = {k: str(v) for k, v in (r2.json() or {}).items() if isinstance(v, str)}
+                            _CACHE.set(key, analysis)
+        except (httpx.HTTPError, ValueError) as e:
+            return ToolResult(ok=False, error=f"netaba.re 榜单获取失败：{type(e).__name__}")
+
+        def cut(key: str) -> list[MoverItem]:
+            return [_mover(x) for x in (payload.get(key) or [])[: args.limit]]
+
+        data = RatingMoversResult(
+            up=cut("up") if args.direction in ("all", "up") else [],
+            down=cut("down") if args.direction in ("all", "down") else [],
+            done=cut("done") if args.direction in ("all", "done") else [],
+            season_analysis=analysis,
+            caveats=[
+                "数据来自 netaba.re（第三方每日快照站）；delta 为近 30 天加权均分变化。",
+                *(["季度分析为 netaba.re 的 AI 生成文本，属第三方观点，不作 canonical 事实。"] if analysis else []),
+            ],
+        )
+        return ToolResult(
+            ok=True,
+            data=data,
+            sources=[Citation(title="netaba.re 口碑异动榜", url="https://netaba.re/trending", source="netabare")],
+        )
+
+
 def build_netabare_tools() -> list[Tool]:
-    return [SubjectTrendTool()]
+    return [SubjectTrendTool(), RatingMoversTool()]

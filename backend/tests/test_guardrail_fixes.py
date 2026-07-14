@@ -544,3 +544,56 @@ def test_netabare_trend_build_and_downsample():
     pts = [TrendPoint(date=f"2026-01-{i:02d}") for i in range(1, 10)] * 30  # 270 点
     ds = downsample(pts, 60)
     assert len(ds) <= 61 and ds[0].date == pts[0].date and ds[-1].date == pts[-1].date
+
+
+def test_netabare_movers_and_distribution():
+    """涨跌榜解析 + 评分分布统计 + 争议度分档。"""
+    from otomo.tools.netabare.tool import _controversy_label, _distribution_stats, _mover
+
+    entry = {"bgmId": 1, "score": -3.5, "subject": {"name_cn": "崩了的番"},
+             "history": [{"rating": {"count": {"8": 10}, "total": 10}}, {"rating": {"count": {"5": 20}, "total": 20}}]}
+    m = _mover(entry)
+    assert m.delta_score == -3.5 and m.current_score == 5.0 and m.rating_total == 20
+
+    dist, std = _distribution_stats({"count": {"1": 50, "10": 50}})
+    assert std is not None and std > 4 and _controversy_label(std) == "两极分化"
+    _, std2 = _distribution_stats({"count": {"8": 100}})
+    assert std2 == 0 and _controversy_label(std2) == "口碑集中"
+
+
+def test_friends_pulse_aggregation(monkeypatch):
+    """好友圈聚合：在追/想看按人数排、高分榜≥2人评分、标注我的状态。"""
+    import asyncio as _a
+
+    from otomo.tools.user_analysis import tool as ua
+
+    def item(sid, type_, rate=0):
+        return {"subject_id": sid, "rate": rate, "type": type_,
+                "subject": {"id": sid, "name_cn": f"作品{sid}", "tags": []}}
+
+    collections = {
+        "me": [item(100, 2, 9)],                       # 我看过 100
+        "a": [item(100, 3), item(200, 1), item(300, 2, 9)],
+        "b": [item(100, 3), item(200, 1), item(300, 2, 8)],
+        "c": [item(200, 1), item(400, 2, 10)],         # 400 只有 1 人评分 → 不进高分榜
+    }
+
+    class FakeClient:
+        async def get_me(self):
+            return {"username": "me"}
+        async def get_all_user_collections(self, username, stype, ct, max_items=0):
+            return collections[username]
+
+    async def fake_friends(username, limit):
+        return [{"username": "a"}, {"username": "b"}, {"username": "c"}], "u"
+
+    monkeypatch.setattr(ua, "_fetch_friends", fake_friends)
+    res = _a.run(ua.CompareUserTasteTool(FakeClient()).run(ua.TasteCompareArgs(mode="friends_pulse", friends_limit=5)))
+    assert res.ok and res.data.pulse
+    p = res.data.pulse
+    assert p.friends_counted == 3
+    assert p.watching_hot[0].subject_id == 100 and p.watching_hot[0].count == 2
+    assert p.watching_hot[0].my_status == "看过"          # 我的状态标注
+    assert p.wishlist_hot[0].subject_id == 200 and p.wishlist_hot[0].count == 3
+    assert [e.subject_id for e in p.top_rated] == [300]   # 400 单人评分被过滤
+    assert p.top_rated[0].avg_rate == 8.5
