@@ -1227,6 +1227,88 @@ class AbandonAnalysisTool(Tool):
         )
 
 
+class ExportCollectionsArgs(BaseModel):
+    username: str | None = Field(None, description="不传用当前账号")
+    subject_type: Literal["anime", "game", "book", "music", "real", "all"] = Field("anime")
+    collection_type: int | None = Field(None, ge=1, le=5, description="1想看/2看过/3在看/4搁置/5抛弃；不传=全部")
+    max_items: int = Field(2000, ge=10, le=5000)
+
+
+class ExportCollectionsResult(BaseModel):
+    username: str
+    filename: str
+    count: int
+    csv_text: str
+    caveats: list[str] = Field(default_factory=list)
+
+
+_CSV_STATUS = {1: "想看", 2: "看过", 3: "在看", 4: "搁置", 5: "抛弃"}
+
+
+def _csv_escape(v: object) -> str:
+    s = str(v if v is not None else "")
+    if any(ch in s for ch in ',"\n\r'):
+        s = '"' + s.replace('"', '""') + '"'
+    return s
+
+
+class ExportCollectionsCsvTool(Tool):
+    name = "export_my_collections_csv"
+    description = (
+        "把我的 Bangumi 收藏导出为 CSV（Excel 可开）：条目/状态/评分/短评/标签/收藏时间。"
+        "用户说'导出收藏/备份收藏/导出 csv/表格'时用；面板提供下载按钮。"
+    )
+    args_model = ExportCollectionsArgs
+    result_model = ExportCollectionsResult
+
+    def __init__(self, client: BangumiClient) -> None:
+        self.client = client
+
+    async def run(self, args: ExportCollectionsArgs) -> ToolResult[ExportCollectionsResult]:
+        username = args.username
+        if not username:
+            me = await self.client.get_me()
+            username = me.get("username") or str(me.get("id"))
+        types = [args.subject_type] if args.subject_type != "all" else ["anime", "game", "book", "music", "real"]
+        header = ["subject_id", "名称", "类型", "状态", "我的评分", "短评", "我的标签", "收藏更新时间", "站均分", "链接"]
+        rows: list[str] = [",".join(header)]
+        count = 0
+        for stype in types:
+            items = await self.client.get_all_user_collections(
+                username, SUBJECT_TYPE[stype], args.collection_type, max_items=args.max_items
+            )
+            for item in items:
+                subj = item.get("subject") or {}
+                if not subj.get("id"):
+                    continue
+                count += 1
+                rows.append(",".join(_csv_escape(x) for x in [
+                    subj["id"],
+                    subj.get("name_cn") or subj.get("name") or "",
+                    stype,
+                    _CSV_STATUS.get(int(item.get("type") or 0), ""),
+                    item.get("rate") or "",
+                    item.get("comment") or "",
+                    " ".join(item.get("tags") or []),
+                    item.get("updated_at") or "",
+                    (subj.get("score") if isinstance(subj.get("score"), (int, float)) else ""),
+                    f"https://bgm.tv/subject/{subj['id']}",
+                ]))
+        if count == 0:
+            return ToolResult(ok=False, error="没有可导出的收藏（检查用户名/收藏可见性）")
+        from datetime import date as _date
+        return ToolResult(
+            ok=True,
+            data=ExportCollectionsResult(
+                username=username,
+                filename=f"bangumi_{username}_{args.subject_type}_{_date.today().isoformat()}.csv",
+                count=count,
+                csv_text="\ufeff" + "\r\n".join(rows),
+                caveats=[f"共 {count} 条；含 UTF-8 BOM，Excel 直接打开不乱码。"],
+            ),
+        )
+
+
 def build_user_analysis_tools(client: BangumiClient) -> list[Tool]:
     return [
         UserOpinionTool(client),
@@ -1234,4 +1316,5 @@ def build_user_analysis_tools(client: BangumiClient) -> list[Tool]:
         CompareUserTasteTool(client),
         SyncRecommendTool(client),
         AbandonAnalysisTool(client),
+        ExportCollectionsCsvTool(client),
     ]

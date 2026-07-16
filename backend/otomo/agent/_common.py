@@ -504,6 +504,8 @@ _PANEL_TOOLS = {
     "get_rating_movers",
     "anime_omikuji",
     "generate_acgn_quiz",
+    "get_my_episode_progress",
+    "export_my_collections_csv",
     "get_character_birthdays",
     "compare_subjects",
     "get_pilgrimage_map",

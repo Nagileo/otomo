@@ -93,14 +93,14 @@ TOOL_GROUPS: dict[str, dict[str, Any]] = {
     },
     "user_analysis": {
         "desc": "好友列表、口味同步率对比、弃坑/搁置分析",
-        "tools": {"compare_user_taste", "list_bangumi_friends", "analyze_abandoned_subjects"},
+        "tools": {"compare_user_taste", "list_bangumi_friends", "analyze_abandoned_subjects", "export_my_collections_csv"},
         # friends_pulse/matrix 都走 compare_user_taste
-        "keywords": ["好友", "同步率", "口味.{0,4}像", "和.{1,8}像", "弃坑", "搁置", "抛弃", "圈子", "都在看", "都在追", "都想看"],
+        "keywords": ["好友", "同步率", "口味.{0,4}像", "和.{1,8}像", "弃坑", "搁置", "抛弃", "圈子", "都在看", "都在追", "都想看", "导出", "备份", "csv", "表格"],
     },
     "memory_plan": {
-        "desc": "长期记忆写入/遗忘、决策日志、追番计划板、Bangumi 收藏写回（加想看/打分/进度）",
-        "tools": {"forget_user_memory", "record_decision_log", "list_watch_plan", "upsert_watch_plan_item", "prepare_bangumi_write_action", "cancel_bangumi_write_action", "execute_bangumi_write_action", "undo_bangumi_write_action"},
-        "keywords": ["记住", "别推", "别再", "想看", "在看", "计划", "加入", "标记", "打.{0,2}分", "看过", "追番计划", "忘掉", "别记", "确认", "写回", "同步", "撤销"],
+        "desc": "长期记忆写入/遗忘、决策日志、追番计划板、Bangumi 收藏写回（加想看/打分/进度打卡）",
+        "tools": {"forget_user_memory", "record_decision_log", "list_watch_plan", "upsert_watch_plan_item", "prepare_bangumi_write_action", "cancel_bangumi_write_action", "execute_bangumi_write_action", "undo_bangumi_write_action", "get_my_episode_progress"},
+        "keywords": ["记住", "别推", "别再", "想看", "在看", "计划", "加入", "标记", "打.{0,2}分", "看过", "追番计划", "忘掉", "别记", "确认", "写回", "同步", "撤销", "看到第", "看完第", "进度", "打卡", "下一集"],
     },
     "product_page": {
         "desc": "追番驾驶舱、作品档案页、IP 跨媒介图谱、月度报告、口味报告、收藏仪表盘、作品对比、补番顺序",

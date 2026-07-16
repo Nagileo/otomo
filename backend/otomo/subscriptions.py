@@ -42,6 +42,7 @@ SubscriptionKind = Literal[
     "birthday",
     "bili_up_video",
     "rating_alert",
+    "friends_activity",
 ]
 SubscriptionChannel = Literal["inbox", "email", "webhook"]
 SubscriptionTemplate = Literal["brief", "normal", "detailed"]
@@ -464,6 +465,8 @@ class SubscriptionService:
                 return await self._bili_payload(rule)
             if rule.kind == "rating_alert":
                 return await self._rating_alert_payload(rule, client)
+            if rule.kind == "friends_activity":
+                return await self._friends_activity_payload(rule, client)
             raise ValueError(f"unsupported subscription kind: {rule.kind}")
         finally:
             if hasattr(client, "aclose"):
@@ -503,6 +506,69 @@ class SubscriptionService:
         return {
             "sections": [{"title": "口碑异动", "items": lines}] if lines else [],
             "caveats": ["异动数据来自 netaba.re 近30天快照；无命中时不推送。"],
+        }
+
+    async def _friends_activity_payload(self, rule: SubscriptionRule, client: Any) -> dict[str, Any]:
+        """好友动态日报（Tantei 式）："X 看完了《Y》并打了 9 分"。
+
+        拉每个好友最近收藏（Bangumi API 默认 updated_at 降序），窗口 = 上次运行至今
+        （首跑回看 filters.hours，默认 24h）。无动态不推送。
+        """
+        from .tools.user_analysis.tool import _fetch_friends
+
+        username = rule.username
+        if not username:
+            return {"sections": [], "caveats": ["friends_activity 需要绑定用户名"]}
+        max_friends = int(rule.filters.get("max_friends") or 12)
+        fallback_hours = int(rule.filters.get("hours") or 24)
+        since = None
+        if rule.last_run_at:
+            try:
+                since = datetime.fromisoformat(rule.last_run_at)
+            except ValueError:
+                since = None
+        if since is None:
+            since = datetime.now(_zone(rule.schedule.timezone)) - timedelta(hours=fallback_hours)
+        if since.tzinfo is None:
+            since = since.replace(tzinfo=_zone(rule.schedule.timezone))
+
+        friends, note = await _fetch_friends(username, max_friends)
+        if not friends:
+            return {"sections": [], "caveats": [note or "好友列表为空/不可见"]}
+        _STATUS = {1: "想看", 2: "看完了", 3: "在看", 4: "搁置了", 5: "抛弃了"}
+        lines: list[dict[str, Any]] = []
+        for friend in friends[:max_friends]:
+            try:
+                page = await client.get_user_collections(friend.username, 2, None, limit=20)
+            except Exception:  # noqa: BLE001
+                continue
+            for item in page.get("data") or []:
+                ts_raw = str(item.get("updated_at") or "")
+                try:
+                    ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=_zone(rule.schedule.timezone))
+                if ts < since:
+                    break  # 降序，后面只会更旧
+                subj = item.get("subject") or {}
+                if not subj.get("id"):
+                    continue
+                verb = _STATUS.get(int(item.get("type") or 0), "更新了")
+                rate = int(item.get("rate") or 0)
+                name = subj.get("name_cn") or subj.get("name") or f"subject {subj['id']}"
+                lines.append({
+                    "id": subj["id"],
+                    "name": name,
+                    "summary": f"{friend.nickname or friend.username} {verb}《{name}》" + (f"，打了 {rate} 分" if rate else ""),
+                    "url": f"https://bgm.tv/subject/{subj['id']}",
+                    "ts": ts_raw,
+                })
+        lines.sort(key=lambda x: str(x.get("ts") or ""), reverse=True)
+        return {
+            "sections": [{"title": "好友动态", "items": lines[:30]}] if lines else [],
+            "caveats": ["动态取自好友公开收藏的更新时间；无动态时不推送。"],
         }
 
     async def _daily_airing_payload(self, rule: SubscriptionRule, client: BangumiClient, *, mutate: bool) -> dict[str, Any]:
@@ -756,6 +822,7 @@ def default_subscription_title(kind: str) -> str:
         "birthday": "今日角色生日",
         "bili_up_video": "B站导视/漫评新视频",
         "rating_alert": "口碑哨兵：你的番评分异动",
+        "friends_activity": "好友动态：他们在看什么打了几分",
     }.get(kind, "Otomo 订阅")
 
 

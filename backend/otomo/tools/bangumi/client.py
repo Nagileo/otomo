@@ -242,6 +242,24 @@ class BangumiClient:
         """获取当前 token 用户单集收藏状态。"""
         return await self._get(f"/v0/users/-/collections/-/episodes/{episode_id}")
 
+    async def get_my_subject_episodes(
+        self, subject_id: int, episode_type: int | None = 0, limit: int = 100, offset: int = 0,
+    ) -> Any:
+        """当前 token 用户在某条目下的分集收藏状态（episode_type=0 本篇）。需要该条目已收藏。"""
+        params: dict[str, Any] = {"limit": limit, "offset": offset}
+        if episode_type is not None:
+            params["episode_type"] = episode_type
+        return await self._request_json(  # 进度会频繁变化，不走读缓存
+            "GET", f"/v0/users/-/collections/{subject_id}/episodes", params=params
+        )
+
+    async def patch_my_subject_episodes(self, subject_id: int, episode_ids: list[int], ep_type: int) -> Any:
+        """批量标记某条目下多集的收藏状态（"看到第 N 集"补标）。需要 write:collection scope."""
+        return await self._mutate(
+            "PATCH", f"/v0/users/-/collections/{subject_id}/episodes",
+            {"episode_id": episode_ids, "type": ep_type},
+        )
+
     async def get_user_collections(
         self, username: str, subject_type: int = 2, collection_type: int | None = 2,
         limit: int = 50, offset: int = 0,

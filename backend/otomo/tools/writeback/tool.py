@@ -47,8 +47,11 @@ class MemoryResult(BaseModel):
 
 class PrepareBangumiWriteArgs(BaseModel):
     username: str | None = Field(None, description="Bangumi 用户名；不传则使用当前 token 账号")
-    operation: Literal["set_collection", "set_episode_collection"] = Field(
-        "set_collection", description="写回类型：条目收藏或单集进度"
+    operation: Literal["set_collection", "set_episode_collection", "mark_episodes_watched"] = Field(
+        "set_collection", description="写回类型：条目收藏 / 单集进度 / 看到第N集批量补标"
+    )
+    up_to_episode: int | None = Field(
+        None, ge=1, description="mark_episodes_watched 用：把本篇第 1..N 集中未看的全部标记为看过"
     )
     subject_id: int | None = Field(None, description="Bangumi subject_id")
     subject_name: str = Field("", description="作品名，用于确认弹窗；可由 subject_id 自动补齐")
@@ -258,7 +261,33 @@ async def _subject_name(client: BangumiClient, subject_id: int | None, fallback:
     return subject.get("name_cn") or subject.get("name") or f"subject {subject_id}"
 
 
+async def _resolve_unwatched_episodes(
+    client: BangumiClient, subject_id: int, up_to: int,
+) -> tuple[list[int], list[float], int]:
+    """本篇 sort≤N 中还没标"看过"的集。返回 (episode_ids, sorts, 当前已看到第几集)。
+
+    需要条目已收藏（Bangumi 分集接口的前置条件）；未收藏时该接口 404，由调用方给出提示。
+    """
+    my = await client.get_my_subject_episodes(subject_id, episode_type=0, limit=200)
+    rows = list(my.get("data") or [])
+    watched_max = 0
+    targets: list[tuple[int, float]] = []
+    for row in rows:
+        ep = row.get("episode") or {}
+        sort = float(ep.get("sort") or 0)
+        if int(row.get("type") or 0) == 2:
+            watched_max = max(watched_max, int(sort))
+            continue
+        if 0 < sort <= up_to and ep.get("id"):
+            targets.append((int(ep["id"]), sort))
+    targets.sort(key=lambda x: x[1])
+    return [t[0] for t in targets], [t[1] for t in targets], watched_max
+
+
 def _summary_for_action(args: PrepareBangumiWriteArgs, name: str, payload: dict[str, Any]) -> str:
+    if args.operation == "mark_episodes_watched":
+        n = len(payload.get("episode_ids") or [])
+        return f"将《{name or args.subject_name or '未知作品'}》看到第 {payload.get('up_to')} 集（补标 {n} 集为看过）"
     if args.operation == "set_episode_collection":
         label = EPISODE_TYPE_LABELS.get(args.episode_collection_type or 0, str(args.episode_collection_type))
         return f"将《{name or args.subject_name or '未知作品'}》 episode {args.episode_id} 标记为 {label}"
@@ -305,6 +334,28 @@ class PrepareBangumiWriteActionTool(Tool):
                 return ToolResult(ok=False, error="没有可写回字段")
             before = await _current_collection(self.client, username, args.subject_id)
             name = await _subject_name(self.client, args.subject_id, args.subject_name)
+            subject_id = args.subject_id
+            episode_id = None
+        elif args.operation == "mark_episodes_watched":
+            if args.subject_id is None or args.up_to_episode is None:
+                return ToolResult(ok=False, error="mark_episodes_watched 需要 subject_id 和 up_to_episode")
+            try:
+                ep_ids, sorts, watched_max = await _resolve_unwatched_episodes(
+                    self.client, args.subject_id, args.up_to_episode
+                )
+            except Exception as e:  # noqa: BLE001
+                return ToolResult(
+                    ok=False,
+                    error=f"读取分集进度失败（{type(e).__name__}）；批量打卡需要该条目已在收藏中，可先加入在看。",
+                )
+            name = await _subject_name(self.client, args.subject_id, args.subject_name)
+            if not ep_ids:
+                return ToolResult(
+                    ok=False,
+                    error=f"《{name}》第 1..{args.up_to_episode} 集都已是看过状态（当前看到第 {watched_max} 集），无需补标。",
+                )
+            payload = {"episode_ids": ep_ids, "type": 2, "up_to": args.up_to_episode, "sorts": sorts}
+            before = {"unwatched_episode_ids": ep_ids, "prev_watched_max": watched_max}
             subject_id = args.subject_id
             episode_id = None
         else:
@@ -402,6 +453,15 @@ class ExecuteBangumiWriteActionTool(Tool):
                     return ToolResult(ok=False, error="动作缺少 subject_id")
                 await self.client.set_my_collection(action.subject_id, action.payload)
                 action.after = await _current_collection(self.client, username, action.subject_id)
+            elif action.operation == "mark_episodes_watched":
+                if action.subject_id is None or not action.payload.get("episode_ids"):
+                    return ToolResult(ok=False, error="动作缺少 subject_id 或分集列表")
+                await self.client.patch_my_subject_episodes(
+                    action.subject_id,
+                    [int(x) for x in action.payload["episode_ids"]],
+                    int(action.payload.get("type") or 2),
+                )
+                action.after = {"watched_up_to": action.payload.get("up_to"), "marked": len(action.payload["episode_ids"])}
             else:
                 if action.episode_id is None:
                     return ToolResult(ok=False, error="动作缺少 episode_id")
@@ -524,6 +584,13 @@ class UndoBangumiWriteActionTool(Tool):
                     return ToolResult(ok=False, error="动作缺少 subject_id")
                 await self.client.set_my_collection(action.subject_id, _restore_collection_payload(action.before))
                 after = await _current_collection(self.client, username, action.subject_id)
+            elif action.operation == "mark_episodes_watched":
+                ids = [int(x) for x in (action.before.get("unwatched_episode_ids") or [])]
+                if action.subject_id is None or not ids:
+                    return ToolResult(ok=False, error="动作缺少批量补标的旧值快照")
+                # 这些集在执行前都是"未看"，恢复即批量清回未收藏状态（type=0）
+                await self.client.patch_my_subject_episodes(action.subject_id, ids, 0)
+                after = {"restored_unwatched": len(ids)}
             else:
                 if action.episode_id is None or action.before.get("type") is None:
                     return ToolResult(ok=False, error="动作缺少 episode_id 或旧单集状态")
@@ -734,4 +801,91 @@ def build_writeback_tools(client: BangumiClient, ltm: LongTermMemory) -> list[To
         ListWatchPlanTool(client, ltm),
         RecordDecisionTool(client, ltm),
         SaveRecommendationListTool(client, ltm),
+        GetEpisodeProgressTool(client),
     ]
+
+
+class EpisodeProgressArgs(BaseModel):
+    subject_id: int = Field(..., description="Bangumi subject_id（需要该条目已在收藏中）")
+
+
+class EpisodeProgressRow(BaseModel):
+    episode_id: int
+    sort: float
+    name: str = ""
+    air_date: str = ""
+    status: str = "未看"      # 未看/想看/看过/抛弃
+
+
+class EpisodeProgressResult(BaseModel):
+    subject_id: int
+    subject_name: str = ""
+    total_main: int = 0
+    watched: int = 0
+    watched_up_to: int = 0      # 连续看到第几集（第一个未看集之前）
+    next_episode: float | None = None
+    episodes: list[EpisodeProgressRow] = Field(default_factory=list)
+    caveats: list[str] = Field(default_factory=list)
+
+
+_EP_STATUS = {0: "未看", 1: "想看", 2: "看过", 3: "抛弃"}
+
+
+class GetEpisodeProgressTool(Tool):
+    name = "get_my_episode_progress"
+    description = (
+        "查询我在某部作品的分集观看进度：每集状态、看到第几集、下一集是第几集。"
+        "用户问'我看到第几集了/进度/下一集该看哪集'时用；打卡进度前也可先查。需要该条目已收藏。"
+    )
+    args_model = EpisodeProgressArgs
+    result_model = EpisodeProgressResult
+
+    def __init__(self, client: BangumiClient) -> None:
+        self.client = client
+
+    async def run(self, args: EpisodeProgressArgs) -> ToolResult[EpisodeProgressResult]:
+        name = await _subject_name(self.client, args.subject_id, "")
+        try:
+            my = await self.client.get_my_subject_episodes(args.subject_id, episode_type=0, limit=200)
+        except Exception as e:  # noqa: BLE001
+            return ToolResult(
+                ok=False,
+                error=f"读取分集进度失败（{type(e).__name__}）；该接口要求条目已在收藏中，可先加入在看。",
+            )
+        rows: list[EpisodeProgressRow] = []
+        for row in list(my.get("data") or []):
+            ep = row.get("episode") or {}
+            if not ep.get("id"):
+                continue
+            rows.append(
+                EpisodeProgressRow(
+                    episode_id=int(ep["id"]),
+                    sort=float(ep.get("sort") or 0),
+                    name=str(ep.get("name_cn") or ep.get("name") or ""),
+                    air_date=str(ep.get("airdate") or ""),
+                    status=_EP_STATUS.get(int(row.get("type") or 0), "未看"),
+                )
+            )
+        rows.sort(key=lambda x: x.sort)
+        watched = sum(1 for r in rows if r.status == "看过")
+        watched_up_to = 0
+        next_ep: float | None = None
+        for r in rows:
+            if r.status == "看过":
+                watched_up_to = int(r.sort)
+            else:
+                next_ep = r.sort
+                break
+        return ToolResult(
+            ok=True,
+            data=EpisodeProgressResult(
+                subject_id=args.subject_id,
+                subject_name=name,
+                total_main=len(rows),
+                watched=watched,
+                watched_up_to=watched_up_to,
+                next_episode=next_ep,
+                episodes=rows,
+                caveats=["进度取自 Bangumi 分集收藏（本篇）；说'看到第 N 集了'可一句话批量补标。"],
+            ),
+        )

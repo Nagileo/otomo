@@ -1121,3 +1121,13 @@ a.card-title:hover { color: var(--accent); }
 .deliverable-bar { width: 100%; display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; background: rgba(124, 140, 255, 0.08); border: none; color: inherit; cursor: pointer; font-size: 14px; font-weight: 600; }
 .deliverable-bar:hover { background: rgba(124, 140, 255, 0.15); }
 .deliverable-hint { opacity: 0.6; font-size: 12px; font-weight: 400; }
+
+/* 追番进度：格子条（Bangumi 点格子的既视感） */
+.ep-strip { display: flex; flex-wrap: wrap; gap: 4px; margin: var(--gap-md) 0; }
+.ep-cell {
+  min-width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center;
+  padding: 0 4px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: #0c0e13; color: var(--dim); font-size: var(--fs-xs);
+}
+.ep-cell.done { background: rgba(158, 206, 106, .16); border-color: rgba(158, 206, 106, .4); color: var(--green); }
+.ep-cell.drop { background: rgba(247, 118, 142, .12); border-color: rgba(247, 118, 142, .35); color: var(--red); text-decoration: line-through; }

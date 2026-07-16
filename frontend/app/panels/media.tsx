@@ -1360,3 +1360,55 @@ export function QuizPanel({ data }: { data: AnyRecord }) {
     </Panel>
   );
 }
+
+
+export function EpisodeProgressPanel({ data }: { data: AnyRecord }) {
+  const eps = list(data.episodes);
+  const total = Number(data.total_main || eps.length || 0);
+  const watched = Number(data.watched || 0);
+  const ratio = total > 0 ? Math.round((watched / total) * 100) : 0;
+  return (
+    <Panel
+      title={`追番进度 · ${text(data.subject_name)}`}
+      subtitle={data.next_episode != null ? `下一集：第 ${data.next_episode} 集` : "本篇已全部看完 🎉"}
+    >
+      <div className="stat-row">
+        <span className="stat-big good"><span className="stat-value">{data.watched_up_to ?? 0}</span><span className="stat-label">看到第几集</span></span>
+        <span className="stat-big"><span className="stat-value">{watched}/{total}</span><span className="stat-label">已看集数</span></span>
+        <span className="stat-big"><span className="stat-value">{ratio}%</span><span className="stat-label">完成度</span></span>
+      </div>
+      <div className="ep-strip">
+        {eps.map((e, i) => (
+          <span
+            key={i}
+            className={`ep-cell ${e.status === "看过" ? "done" : e.status === "抛弃" ? "drop" : ""}`}
+            title={`第 ${e.sort} 集 ${e.name || ""} · ${e.status}`}
+          >
+            {Math.round(Number(e.sort))}
+          </span>
+        ))}
+      </div>
+      <Meta notes={list<string>(data.caveats)} />
+    </Panel>
+  );
+}
+
+
+export function CsvExportPanel({ data }: { data: AnyRecord }) {
+  const download = () => {
+    const blob = new Blob([text(data.csv_text, "")], { type: "text/csv;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = text(data.filename, "bangumi_collections.csv");
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+  return (
+    <Panel title={`收藏导出 · @${text(data.username)}`} subtitle={`${data.count ?? 0} 条记录已生成`}>
+      <div className="evidence-row">
+        <button type="button" className="inline-action" onClick={download}>⬇ 下载 {text(data.filename, "CSV")}</button>
+      </div>
+      <Meta notes={list<string>(data.caveats)} />
+    </Panel>
+  );
+}

@@ -14,6 +14,7 @@ const KINDS = [
   ["rss_release", "RSS 新资源"],
   ["birthday", "生日提醒"],
   ["rating_alert", "口碑哨兵（在看/想看的番评分异动）"],
+  ["friends_activity", "好友动态（他们在看什么、打了几分）"],
   ["bili_up_video", "B站导视/漫评"],
 ] as const;
 const CHANNELS = [

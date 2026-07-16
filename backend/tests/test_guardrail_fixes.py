@@ -708,3 +708,108 @@ def test_append_missing_anchors():
     assert out2.count("[[panel:monthly_watch_report") == 1
     # 没调交付物 → 原样
     assert append_missing_anchors("你好", [{"role": "user", "content": "hi"}]) == "你好"
+
+
+def test_mark_episodes_watched_flow(tmp_path):
+    """看到第N集批量打卡：prepare 只挑未看集，execute 批量 PATCH，undo 恢复未看。"""
+    import asyncio as _a
+
+    from otomo.memory import LongTermMemory
+    from otomo.tools.writeback.tool import (
+        ConfirmBangumiWriteArgs,
+        ExecuteBangumiWriteActionTool,
+        PrepareBangumiWriteActionTool,
+        PrepareBangumiWriteArgs,
+        UndoBangumiWriteArgs,
+        UndoBangumiWriteActionTool,
+    )
+
+    class FakeClient:
+        def __init__(self):
+            self.patched: list[tuple[int, list[int], int]] = []
+        async def get_me(self):
+            return {"username": "tester"}
+        async def get_subject(self, sid):
+            return {"id": sid, "name_cn": "孤独摇滚！", "name": "ぼっち・ざ・ろっく！"}
+        async def get_my_subject_episodes(self, sid, episode_type=0, limit=200, offset=0):
+            # 12 集本篇：前 3 集已看过
+            return {"data": [
+                {"episode": {"id": 1000 + i, "sort": i}, "type": 2 if i <= 3 else 0}
+                for i in range(1, 13)
+            ]}
+        async def patch_my_subject_episodes(self, sid, ep_ids, ep_type):
+            self.patched.append((sid, list(ep_ids), ep_type))
+            return {}
+
+    client = FakeClient()
+    ltm = LongTermMemory(base_dir=tmp_path)
+    prep = PrepareBangumiWriteActionTool(client, ltm)
+    r = _a.run(prep.run(PrepareBangumiWriteArgs(operation="mark_episodes_watched", subject_id=999, up_to_episode=8)))
+    assert r.ok, r.error
+    action = r.data.action
+    assert action.payload["episode_ids"] == [1004, 1005, 1006, 1007, 1008]  # 只补 4..8，跳过已看 1..3
+    assert action.before["prev_watched_max"] == 3
+
+    # 未确认拒绝
+    ex = ExecuteBangumiWriteActionTool(client, ltm)
+    bad = _a.run(ex.run(ConfirmBangumiWriteArgs(action_id=action.id, confirmed=False)))
+    assert not bad.ok
+
+    ok = _a.run(ex.run(ConfirmBangumiWriteArgs(action_id=action.id, confirmed=True)))
+    assert ok.ok and client.patched == [(999, [1004, 1005, 1006, 1007, 1008], 2)]
+
+    undo = UndoBangumiWriteActionTool(client, ltm)
+    u = _a.run(undo.run(UndoBangumiWriteArgs(action_id=action.id, confirmed=True)))
+    assert u.ok and client.patched[-1] == (999, [1004, 1005, 1006, 1007, 1008], 0)
+
+    # 全部已看时如实拒绝
+    r2 = _a.run(prep.run(PrepareBangumiWriteArgs(operation="mark_episodes_watched", subject_id=999, up_to_episode=3)))
+    assert not r2.ok and "无需补标" in r2.error
+
+
+def test_friends_activity_and_csv_export(tmp_path, monkeypatch):
+    """好友动态窗口过滤 + csv 导出结构。"""
+    import asyncio as _a
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+
+    class FakeClient:
+        async def get_me(self):
+            return {"username": "me"}
+        async def get_user_collections(self, username, stype, ct, limit=20, offset=0):
+            return {"data": [
+                {"subject": {"id": 1, "name_cn": "新动态"}, "type": 2, "rate": 9,
+                 "updated_at": (now - timedelta(hours=2)).isoformat()},
+                {"subject": {"id": 2, "name_cn": "旧动态"}, "type": 3, "rate": 0,
+                 "updated_at": (now - timedelta(days=3)).isoformat()},
+            ]}
+        async def get_all_user_collections(self, username, stype, ct, max_items=0):
+            return [
+                {"subject": {"id": 10, "name_cn": "孤独摇滚！", "score": 8.4}, "type": 2, "rate": 10,
+                 "comment": "神,里面有\"引号\"和,逗号", "tags": ["百合", "音乐"], "updated_at": "2026-01-01T00:00:00+08:00"},
+            ]
+        async def aclose(self):
+            pass
+
+    # friends_activity：只留窗口内（24h）动态
+    import otomo.subscriptions as subs
+    from otomo.tools.user_analysis.tool import FriendBrief
+
+    async def fake_fetch_friends(username, limit):
+        return [FriendBrief(username="fr1", nickname="麻里奈", url="https://bgm.tv/user/fr1")], ""
+    monkeypatch.setattr("otomo.tools.user_analysis.tool._fetch_friends", fake_fetch_friends)
+
+    mgr = subs.SubscriptionService.__new__(subs.SubscriptionService)
+    rule = subs.SubscriptionRule(id="r1", owner_key="u", username="me", kind="friends_activity")
+    payload = _a.run(mgr._friends_activity_payload(rule, FakeClient()))
+    items = payload["sections"][0]["items"]
+    assert len(items) == 1 and "麻里奈 看完了《新动态》，打了 9 分" == items[0]["summary"]
+
+    # csv：字段转义 + BOM
+    from otomo.tools.user_analysis.tool import ExportCollectionsArgs, ExportCollectionsCsvTool
+    r = _a.run(ExportCollectionsCsvTool(FakeClient()).run(ExportCollectionsArgs()))
+    assert r.ok and r.data.count == 1
+    assert r.data.csv_text.startswith("﻿")
+    assert '"神,里面有""引号""和,逗号"' in r.data.csv_text
+    assert "百合 音乐" in r.data.csv_text

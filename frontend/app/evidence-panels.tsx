@@ -2,7 +2,7 @@
 
 import { useState, type ReactNode } from "react";
 
-import { BirthdayPanel, ComparePanel, OmikujiPanel, PilgrimagePanel, PilgrimageTripPanel, QuizPanel, RatingMoversPanel, SubjectTrendPanel, TrendingPanel } from "./panels/media";
+import { BirthdayPanel, ComparePanel, CsvExportPanel, EpisodeProgressPanel, OmikujiPanel, PilgrimagePanel, PilgrimageTripPanel, QuizPanel, RatingMoversPanel, SubjectTrendPanel, TrendingPanel } from "./panels/media";
 import { InboxPanel } from "./panels/memory";
 import { PixivPanel } from "./panels/visual";
 
@@ -65,6 +65,8 @@ export const PANEL_LABELS: Record<string, string> = {
   get_rating_movers: "口碑异动",
   anime_omikuji: "今日番签",
   generate_acgn_quiz: "小测验",
+  get_my_episode_progress: "追番进度",
+  export_my_collections_csv: "收藏导出",
   anime_music_themes: "OP/ED/音乐",
   where_to_watch: "观看/购买渠道",
   get_anime_release_feeds: "离线资源",
@@ -118,6 +120,8 @@ export function renderPanelByName(name: string, rows: AnyRecord[], h: PanelHandl
     case "get_rating_movers": return render((d, i) => <RatingMoversPanel data={d} key={`${name}-${i}`} />);
     case "anime_omikuji": return render((d, i) => <OmikujiPanel data={d} key={`${name}-${i}`} />);
     case "generate_acgn_quiz": return render((d, i) => <QuizPanel data={d} key={`${name}-${i}`} />);
+    case "get_my_episode_progress": return render((d, i) => <EpisodeProgressPanel data={d} key={`${name}-${i}`} />);
+    case "export_my_collections_csv": return render((d, i) => <CsvExportPanel data={d} key={`${name}-${i}`} />);
     case "get_character_birthdays": return render((d, i) => <BirthdayPanel data={d} key={`${name}-${i}`} />);
     case "compare_subjects": return render((d, i) => <ComparePanel data={d} key={`${name}-${i}`} />);
     case "get_pilgrimage_map": return render((d, i) => <PilgrimagePanel data={d} key={`${name}-${i}`} />);
