@@ -1573,6 +1573,34 @@ async def stream_answer(
             yield AnswerDeltaEvent(text=pending)
 
 
+# 交付物面板（与前端 AUTO_EXPAND 对齐）+ 推荐结果：正文缺锚时后端兜底补注，
+# 不再依赖模型自觉插 [[panel:x]]——用户报过"年度报告卡片没显示"（锚忘插→掉成底部灰 chip）。
+_ANCHOR_FALLBACK_TOOLS = (
+    "monthly_watch_report", "watch_cockpit", "subject_dossier", "franchise_map",
+    "build_taste_report", "build_collection_dashboard", "compare_subjects", "plan_pilgrimage_trip",
+    "anime_omikuji", "generate_acgn_quiz", "recommend_subjects",
+)
+
+
+def append_missing_anchors(answer: str, messages: list[dict]) -> str:
+    """本轮调过交付物工具、但正文没有对应 [[panel:x]] 锚 → 末尾补锚。
+
+    前端对无面板数据的锚静默忽略（工具失败无 payload 时补锚无害），
+    有数据时面板会全宽渲染在正文尾部而非折叠 chip。"""
+    called: list[str] = []
+    for m in messages:
+        if m.get("role") != "assistant":
+            continue
+        for tc in m.get("tool_calls") or []:
+            name = (tc.get("function") or {}).get("name")
+            if name and name not in called:
+                called.append(name)
+    missing = [t for t in called if t in _ANCHOR_FALLBACK_TOOLS and f"[[panel:{t}" not in answer]
+    if not missing:
+        return answer
+    return answer.rstrip() + "\n\n" + "\n".join(f"[[panel:{t}]]" for t in missing)
+
+
 _FORCE_TEXT = (
     "基于以上已查到的信息，用纯自然语言给出最终回答。"
     "禁止输出任何工具调用 / invoke / DSML / tool_calls 标记，只要给用户看的结论。"

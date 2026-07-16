@@ -97,6 +97,7 @@ class ReActRunner(AgentRunner):
             if C.should_fallback_answer(answer, leaked):
                 answer = await C.compose_fallback(self.llm, self.model, compose) or \
                     "抱歉，这次没能整理出回答，请再问一次或换个问法。"
+            answer = C.append_missing_anchors(answer, state.messages)
             state.messages.append({"role": "assistant", "content": answer})
             state.status = "done"
             yield FinalEvent(answer=answer, sources=sources, steps=steps)

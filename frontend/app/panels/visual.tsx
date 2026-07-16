@@ -4,7 +4,7 @@
 // 既有面板（VisualText/VisualStyle/ImageSource/RouteImageSource/BiliVideoContent/VideoFrame）
 // 后续从 evidence-panels.tsx 搬迁至此；新视觉面板一律写在本文件。
 
-import { Badge, Panel, list, text, type AnyRecord } from "./shared";
+import { Badge, Panel, list, text, type AnyRecord , Meta } from "./shared";
 import { useState } from "react";
 import { pct, EmptyHint } from "./shared";
 
@@ -179,7 +179,7 @@ export function VisualTextPanel({ data }: { data: AnyRecord }) {
   return (
     <Panel
       title={`图片 OCR / 结构化 · ${text(data.mode, "auto")}`}
-      subtitle={`${data.image_count ?? 1} 张图 · 置信度 ${pct(data.confidence)}`}
+      subtitle={`${data.image_count ?? 1} 张图 · 匹配度 ${Math.round(Number(data.confidence || 0) * 100)}%`}
     >
       {tags.length > 0 && (
         <div className="evidence-row">
@@ -223,7 +223,7 @@ export function VisualTextPanel({ data }: { data: AnyRecord }) {
                 <div className="rec-body">
                   <div className="card-title">{text(item.bangumi_name || item.name)}</div>
                   <div className="card-meta">
-                    {item.bangumi_id ? "已回锚" : "未对齐"} · 置信度 {pct(item.confidence)}
+                    {item.bangumi_id ? "已定位到 Bangumi 条目" : "未能定位条目"} · 匹配度 {Math.round(Number(item.confidence || 0) * 100)}%
                     {item.bangumi_score ? ` · BGM ${item.bangumi_score}` : ""}
                   </div>
                 </div>
@@ -238,9 +238,7 @@ export function VisualTextPanel({ data }: { data: AnyRecord }) {
           <p className="evidence-copy">{text(data.raw_vlm_answer)}</p>
         </details>
       )}
-      {list<string>(data.caveats).length > 0 && (
-        <div className="caveats">{list<string>(data.caveats).map((n, i) => <span key={i}>{n}</span>)}</div>
-      )}
+      <Meta notes={list<string>(data.caveats)} />
     </Panel>
   );
 }
@@ -250,7 +248,7 @@ export function VisualStylePanel({ data }: { data: AnyRecord }) {
   const visualTags = list<string>(data.visual_tags);
   const bangumiTags = list<string>(data.bangumi_tags);
   return (
-    <Panel title="按画风/氛围推荐" subtitle={`置信度 ${pct(data.confidence)} · ${candidates.length} 个候选`}>
+    <Panel title="按画风/氛围推荐" subtitle={`匹配度 ${Math.round(Number(data.confidence || 0) * 100)}% · ${candidates.length} 个候选`}>
       {data.style_description && <p className="evidence-copy">{text(data.style_description)}</p>}
       {(visualTags.length > 0 || bangumiTags.length > 0) && (
         <div className="evidence-row">
@@ -278,9 +276,7 @@ export function VisualStylePanel({ data }: { data: AnyRecord }) {
           <p className="evidence-copy">{text(data.raw_vlm_answer)}</p>
         </details>
       )}
-      {list<string>(data.caveats).length > 0 && (
-        <div className="caveats">{list<string>(data.caveats).map((n, i) => <span key={i}>{n}</span>)}</div>
-      )}
+      <Meta notes={list<string>(data.caveats)} />
     </Panel>
   );
 }
@@ -324,9 +320,7 @@ export function ImageSourcePanel({ data }: { data: AnyRecord }) {
           </div>
         </>
       )}
-      {list<string>(data.caveats).length > 0 && (
-        <div className="caveats">{list<string>(data.caveats).map((n, i) => <span key={i}>{n}</span>)}</div>
-      )}
+      <Meta notes={list<string>(data.caveats)} />
     </Panel>
   );
 }
@@ -497,9 +491,7 @@ export function RouteImageSourcePanel({
           </div>
         </>
       )}
-      {list<string>(data.caveats).length > 0 && (
-        <div className="caveats">{list<string>(data.caveats).map((n, i) => <span key={i}>{n}</span>)}</div>
-      )}
+      <Meta notes={list<string>(data.caveats)} />
     </Panel>
   );
 }
@@ -573,9 +565,7 @@ export function BiliVideoContentPanel({ data }: { data: AnyRecord }) {
           <div className="compact-list">{list<string>(data.analysis_plan).map((n, i) => <span key={i}>{n}</span>)}</div>
         </>
       )}
-      {list<string>(data.caveats).length > 0 && (
-        <div className="caveats">{list<string>(data.caveats).map((n, i) => <span key={i}>{n}</span>)}</div>
-      )}
+      <Meta notes={list<string>(data.caveats)} />
     </Panel>
   );
 }
@@ -637,9 +627,7 @@ export function VideoFramePanel({ data }: { data: AnyRecord }) {
           </div>
         </>
       )}
-      {list<string>(data.caveats).length > 0 && (
-        <div className="caveats">{list<string>(data.caveats).map((n, i) => <span key={i}>{n}</span>)}</div>
-      )}
+      <Meta notes={list<string>(data.caveats)} />
     </Panel>
   );
 }

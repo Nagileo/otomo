@@ -2,7 +2,7 @@
 
 // 产品聚合域面板：月报、作品档案、驾驶舱分区、音乐主题曲、周报。
 
-import { type AnyRecord, type ShareSnapshotType, type ShareSnapshotHandler, list, text, Badge, Panel, EmptyHint, ShareSnapshotButton } from "./shared";
+import { type AnyRecord, type ShareSnapshotType, type ShareSnapshotHandler, list, text, Badge, Panel, EmptyHint, ShareSnapshotButton , Meta } from "./shared";
 import { _wrapText } from "./report";
 
 export function MonthlyWatchReportPanel({ data, onShareSnapshot }: { data: AnyRecord; onShareSnapshot?: ShareSnapshotHandler }) {
@@ -104,9 +104,7 @@ export function MonthlyWatchReportPanel({ data, onShareSnapshot }: { data: AnyRe
       </div>
       <div className="section-title">搁置/抛弃观察</div>
       {renderSubjectCards("搁置/抛弃观察", 8)}
-      {list<string>(data.caveats).length > 0 && (
-        <div className="caveats">{list<string>(data.caveats).map((n, i) => <span key={i}>{n}</span>)}</div>
-      )}
+      <Meta notes={list<string>(data.caveats)} />
     </Panel>
   );
 }
@@ -244,7 +242,7 @@ export function ProductSectionsPanel({
         </>
       )}
       {list<string>(data.caveats || data.notes).length > 0 && (
-        <div className="caveats">{list<string>(data.caveats || data.notes).map((n, i) => <span key={i}>{n}</span>)}</div>
+        <Meta notes={list<string>(data.caveats || data.notes)} />
       )}
     </Panel>
   );
@@ -391,9 +389,7 @@ export function SubjectDossierPanel({ data, onShareSnapshot }: { data: AnyRecord
       {list<string>(data.quick_actions).length > 0 && (
         <div className="followups">{list<string>(data.quick_actions).map((q, i) => <span className="chip ghost" key={i}>{q}</span>)}</div>
       )}
-      {list<string>(data.caveats).length > 0 && (
-        <div className="caveats">{list<string>(data.caveats).map((n, i) => <span key={i}>{n}</span>)}</div>
-      )}
+      <Meta notes={list<string>(data.caveats)} />
     </Panel>
   );
 }
@@ -428,12 +424,8 @@ export function AnimeMusicThemesPanel({ data }: { data: AnyRecord }) {
           );
         })}
       </div>
-      {list<string>(data.notes).length > 0 && (
-        <div className="caveats">{list<string>(data.notes).map((n, i) => <span key={i}>{n}</span>)}</div>
-      )}
-      {list<string>(data.caveats).length > 0 && (
-        <div className="caveats">{list<string>(data.caveats).map((n, i) => <span key={i}>{n}</span>)}</div>
-      )}
+      <Meta notes={list<string>(data.notes)} />
+      <Meta notes={list<string>(data.caveats)} />
     </Panel>
   );
 }
@@ -455,9 +447,7 @@ export function AnimeThemesPanel({ data }: { data: AnyRecord }) {
           </a>
         ))}
       </div>
-      {list<string>(data.notes).length > 0 && (
-        <div className="caveats">{list<string>(data.notes).map((n, i) => <span key={i}>{n}</span>)}</div>
-      )}
+      <Meta notes={list<string>(data.notes)} />
     </Panel>
   );
 }
@@ -499,9 +489,7 @@ export function WeeklyDigestPanel({ data }: { data: AnyRecord }) {
           <div className="compact-list">{list<string>(data.next_actions).map((n, i) => <span key={i}>{n}</span>)}</div>
         </>
       )}
-      {list<string>(data.caveats).length > 0 && (
-        <div className="caveats">{list<string>(data.caveats).map((n, i) => <span key={i}>{n}</span>)}</div>
-      )}
+      <Meta notes={list<string>(data.caveats)} />
     </Panel>
   );
 }

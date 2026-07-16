@@ -669,3 +669,42 @@ def test_omikuji_deterministic_and_quiz_shape():
     for question in q.data.questions:
         assert len(question.options) == 4 and len(set(question.options)) == 4
         assert 0 <= question.answer_index < 4
+
+
+def test_bili_title_match_sequel_guard():
+    """B站正版查证的标题校验：续作编号/季数差异必须丢弃，防止把 WA1 当 WA2 的正版入口。"""
+    from otomo.tools.watch.tool import _bili_title_match
+
+    # 精确匹配（em 高亮标签剥除 + 全半角标点归一）
+    conf, _ = _bili_title_match("孤独摇滚！", "", {"title": "<em>孤独摇滚</em>！", "org_title": ""})
+    assert conf == 0.92
+    # 续作编号 diff → 丢弃（中文与日文 org_title 两条路径都得堵住）
+    conf, _ = _bili_title_match("白色相簿2", "WHITE ALBUM2", {"title": "白色相簿 下半篇章", "org_title": "WHITE ALBUM"})
+    assert conf == 0.0
+    conf, _ = _bili_title_match("摇曳露营△", "", {"title": "摇曳露营△ 第二季", "org_title": ""})
+    assert conf == 0.0
+    # 非续作后缀（外传/篇章）近似可接受
+    conf, why = _bili_title_match("紫罗兰永恒花园", "", {"title": "紫罗兰永恒花园 外传", "org_title": ""})
+    assert conf > 0 and "近似" in why
+
+
+def test_append_missing_anchors():
+    """交付物工具调了但正文缺锚 → 末尾补锚；已有锚/非交付物工具不重复注。"""
+    from otomo.agent._common import append_missing_anchors
+
+    msgs = [
+        {"role": "user", "content": "我的年度报告"},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "1", "type": "function", "function": {"name": "monthly_watch_report", "arguments": "{}"}},
+            {"id": "2", "type": "function", "function": {"name": "search_subjects", "arguments": "{}"}},
+        ]},
+        {"role": "tool", "content": "..."},
+    ]
+    out = append_missing_anchors("今年你看了很多番。", msgs)
+    assert "[[panel:monthly_watch_report]]" in out
+    assert "search_subjects" not in out  # 非交付物不注
+    # 已有锚（含带 anchor 变体）不重复
+    out2 = append_missing_anchors("总结。\n[[panel:monthly_watch_report]]", msgs)
+    assert out2.count("[[panel:monthly_watch_report") == 1
+    # 没调交付物 → 原样
+    assert append_missing_anchors("你好", [{"role": "user", "content": "hi"}]) == "你好"

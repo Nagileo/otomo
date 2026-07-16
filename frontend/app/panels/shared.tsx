@@ -117,6 +117,30 @@ export function EmptyHint({ text }: { text: string }) {
   return <div className="empty-hint">{text}</div>;
 }
 
+/** 工程字段统一收纳：caveats/映射告警/来源声明折叠成"数据说明"，默认收起（开发模式 CSS 自动摊开）。 */
+export function Meta({ notes, label = "数据说明" }: { notes: (string | undefined | null)[]; label?: string }) {
+  const rows = notes.map((n) => String(n ?? "").trim()).filter(Boolean);
+  if (!rows.length) return null;
+  return (
+    <details className="panel-meta">
+      <summary>{label}（{rows.length}）</summary>
+      <div className="panel-meta-body">
+        {rows.map((n, i) => <span key={i}>{n}</span>)}
+      </div>
+    </details>
+  );
+}
+
+/** 大数字：一眼一个结论。 */
+export function Stat({ value, label, tone = "" }: { value: ReactNode; label: string; tone?: string }) {
+  return (
+    <span className={`stat-big ${tone}`}>
+      <span className="stat-value">{value}</span>
+      <span className="stat-label">{label}</span>
+    </span>
+  );
+}
+
 export type ShareSnapshotType = "subject_dossier" | "watch_order" | "monthly_report" | "yearly_wrapped" | "season_guide" | "watch_cockpit";
 export type ShareSnapshotHandler = (req: {
   type: ShareSnapshotType;

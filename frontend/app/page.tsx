@@ -1342,7 +1342,7 @@ export default function Home() {
   const panelHandlers: PanelHandlers = { ...panelHandlerProps, devMode: evidenceMode === "dev" };
 
   return (
-    <div className="wrap">
+    <div className={`wrap mode-${evidenceMode}`}>
       <div className="topbar">
         <div>
           <div className="title">Otomo · 番组搭子</div>

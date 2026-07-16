@@ -6,7 +6,7 @@
 // 新媒体域面板一律写在本文件。
 
 import { useState } from "react";
-import { Badge, Panel, list, text, type AnyRecord } from "./shared";
+import { Badge, Panel, list, text, type AnyRecord , Meta } from "./shared";
 import { type ShareSnapshotHandler, type PrepareWriteHandler, type PrepareDownloaderHandler, fmtScore, clsBySignal, pct, EmptyHint, ShareSnapshotButton } from "./shared";
 
 export function TrendingPanel({ data }: { data: AnyRecord }) {
@@ -263,12 +263,16 @@ export function ReviewEvidencePanel({ data }: { data: AnyRecord }) {
   const groups = list(data.source_groups);
   return (
     <Panel
-      title={`评价证据 · ${text(data.title)}`}
-      subtitle={`${text(data.subject_type)} · 置信度 ${text(data.confidence, "low")} · 剧透 ${text(data.spoiler_level, "none")}`}
+      title={`口碑速览 · ${text(data.title)}`}
+      subtitle={text(data.subject_type)}
     >
       <div className="evidence-row">
-        <Badge tone={clsBySignal(data.confidence)}>confidence: {text(data.confidence, "low")}</Badge>
-        <Badge tone={data.spoiler_level === "none" ? "good" : "warn"}>spoiler: {text(data.spoiler_level, "none")}</Badge>
+        <Badge tone={clsBySignal(data.confidence)}>
+          {String(data.confidence) === "high" ? "样本充足" : String(data.confidence) === "medium" ? "样本一般" : "样本偏少，仅供参考"}
+        </Badge>
+        <Badge tone={data.spoiler_level === "none" ? "good" : "warn"}>
+          {data.spoiler_level === "none" ? "无剧透" : `剧透 ${text(data.spoiler_level)}`}
+        </Badge>
       </div>
       {data.consensus && <p className="evidence-copy">{data.consensus}</p>}
 
@@ -358,9 +362,7 @@ export function ReviewEvidencePanel({ data }: { data: AnyRecord }) {
         </div>
       )}
 
-      {list<string>(data.caveats).length > 0 && (
-        <div className="caveats">{list<string>(data.caveats).map((c, i) => <span key={i}>{c}</span>)}</div>
-      )}
+      <Meta notes={list<string>(data.caveats)} />
     </Panel>
   );
 }
@@ -415,9 +417,7 @@ export function SourceRoutingPanel({ data }: { data: AnyRecord }) {
           </div>
         </>
       )}
-      {list<string>(data.caveats).length > 0 && (
-        <div className="caveats">{list<string>(data.caveats).map((n, i) => <span key={i}>{n}</span>)}</div>
-      )}
+      <Meta notes={list<string>(data.caveats)} />
     </Panel>
   );
 }
@@ -597,7 +597,7 @@ export function WhereToWatchPanel({ data }: { data: AnyRecord }) {
             <a className="rating-card" href={src.url} target="_blank" rel="noreferrer" key={`${src.url}-${i}`}>
               <div className="rating-source">{text(src.label)}</div>
               <div className="card-meta">{text(src.source)} · {list<string>(src.regions).join("/") || "region unknown"}</div>
-              <Badge tone={src.confidence >= 0.8 ? "good" : "warn"}>match {pct(src.confidence)}</Badge>
+              <Badge tone={src.confidence >= 0.8 ? "good" : "warn"}>{src.confidence >= 0.8 ? "对齐可靠" : "对齐存疑"}</Badge>
               {src.note && <p className="card-note">{text(src.note)}</p>}
             </a>
           ))}
@@ -620,9 +620,7 @@ export function WhereToWatchPanel({ data }: { data: AnyRecord }) {
       {list<string>(data.mapping_notes).length > 0 && (
         <p className="card-note">{list<string>(data.mapping_notes).join(" · ")}</p>
       )}
-      {list<string>(data.caveats).length > 0 && (
-        <div className="caveats">{list<string>(data.caveats).map((c, i) => <span key={i}>{c}</span>)}</div>
-      )}
+      <Meta notes={list<string>(data.caveats)} />
     </Panel>
   );
 }
@@ -682,7 +680,7 @@ export function ReleaseFeedsPanel({ data, onPrepareDownloaderPush }: { data: Any
       subtitle={`Mikan ${list(data.mikan_ids).length} 映射 · ${groups.length} 组 · 兜底 ${fallback.length} 条`}
     >
       <div className="evidence-row">
-        <Badge tone={data.mapping_confidence >= 0.8 ? "good" : "warn"}>mapping {pct(data.mapping_confidence)}</Badge>
+        <Badge tone={data.mapping_confidence >= 0.8 ? "good" : "warn"}>{data.mapping_confidence >= 0.8 ? "外站对齐可靠" : "外站对齐存疑"}</Badge>
         <Badge tone="warn">link aggregation only</Badge>
       </div>
       {groups.length ? (
@@ -751,9 +749,7 @@ export function ReleaseFeedsPanel({ data, onPrepareDownloaderPush }: { data: Any
           </div>
         </>
       )}
-      {list<string>(data.caveats).length > 0 && (
-        <div className="caveats">{list<string>(data.caveats).map((c, i) => <span key={i}>{c}</span>)}</div>
-      )}
+      <Meta notes={list<string>(data.caveats)} />
     </Panel>
   );
 }
@@ -795,9 +791,7 @@ export function BangumiIndexPanel({ data, onPrepareWrite }: { data: AnyRecord; o
           </a>
         ))}
       </div>
-      {list<string>(data.notes).length > 0 && (
-        <div className="caveats">{list<string>(data.notes).map((n, i) => <span key={i}>{n}</span>)}</div>
-      )}
+      <Meta notes={list<string>(data.notes)} />
     </Panel>
   );
 }
@@ -970,9 +964,7 @@ export function SeasonGuidePanel({
           </div>
         </>
       )}
-      {list<string>(data.notes).length > 0 && (
-        <div className="caveats">{list<string>(data.notes).map((n, i) => <span key={i}>{n}</span>)}</div>
-      )}
+      <Meta notes={list<string>(data.notes)} />
     </Panel>
   );
 }
@@ -1090,9 +1082,7 @@ export function BroadcastCalendarPanel({ data, onPrepareWrite }: { data: AnyReco
       ) : (
         <EmptyHint text="没有拿到放送条目；如果只看自己的列表，可能需要登录或公开收藏" />
       )}
-      {list<string>(data.notes).length > 0 && (
-        <div className="caveats">{list<string>(data.notes).map((n, i) => <span key={i}>{n}</span>)}</div>
-      )}
+      <Meta notes={list<string>(data.notes)} />
     </Panel>
   );
 }
@@ -1132,9 +1122,7 @@ export function AiringProgressPanel({ data }: { data: AnyRecord }) {
       ) : (
         <EmptyHint text="没有拿到在看进度；可能收藏列表为空、私有，或这些条目没有正片 airdate" />
       )}
-      {list<string>(data.notes).length > 0 && (
-        <div className="caveats">{list<string>(data.notes).map((n, i) => <span key={i}>{n}</span>)}</div>
-      )}
+      <Meta notes={list<string>(data.notes)} />
     </Panel>
   );
 }
@@ -1170,9 +1158,7 @@ export function EpisodeRadarPanel({ data }: { data: AnyRecord }) {
           </div>
         ))}
       </div>
-      {list<string>(data.notes).length > 0 && (
-        <div className="caveats">{list<string>(data.notes).map((n, i) => <span key={i}>{n}</span>)}</div>
-      )}
+      <Meta notes={list<string>(data.notes)} />
     </Panel>
   );
 }
@@ -1197,9 +1183,7 @@ export function ExplorerPanel({ data }: { data: AnyRecord }) {
           </a>
         ))}
       </div>
-      {list<string>(data.notes).length > 0 && (
-        <div className="caveats">{list<string>(data.notes).map((nt, i) => <span key={i}>{nt}</span>)}</div>
-      )}
+      <Meta notes={list<string>(data.notes)} />
     </Panel>
   );
 }

@@ -7,6 +7,18 @@
   --accent: #7aa2f7;
   --green: #9ece6a;
   --red: #f7768e;
+  /* 设计 token：面板一律取这里，不再手拍魔法数 */
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-md: 13px;
+  --fs-lg: 15px;
+  --fs-xl: 19px;
+  --fs-stat: 28px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --gap-sm: 6px;
+  --gap-md: 10px;
+  --gap-lg: 16px;
 }
 
 * { box-sizing: border-box; }
@@ -520,6 +532,38 @@ button:disabled { opacity: .5; cursor: default; }
   background: #0c0e13; color: var(--dim); font-size: 12px;
 }
 .quiet-detail summary { cursor: pointer; }
+
+/* 工程字段统一收纳：caveats/映射告警/来源声明折叠进"数据说明"，可达但不打扰。
+   （旧的 user-mode display:none 只对底部 evidence-stack 生效，inline 锚定面板管不到，
+   且全藏会把"结果不完整"这类关键提示一起弄丢——Meta 折叠替代之。）*/
+.panel-meta {
+  margin-top: var(--gap-md); font-size: var(--fs-sm); color: var(--dim);
+}
+.panel-meta > summary {
+  cursor: pointer; user-select: none; font-size: var(--fs-xs); opacity: .75;
+  list-style: none; display: inline-flex; align-items: center; gap: 4px;
+}
+.panel-meta > summary::-webkit-details-marker { display: none; }
+.panel-meta > summary::before { content: "ⓘ"; }
+.panel-meta > summary:hover { color: var(--accent); opacity: 1; }
+.panel-meta[open] > summary { margin-bottom: 6px; }
+.panel-meta .panel-meta-body { display: grid; gap: 5px; }
+.panel-meta .panel-meta-body span {
+  padding: 5px 8px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: #0c0e13; line-height: 1.5; overflow-wrap: anywhere;
+}
+/* 开发模式下自动摊开，方便调试 */
+.mode-dev .panel-meta .panel-meta-body { display: grid !important; }
+.mode-dev .panel-meta > summary { display: none; }
+
+/* 大数字：一眼一个结论 */
+.stat-big { display: inline-flex; flex-direction: column; gap: 2px; min-width: 72px; }
+.stat-big .stat-value { font-size: var(--fs-stat); font-weight: 800; line-height: 1.1; }
+.stat-big .stat-label { font-size: var(--fs-xs); color: var(--dim); }
+.stat-big.good .stat-value { color: var(--green); }
+.stat-big.warn .stat-value { color: #e0af68; }
+.stat-big.bad .stat-value { color: var(--red); }
+.stat-row { display: flex; flex-wrap: wrap; gap: var(--gap-lg); align-items: flex-end; margin: var(--gap-md) 0; }
 .ocr-block {
   margin: 0; max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
   padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: #0c0e13;
@@ -738,9 +782,9 @@ a.card-title:hover { color: var(--accent); }
 }
 .compact-subject small { display: block; color: var(--dim); font-size: 11px; margin-top: 2px; }
 
-.season-card, .rec-card { display: grid; grid-template-columns: 62px 1fr; gap: 9px; min-width: 0; }
+.season-card, .rec-card { display: grid; grid-template-columns: 84px 1fr; gap: 11px; min-width: 0; }
 .season-card img, .season-noimg, .rec-card img, .rec-noimg {
-  width: 62px; height: 86px; object-fit: cover; border-radius: 6px; background: #20242e;
+  width: 84px; height: 118px; object-fit: cover; border-radius: var(--radius-sm); background: #20242e;
 }
 .season-main, .rec-body { min-width: 0; }
 .title-link { color: var(--text); text-decoration: none; }

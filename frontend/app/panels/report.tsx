@@ -3,7 +3,7 @@
 // 报告域面板：口味报告（含卡片导出）、收藏仪表盘。
 
 import { useState } from "react";
-import { type AnyRecord, list, text, pct, Badge, Panel, EmptyHint } from "./shared";
+import { type AnyRecord, list, text, pct, Badge, Panel, EmptyHint , Meta } from "./shared";
 
 export function _wrapText(ctx: CanvasRenderingContext2D, content: string, x: number, y: number, maxW: number, lh: number): number {
   let line = "";
@@ -92,9 +92,7 @@ export function TasteReportPanel({ data }: { data: AnyRecord }) {
           </div>
         </div>
       )}
-      {list<string>(data.caveats).length > 0 && (
-        <div className="caveats">{list<string>(data.caveats).map((n, i) => <span key={i}>{n}</span>)}</div>
-      )}
+      <Meta notes={list<string>(data.caveats)} />
     </Panel>
   );
 }
@@ -371,9 +369,7 @@ export function CollectionDashboardPanel({ data }: { data: AnyRecord }) {
       <div className="compact-list">
         {list<string>(data.recommendations_for_next_step).map((x, i) => <span key={i}>{x}</span>)}
       </div>
-      {list<string>(data.caveats).length > 0 && (
-        <div className="caveats">{list<string>(data.caveats).map((n, i) => <span key={i}>{n}</span>)}</div>
-      )}
+      <Meta notes={list<string>(data.caveats)} />
     </Panel>
   );
 }

@@ -1,19 +1,122 @@
 """Official watch-source aggregation tools."""
 from __future__ import annotations
 
+import re
 from datetime import date
 from typing import Literal
 from urllib.parse import quote
 
+import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from ...agent._common import emit_tool_progress
 from ...agent.contracts import Citation, Tool, ToolResult
+from ...config import settings
+from .._cache import acached
 from ..bangumi.client import SUBJECT_TYPE, BangumiClient
 from ..bangumi.models import SubjectBrief
 from ..season.tool import _match_yuc
 from ..yuc.tool import ListYucSeasonTool, YucSeasonArgs
 from .data import find_item, load_bangumi_data, official_sites_for_item
+
+# ── B 站正版查证（media_bangumi 检索，替代原"甩搜索框"兜底）────────────────
+# 该端点无 buvid3 cookie 时返回非 JSON 风控页，需先经 finger/spi 领指纹。
+_BILI_SEARCH_API = "https://api.bilibili.com/x/web-interface/search/type"
+_BILI_SPI_API = "https://api.bilibili.com/x/frontend/finger/spi"
+_BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
+_EM_TAG_RE = re.compile(r"</?em[^>]*>")
+_TITLE_NOISE_RE = re.compile(r"[\s!！?？。．.,，、·:：;；~～\-—_～『』「」《》()（）\[\]【】'\"…]+")
+
+_buvid_cache: dict[str, str] = {}
+
+
+def _norm_bili_title(s: str) -> str:
+    return _TITLE_NOISE_RE.sub("", _EM_TAG_RE.sub("", s or "")).lower()
+
+
+_SEQUEL_MARK_RE = re.compile(r"[0-9０-９ⅡⅢⅣⅤ]|[季期部篇章]$|第[一二三四五六七八九十]")
+
+
+def _bili_title_match(query_cn: str, query_jp: str, hit: dict) -> tuple[float, str]:
+    """标题相似度分级，防错配（实测『白色相簿2』会搜出《白色相簿》上下篇，
+    且日文 org_title 'WHITE ALBUM' ⊂ 'WHITE ALBUM2' 只差一个续作编号）。
+
+    包含匹配时若 diff 部分含数字/季标 → 是不同季/续作，丢弃。
+    返回 (confidence, 匹配说明)；0 = 丢弃。
+    """
+    hit_title = _norm_bili_title(str(hit.get("title") or ""))
+    hit_org = _norm_bili_title(str(hit.get("org_title") or ""))
+    best: tuple[float, str] = (0.0, "")
+    for q in filter(None, (_norm_bili_title(query_cn), _norm_bili_title(query_jp))):
+        for h in filter(None, (hit_title, hit_org)):
+            if q == h:
+                return 0.92, "标题精确匹配"
+            if q in h or h in q:
+                longer, shorter = (q, h) if len(q) >= len(h) else (h, q)
+                diff = longer.replace(shorter, "", 1)
+                if _SEQUEL_MARK_RE.search(diff):
+                    continue  # 差在续作编号/季数上 = 不同作品
+                conf = 0.8 if len(diff) <= 4 else 0.62
+                why = "标题近似匹配" if conf == 0.8 else "标题部分匹配（请确认篇章）"
+                if conf > best[0]:
+                    best = (conf, why)
+    return best
+
+
+@acached(ttl=6 * 3600)
+async def _bili_bangumi_search(keyword: str) -> list[dict]:
+    """media_bangumi 检索原始命中；风控/网络失败向上抛，由调用方降级。"""
+    async with httpx.AsyncClient(
+        timeout=settings.http_timeout,
+        headers={"User-Agent": _BROWSER_UA, "Referer": "https://www.bilibili.com/"},
+    ) as c:
+        if "b3" not in _buvid_cache:
+            spi = await c.get(_BILI_SPI_API)
+            b3 = str(((spi.json().get("data") or {}).get("b_3")) or "")
+            if b3:
+                _buvid_cache["b3"] = b3
+        r = await c.get(
+            _BILI_SEARCH_API,
+            params={"search_type": "media_bangumi", "keyword": keyword, "page": 1},
+            cookies={"buvid3": _buvid_cache.get("b3", "")},
+        )
+        r.raise_for_status()
+        data = r.json()
+        code = data.get("code", 0)
+        if code not in (0, None):
+            raise ValueError(f"bilibili code={code}: {data.get('message') or ''}")
+        return list((data.get("data") or {}).get("result") or [])
+
+
+async def _bili_verified_sources(title: str, title_jp: str) -> tuple[list[WatchSource], list[str], bool]:
+    """返回 (已验证正版源, notes, api_ok)。api_ok=False 时调用方给搜索链接降级。"""
+    try:
+        hits = await _bili_bangumi_search(title)
+    except Exception as e:  # noqa: BLE001
+        return [], [f"B站番剧检索暂不可用（{type(e).__name__}），已降级为搜索入口。"], False
+    sources: list[WatchSource] = []
+    for hit in hits[:6]:
+        conf, why = _bili_title_match(title, title_jp, hit)
+        if conf <= 0:
+            continue
+        clean = _EM_TAG_RE.sub("", str(hit.get("title") or "")).strip()
+        badges = " / ".join(str(b.get("text")) for b in (hit.get("badges") or []) if b.get("text"))
+        ms = hit.get("media_score") or {}
+        score_txt = f"；站内评分 {ms['score']}（{ms.get('user_count', 0)}人）" if ms.get("score") else ""
+        sources.append(
+            WatchSource(
+                label=f"Bilibili 正版：{clean}",
+                url=str(hit.get("url") or f"https://www.bilibili.com/bangumi/play/ss{hit.get('season_id')}"),
+                source="bilibili_verified",
+                site="bilibili",
+                regions=["CN"],
+                official=True,
+                confidence=conf,
+                note=f"{why}{'；' + badges if badges else ''}{score_txt}",
+            )
+        )
+    sources.sort(key=lambda x: -x.confidence)
+    return sources[:4], [f"B站番剧检索：{len(hits)} 命中，{len(sources)} 条通过标题校验"], True
 
 
 class WatchSource(BaseModel):
@@ -243,19 +346,32 @@ class WhereToWatchTool(Tool):
                 x.label,
             )
         )
-        search_q = quote(title)
-        search_fallbacks = [
-            WatchSource(
-                label="Bilibili 搜索",
-                url=f"https://search.bilibili.com/all?keyword={search_q}",
-                source="bilibili_search",
-                site="bilibili",
-                regions=["CN"],
-                official=False,
-                confidence=0.35,
-                note="搜索兜底；需用户自行判断是否为正版番剧页。",
+        # B 站正版查证：查得到给 ss 直达 + 徽章，查不到明确说"无正版"，仅接口故障时才退回搜索框
+        bili_sources, bili_notes, bili_api_ok = await _bili_verified_sources(title, subject.name or "")
+        notes.extend(bili_notes)
+        caveats_extra: list[str] = []
+        search_fallbacks: list[WatchSource] = []
+        if bili_sources:
+            def _ss_id(url: str) -> str:
+                m = re.search(r"/(ss\d+)", url)
+                return m.group(1) if m else url
+            known = {_ss_id(x.url) for x in official_sources if x.site == "bilibili"}
+            official_sources.extend(x for x in bili_sources if _ss_id(x.url) not in known)
+        elif bili_api_ok:
+            caveats_extra.append(f"B站番剧库检索未见《{title}》正版（可能未引进或已下架），不再提供搜索兜底以免误导。")
+        else:
+            search_fallbacks.append(
+                WatchSource(
+                    label="Bilibili 搜索",
+                    url=f"https://search.bilibili.com/all?keyword={quote(title)}",
+                    source="bilibili_search",
+                    site="bilibili",
+                    regions=["CN"],
+                    official=False,
+                    confidence=0.35,
+                    note="B站检索接口暂不可用，此为站内搜索入口；请自行确认是否为正版番剧页。",
+                )
             )
-        ]
         await emit_tool_progress(tool=self.name, summary=f"观看入口完成：{len(official_sources)} 个官方候选", current=4, total=4)
         result = WhereToWatchResult(
             subject_id=subject.id,
@@ -268,8 +384,9 @@ class WhereToWatchTool(Tool):
             offline_hint=True,
             mapping_notes=notes,
             caveats=[
-                "平台版权和上架地区会变化；结果来自 bangumi-data/yuc 缓存与当前搜索入口。",
-                "Otomo 只提供正版入口和搜索兜底，不代理播放、不抓取视频内容。",
+                *caveats_extra,
+                "平台版权和上架地区会变化；结果来自 bangumi-data/yuc 缓存与 B站番剧库实时检索。",
+                "Otomo 只提供正版入口，不代理播放、不抓取视频内容。",
                 "找不到正版入口时，可询问离线 RSS/BD 资源聚合；那会作为 link aggregation 单独处理。",
             ],
         )

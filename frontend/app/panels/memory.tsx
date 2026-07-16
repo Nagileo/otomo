@@ -3,7 +3,7 @@
 // 记忆/计划域面板：长期记忆、计划板、决策与通知类证据。
 // 既有面板（Memory/WatchPlan/写回确认流相关）后续搬迁至此；新记忆域面板一律写在本文件。
 
-import { Badge, Panel, list, text, type AnyRecord } from "./shared";
+import { Badge, Panel, list, text, type AnyRecord , Meta } from "./shared";
 import { type SpoilerState, type MemoryState, pct, sourceTone, EmptyHint } from "./shared";
 
 const KIND_LABEL: Record<string, string> = {
@@ -455,9 +455,7 @@ export function ClaimCheckPanel({ data }: { data: AnyRecord }) {
       ) : (
         <EmptyHint text="最终答案没有切出可校验 claim" />
       )}
-      {list<string>(data.caveats).length > 0 && (
-        <div className="caveats">{list<string>(data.caveats).map((c, i) => <span key={i}>{c}</span>)}</div>
-      )}
+      <Meta notes={list<string>(data.caveats)} />
     </Panel>
   );
 }
