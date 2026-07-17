@@ -268,6 +268,33 @@ def _eps_value(value) -> int | None:
     return n if n > 0 else None
 
 
+def _semantic_scores(user_texts: list[str], cand_texts: list[str]) -> list[float]:
+    """bge 语义相似：用户高分作品文本的均值向量 vs 每个候选，池内 min-max 归一到 [0,1]。
+
+    文本 = 名称 + 社区标签（标签才是口味语义的载体）。同步 CPU 计算（bge-small ~百毫秒级），
+    调用方走 asyncio.to_thread；模型缺失/加载失败由调用方捕获降级。
+    """
+    from .._rag import _embedder
+
+    emb = _embedder()
+    uvecs = emb.encode(user_texts, normalize_embeddings=True)
+    uvec = uvecs.mean(axis=0)
+    norm = (uvec ** 2).sum() ** 0.5
+    if norm > 0:
+        uvec = uvec / norm
+    cvecs = emb.encode(cand_texts, normalize_embeddings=True)
+    sims = [float((cv * uvec).sum()) for cv in cvecs]
+    lo, hi = min(sims), max(sims)
+    if hi - lo < 1e-6:
+        return [0.0] * len(sims)
+    return [(s - lo) / (hi - lo) for s in sims]
+
+
+def _taste_text(name: str, tags: Any) -> str:
+    tag_list = [str(t) for t in (tags or []) if str(t).strip()][:8]
+    return f"{name or ''} {' '.join(tag_list)}".strip()
+
+
 def _blank(x: dict) -> dict:
     img = x.get("images") or {}
     return {
@@ -312,6 +339,7 @@ class RecommendArgs(BaseModel):
     use_series: bool = Field(True, description="系列入口回溯：若推荐项是续集而你没看前作，自动换成入口作（别莫名其妙推你第二季）")
     use_external_recall: bool = Field(True, description="game/galgame 推荐时，是否用批判空间排行做前置召回并映射回 Bangumi")
     use_curation: bool = Field(True, description="是否用精选 Bangumi 目录作为低权重策展召回")
+    use_semantic: bool = Field(True, description="bge 语义相似特征：候选与你高分作品的标签语义距离进重排（本地模型缺失时自动跳过）")
     use_friends: bool = Field(False, description="好友圈社交召回：好友们想看/高分的未看作品进候选（要抓好友收藏，较慢；用户提到好友/圈子时开启）")
     enrich_evidence: bool = Field(True, description="为推荐结果补充统一评价证据；game 会补批判空间/VNDB，默认开启")
     use_aspect_profile: bool = Field(True, description="是否读取长期记忆中的 aspect 好球区/雷区参与 rerank 与解释")
@@ -389,6 +417,22 @@ class RecommendResult(BaseModel):
     feedback_policy: dict = Field(default_factory=dict)
 
 
+class RerankWeights(BaseModel):
+    """rerank 打分权重。此前 9 个常数全是手调且从未被数据验证过——
+    提出来供 eval_recommend.py --search 离线随机搜索（HR@10/NDCG 反馈回路）。"""
+    graph_per_hit: float = 0.45     # 图谱召回每命中一个 staff/制作组
+    cf_cap: float = 1.5             # 协同信号封顶
+    external_cap: float = 0.65      # 外部证据（EGS/好友/curated）封顶
+    aspect_like: float = 0.28       # 长期好球区每命中
+    aspect_dislike: float = 0.42    # 长期雷区每命中（罚）
+    explicit_hit: float = 0.8       # 本轮显式心境命中
+    explicit_miss: float = -1.2     # 显式心境未命中（"今天想看治愈"时热血不能顶上来）
+    memory_penalty: float = -2.2    # 长期记忆避雷
+    temporary_penalty: float = -1.5 # 本轮 avoid_tags/近期负反馈
+    quality_popular: float = 1.2    # 站内口碑项（普通模式）
+    semantic: float = 0.5           # bge 语义相似（用户高分作品向量 vs 候选，池内归一）
+
+
 class RecommendTool(Tool):
     name = "recommend_subjects"
     description = (
@@ -402,9 +446,15 @@ class RecommendTool(Tool):
     args_model = RecommendArgs
     result_model = RecommendResult
 
-    def __init__(self, client: BangumiClient, ltm: LongTermMemory | None = None) -> None:
+    def __init__(
+        self,
+        client: BangumiClient,
+        ltm: LongTermMemory | None = None,
+        rerank_weights: RerankWeights | None = None,
+    ) -> None:
         self.client = client
         self.ltm = ltm
+        self.w = rerank_weights or RerankWeights()
         self.reviewer = ReviewSubjectTool(client)
         self.egs_rank = RankErogameScapeTool()
 
@@ -875,13 +925,13 @@ class RecommendTool(Tool):
 
         def graph_bonus(c: dict) -> float:
             # 图谱是弱信号（同制作组≠一定喜欢），封顶 0.9，低于协同(1.5)：协同>图谱
-            return min(len(c["graph"]), 2) * 0.45
+            return min(len(c["graph"]), 2) * self.w.graph_per_hit
 
         def cf_bonus(c: dict) -> float:
-            return min(c.get("cf", 0.0), _CF_CAP)  # 封顶，避免协同召回压过标签口味
+            return min(c.get("cf", 0.0), self.w.cf_cap)  # 封顶，避免协同召回压过标签口味
 
         def external_bonus(c: dict) -> float:
-            return min(c.get("external_boost", 0.0), 0.65)
+            return min(c.get("external_boost", 0.0), self.w.external_cap)
 
         mood_set = set(mood)
 
@@ -904,7 +954,7 @@ class RecommendTool(Tool):
             return list(dict.fromkeys(hits))[:4]
 
         def memory_penalty(c: dict) -> float:
-            return -2.2 if memory_avoidance_hits(c) else 0.0
+            return self.w.memory_penalty if memory_avoidance_hits(c) else 0.0
 
         def temporary_avoidance_hits(c: dict) -> list[str]:
             haystack = [str(x) for x in (c.get("tags") or set()) | (c.get("matched") or set())]
@@ -920,7 +970,7 @@ class RecommendTool(Tool):
             return list(dict.fromkeys(hits))[:4]
 
         def temporary_penalty(c: dict) -> float:
-            return -1.5 if temporary_avoidance_hits(c) else 0.0
+            return self.w.temporary_penalty if temporary_avoidance_hits(c) else 0.0
 
         def candidate_aspects(c: dict) -> set[str]:
             values = list(c.get("tags") or set()) + list(c.get("matched") or set())
@@ -988,12 +1038,12 @@ class RecommendTool(Tool):
                 return 0.0
             aspects = candidate_aspects(c)
             bonus = sum(
-                min(pref.weight, 1.0) * 0.28 * pref.confidence
+                min(pref.weight, 1.0) * self.w.aspect_like * pref.confidence
                 for pref in aspect_profile.likes
                 if pref.aspect in aspects
             )
             penalty = sum(
-                min(pref.weight, 1.0) * 0.42 * pref.confidence
+                min(pref.weight, 1.0) * self.w.aspect_dislike * pref.confidence
                 for pref in aspect_profile.dislikes
                 if pref.aspect in aspects
             )
@@ -1006,7 +1056,7 @@ class RecommendTool(Tool):
             """
             if not mood_set:
                 return 0.0
-            return 0.8 if c["matched"] & mood_set else -1.2
+            return self.w.explicit_hit if c["matched"] & mood_set else self.w.explicit_miss
 
         # 预排（不含质量）→ 给 top 候选补名/评分 → 终排（含质量）
         prelim = sorted(
@@ -1026,16 +1076,40 @@ class RecommendTool(Tool):
             total=6,
         )
 
-        def score(c: dict) -> float:
+        # bge 语义特征：标签召回是精确匹配（"百合"≠"GL"），语义向量补上近义/风格盲区
+        sem_scores: dict[int, float] = {}
+        if args.use_semantic and watched and prelim:
+            user_texts = [
+                _taste_text(it["subject"].get("name_cn") or it["subject"].get("name") or "",
+                            [t.get("name") for t in (it["subject"].get("tags") or []) if isinstance(t, dict)])
+                for it in sorted(watched, key=lambda x: -(x.get("rate") or 0))[:40]
+                if (it.get("subject") or {}).get("id") and int(it.get("rate") or 0) >= 7
+            ]
+            cand_pairs = [(sid, _taste_text(str(c.get("name") or ""), c.get("tags"))) for sid, c in prelim]
+            cand_pairs = [(sid, txt) for sid, txt in cand_pairs if txt]
+            if user_texts and cand_pairs:
+                try:
+                    import asyncio as _aio
+                    sims = await _aio.to_thread(_semantic_scores, user_texts, [t for _, t in cand_pairs])
+                    sem_scores = {sid: s for (sid, _), s in zip(cand_pairs, sims, strict=False)}
+                except Exception as e:  # noqa: BLE001 - 模型缺失/加载失败：静默降级不影响主链路
+                    scenario_notes.append(f"语义特征不可用（{type(e).__name__}），已按其余信号重排。")
+
+        def semantic_bonus(c: dict, sid: int) -> float:
+            return self.w.semantic * sem_scores.get(sid, 0.0)
+
+        def score(sid: int, c: dict) -> float:
             if args.niche:  # 挖冷门：协同偏热门，权重压低
                 return (0.5 * affinity(c) + 0.5 * graph_bonus(c)
                         + 0.4 * cf_bonus(c) + external_bonus(c)
                         + explicit_tag_adjust(c) + memory_penalty(c) + temporary_penalty(c)
-                        + aspect_bonus(c) + media_subtype_penalty(c) + 2.0 * _quality_niche(c["rating"]))
+                        + aspect_bonus(c) + media_subtype_penalty(c) + semantic_bonus(c, sid)
+                        + 2.0 * _quality_niche(c["rating"]))
             return (
                 affinity(c) + graph_bonus(c) + cf_bonus(c) + external_bonus(c)
                 + explicit_tag_adjust(c) + memory_penalty(c) + temporary_penalty(c)
-                + aspect_bonus(c) + media_subtype_penalty(c) + 1.2 * _quality_popular(c["rating"])
+                + aspect_bonus(c) + media_subtype_penalty(c) + semantic_bonus(c, sid)
+                + self.w.quality_popular * _quality_popular(c["rating"])
             )
 
         def cf_reason(c: dict) -> list[str]:
@@ -1046,7 +1120,7 @@ class RecommendTool(Tool):
                 return ["相似口味用户的选择"]
             return [f"看过《{names[0]}》的人也在看" + (" 等" if len(c["cf_from"]) > 1 else "")]
 
-        ranked = sorted(prelim, key=lambda kv: -score(kv[1]))
+        ranked = sorted(prelim, key=lambda kv: -score(kv[0], kv[1]))
         out: list[RecItem] = []
         seen_series: set[str] = set()
         seen_ids: set[int] = set()
@@ -1160,7 +1234,7 @@ class RecommendTool(Tool):
             reasons.extend(n for n in subtype_notes if n not in reasons)
             why_recalled, fit_points, risks, heat, next_step = explanation_parts(c, r_id, r_name, reasons, subtype_notes)
             out.append(RecItem(
-                id=r_id, name=r_name, score=round(score(c), 3),
+                id=r_id, name=r_name, score=round(score(r_id, c), 3),
                 reasons=reasons,
                 why_recalled=why_recalled,
                 fit_points=fit_points,

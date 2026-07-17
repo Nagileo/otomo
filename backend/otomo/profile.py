@@ -4,9 +4,29 @@
 """
 from __future__ import annotations
 
+import math
 from collections import Counter
+from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field
+
+# 口味漂移：按收藏更新时间指数衰减，半衰期两年；很老的收藏保底 0.15
+# （十年前的本命也是口味的一部分，但不该和上个月看的同权）。0 = 关闭。
+PROFILE_DECAY_HALF_LIFE_DAYS = 730.0
+_DECAY_FLOOR = 0.15
+
+
+def _recency_decay(updated_at: str, *, now: datetime | None = None) -> float:
+    if PROFILE_DECAY_HALF_LIFE_DAYS <= 0 or not updated_at:
+        return 1.0
+    try:
+        ts = datetime.fromisoformat(str(updated_at).replace("Z", "+00:00"))
+    except ValueError:
+        return 1.0
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    age_days = max(((now or datetime.now(timezone.utc)) - ts).total_seconds() / 86400.0, 0.0)
+    return max(math.pow(0.5, age_days / PROFILE_DECAY_HALF_LIFE_DAYS), _DECAY_FLOOR)
 
 # 媒介/来源类标签对"题材口味"是噪声（年代单独统计）；保留题材与 staff 名
 _STOP_TAGS = {
@@ -44,7 +64,8 @@ def compute_taste_profile(username: str, items: list[dict]) -> TasteProfile:
         date = subj.get("date") or ""
         if len(date) >= 4 and date[:4].isdigit():
             decades[f"{date[:3]}0s"] += 1
-        weight = rate if rate else 1  # 评分越高，其标签越能代表口味
+        # 评分越高，其标签越能代表口味；再按收藏更新时间衰减（口味漂移）
+        weight = (rate if rate else 1) * _recency_decay(str(it.get("updated_at") or ""))
         for t in subj.get("tags") or []:
             name = (t or {}).get("name")
             if name and not _is_noise(name):

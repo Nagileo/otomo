@@ -813,3 +813,43 @@ def test_friends_activity_and_csv_export(tmp_path, monkeypatch):
     assert r.data.csv_text.startswith("﻿")
     assert '"神,里面有""引号""和,逗号"' in r.data.csv_text
     assert "百合 音乐" in r.data.csv_text
+
+
+def test_profile_recency_decay():
+    """画像时间衰减：新收藏权重 > 老收藏；favorites 不受影响。"""
+    from datetime import datetime, timedelta, timezone
+
+    from otomo.profile import compute_taste_profile
+
+    now = datetime.now(timezone.utc)
+    items = [
+        {"rate": 8, "updated_at": (now - timedelta(days=10)).isoformat(),
+         "subject": {"id": 1, "name_cn": "新番", "tags": [{"name": "百合"}], "date": "2026-01-01"}},
+        {"rate": 8, "updated_at": (now - timedelta(days=3000)).isoformat(),
+         "subject": {"id": 2, "name_cn": "老番", "tags": [{"name": "机战"}], "date": "2010-01-01"}},
+        {"rate": 9, "updated_at": (now - timedelta(days=3000)).isoformat(),
+         "subject": {"id": 3, "name_cn": "老神作", "tags": [], "date": "2008-01-01"}},
+    ]
+    p = compute_taste_profile("u", items)
+    w = {t["tag"]: t["weight"] for t in p.top_tags}
+    assert w["百合"] > w["机战"]           # 同分：近期 > 久远
+    assert w["机战"] >= 8 * 0.15           # 保底不归零
+    assert "老神作" in p.favorites          # favorites 不衰减
+
+
+def test_semantic_scores_with_local_bge():
+    """bge 语义分：同口味候选 > 异口味候选（真本地模型，缺模型则跳过）。"""
+    import pytest
+
+    from otomo.tools.recommend.tool import _semantic_scores, _taste_text
+
+    try:
+        user_texts = [_taste_text("轻音少女", ["百合", "音乐", "日常", "萌"]),
+                      _taste_text("孤独摇滚！", ["百合", "音乐", "乐队", "社恐"])]
+        cand_texts = [_taste_text("吹响！悠风号", ["音乐", "吹奏部", "百合", "京都动画"]),
+                      _taste_text("进击的巨人", ["热血", "战斗", "黑暗", "巨人"])]
+        sims = _semantic_scores(user_texts, cand_texts)
+    except Exception as e:  # noqa: BLE001
+        pytest.skip(f"bge 模型不可用: {type(e).__name__}")
+    assert sims[0] > sims[1]  # 京吹（音乐百合）应比巨人（热血战斗）更像轻音+孤独摇滚
+    assert sims[0] == 1.0 and sims[1] == 0.0  # 池内 min-max 归一

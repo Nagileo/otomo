@@ -30,7 +30,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from otomo.tools.bangumi.client import BangumiClient  # noqa: E402
-from otomo.tools.recommend.tool import RecommendArgs, RecommendTool, _series_key  # noqa: E402
+from otomo.tools.recommend.tool import RecommendArgs, RecommendTool, RerankWeights, _series_key  # noqa: E402
 
 _STYPE_NUM = {"anime": 2, "book": 1, "music": 3, "game": 4, "real": 6}
 
@@ -38,11 +38,13 @@ _STYPE_NUM = {"anime": 2, "book": 1, "music": 3, "game": 4, "real": 6}
 # enrich_evidence 只补展示证据不参与排序，全关提速）
 CONFIGS: dict[str, dict[str, Any]] = {
     "纯标签": dict(use_graph=False, use_cf=False, use_aspect_profile=False,
-                   use_curation=False, use_external_recall=False),
+                   use_curation=False, use_external_recall=False, use_semantic=False),
     "+图谱": dict(use_graph=True, use_cf=False, use_aspect_profile=False,
-                  use_curation=False, use_external_recall=False),
+                  use_curation=False, use_external_recall=False, use_semantic=False),
     "全开": dict(use_graph=True, use_cf=True, use_aspect_profile=True,
-                 use_curation=True, use_external_recall=True),
+                 use_curation=True, use_external_recall=True, use_semantic=False),
+    "全开+语义": dict(use_graph=True, use_cf=True, use_aspect_profile=True,
+                      use_curation=True, use_external_recall=True, use_semantic=True),
 }
 
 
@@ -89,6 +91,142 @@ def _fmt(mean: float, std: float) -> str:
     return f"{mean:.3f}±{std:.3f}"
 
 
+def _sample_weights(rng: random.Random) -> RerankWeights:
+    """随机采样一组 rerank 权重（默认值 × log-uniform [0.4, 2.5]）。
+
+    诚实说明：离线匿名评测里 aspect/mood/memory 罚项不激活（无 LTM、无本轮对话），
+    可被离线指标观测的只有 4 个活跃权重——其余维持默认，调它们需要在线反馈数据。
+    """
+    d = RerankWeights()
+
+    def s(v: float, lo: float = 0.4, hi: float = 2.5) -> float:
+        return round(v * math.exp(rng.uniform(math.log(lo), math.log(hi))), 3)
+
+    return RerankWeights(
+        graph_per_hit=s(d.graph_per_hit),
+        cf_cap=s(d.cf_cap),
+        external_cap=s(d.external_cap),
+        quality_popular=s(d.quality_popular),
+    )
+
+
+async def eval_user(
+    client: BangumiClient,
+    username: str,
+    args: argparse.Namespace,
+    k: int,
+    rng: random.Random,
+    configs: dict[str, tuple[dict[str, Any], RerankWeights | None]],
+    *,
+    quiet: bool = False,
+) -> dict[str, list[tuple[float, float, float]]]:
+    """单用户全部 trials×configs 的 (hr, ndcg, hr_no_series)。收藏池不足返回 {}。"""
+    stype = _STYPE_NUM[args.subject_type]
+    try:
+        all_items = await client.get_all_user_collections(username, stype, None, max_items=1000)
+    except Exception as e:  # noqa: BLE001
+        if not quiet:
+            print(f"  [{username}] 收藏拉取失败 {type(e).__name__}")
+        return {}
+    pool = [
+        it for it in all_items
+        if int(it.get("rate") or 0) >= args.min_rate and (it.get("subject") or {}).get("id")
+    ]
+    if len(pool) < args.holdout + 3:
+        if not quiet:
+            print(f"  [{username}] 评分>={args.min_rate} 池仅 {len(pool)} 部，跳过")
+        return {}
+    scores: dict[str, list[tuple[float, float, float]]] = {name: [] for name in configs}
+    for _trial in range(args.trials):
+        held = rng.sample(pool, args.holdout)
+        held_ids = {int(it["subject"]["id"]) for it in held}
+        held_names = {int(it["subject"]["id"]): (it["subject"].get("name_cn") or it["subject"].get("name") or "?")
+                      for it in held}
+        profile_series: set[str] = set()
+        for it in all_items:
+            if int((it.get("subject") or {}).get("id") or 0) not in held_ids:
+                profile_series |= _series_stems(it["subject"].get("name_cn") or it["subject"].get("name") or "")
+        proxy = HoldoutClient(client, held_ids)
+        for name, (flags, weights) in configs.items():
+            tool = RecommendTool(proxy, rerank_weights=weights)
+            res = await tool.run(RecommendArgs(
+                subject_type=args.subject_type, username=username, limit=k,
+                enrich_evidence=False, **flags,
+            ))
+            if not res.ok or res.data is None:
+                scores[name].append((0.0, 0.0, 0.0))
+                continue
+            top = [int(it.id) for it in res.data.items[:k]]
+            hits = [(rank, sid) for rank, sid in enumerate(top, 1) if sid in held_ids]
+            series_hits = [sid for _, sid in hits if _series_stems(held_names.get(sid, "")) & profile_series]
+            scores[name].append((
+                len(hits) / args.holdout,
+                _ndcg_at_k([r for r, _ in hits], args.holdout, k),
+                (len(hits) - len(series_hits)) / args.holdout,
+            ))
+    return scores
+
+
+async def _multi_user_eval(args: argparse.Namespace, k: int) -> None:
+    """多用户评测/权重搜索：指标 = 全部 (user, trial) 的平均，比单用户 3 试验稳得多。"""
+    spec = json.loads(Path(args.users_file).read_text(encoding="utf-8"))
+    users = [u["username"] for u in spec.get("users") or []][: args.max_eval_users]
+    if not users:
+        sys.exit(f"{args.users_file} 里没有评测用户")
+    rng = random.Random(args.seed)
+    if args.search:
+        full_flags = CONFIGS["全开"]
+        configs: dict[str, tuple[dict[str, Any], RerankWeights | None]] = {"默认权重": (full_flags, None)}
+        for i in range(args.search):
+            configs[f"w{i + 1}"] = (full_flags, _sample_weights(rng))
+    else:
+        configs = {name: (flags, None) for name, flags in CONFIGS.items()}
+    print(f"{len(users)} 用户 × {args.trials} 试验 × {len(configs)} 配置 · hold-out {args.holdout} · K={k}\n")
+
+    agg: dict[str, list[tuple[float, float, float]]] = {name: [] for name in configs}
+    async with BangumiClient() as client:
+        for idx, user in enumerate(users, 1):
+            print(f"—— [{idx}/{len(users)}] {user}")
+            per = await eval_user(client, user, args, k, rng, configs)
+            for name, rows in per.items():
+                agg[name].extend(rows)
+
+    rows_out: list[tuple[str, float, float, float, int]] = []
+    for name, rows in agg.items():
+        if not rows:
+            continue
+        rows_out.append((
+            name,
+            statistics.mean(r[0] for r in rows),
+            statistics.mean(r[1] for r in rows),
+            statistics.mean(r[2] for r in rows),
+            len(rows),
+        ))
+    rows_out.sort(key=lambda x: -x[2])  # 按 NDCG 排
+    print(f"\n{'配置':<10}{'HR@' + str(k):<10}{'NDCG@' + str(k):<12}{'HR(去续作)':<12}{'样本':<6}")
+    for name, hr, ndcg, hrns, n in rows_out:
+        print(f"{name:<10}{hr:<10.3f}{ndcg:<12.3f}{hrns:<12.3f}{n:<6}")
+    report = {
+        "users": users, "params": vars(args),
+        "results": [
+            {"config": name, "hr": hr, "ndcg": ndcg, "hr_no_series": hrns, "samples": n,
+             "weights": (configs[name][1].model_dump() if configs[name][1] else None)}
+            for name, hr, ndcg, hrns, n in rows_out
+        ],
+    }
+    if args.search and rows_out:
+        best = rows_out[0][0]
+        if configs[best][1] is not None:
+            print(f"\n最优配置 {best}: {configs[best][1].model_dump()}")
+        else:
+            print("\n默认权重仍是最优——搜索未找到显著更好的配置（样本诚实说话）。")
+    if args.json_report:
+        out = Path(args.json_report)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"报告已写入 {out}")
+
+
 async def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--username", default="", help="不传则用当前 token 账号")
@@ -99,8 +237,15 @@ async def main() -> None:
     ap.add_argument("--k", type=int, default=10, help="top-K（受工具 limit<=20 约束）")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--json-report", default="")
+    ap.add_argument("--users-file", default="", help="多用户评测：scripts.build_eval_users 产出的 json")
+    ap.add_argument("--max-eval-users", type=int, default=12)
+    ap.add_argument("--search", type=int, default=0, help="随机搜索 N 组 rerank 权重（另含默认基线，需 --users-file）")
     args = ap.parse_args()
     k = min(args.k, 20)
+
+    if args.users_file:
+        await _multi_user_eval(args, k)
+        return
 
     async with BangumiClient() as client:
         username = args.username or (await client.get_me())["username"]
