@@ -715,6 +715,130 @@ class CompareSubjectsTool(Tool):
         return ToolResult(ok=True, data=result, sources=sources)
 
 
+class EpisodeBuzzScanArgs(BaseModel):
+    username: str | None = Field(None, description="不传用当前账号")
+    days: int = Field(7, ge=1, le=30, description="回看窗口：最近 N 天播出的集")
+    min_comments: int = Field(30, ge=5, description="进入候选的最低评论数（防小数噪声）")
+    ratio: float = Field(1.8, ge=1.1, description="超过该番历史集评论中位数的倍数才算爆")
+    limit: int = Field(10, ge=1, le=20)
+
+
+class BuzzHit(BaseModel):
+    subject_id: int
+    subject_name: str
+    ep_id: int
+    sort: float
+    ep_name: str = ""
+    airdate: str = ""
+    comments: int
+    baseline: float | None = None    # 该番历史已播集评论中位数；首集无基线
+    ratio: float | None = None
+    url: str
+
+
+class EpisodeBuzzScanResult(BaseModel):
+    username: str
+    checked_subjects: int = 0
+    hits: list[BuzzHit] = Field(default_factory=list)
+    caveats: list[str] = Field(default_factory=list)
+
+
+class ScanMyEpisodeBuzzTool(Tool):
+    name = "scan_my_episode_buzz"
+    description = (
+        "扫描我在看的番最近播出的集，找评论量对比该番历史基线突增的『爆点集』。"
+        "用户问'这周我追的番哪集突然火了/最近哪集炸了/有没有名场面'时用。"
+        "只用 Bangumi 分集评论计数（零抓取），不读评论内容。"
+    )
+    args_model = EpisodeBuzzScanArgs
+    result_model = EpisodeBuzzScanResult
+
+    def __init__(self, client: BangumiClient) -> None:
+        self.client = client
+
+    async def run(self, args: EpisodeBuzzScanArgs) -> ToolResult[EpisodeBuzzScanResult]:
+        from datetime import date, timedelta
+        from statistics import median
+
+        username = args.username
+        if not username:
+            try:
+                me = await self.client.get_me()
+                username = me.get("username") or str(me.get("id"))
+            except Exception:  # noqa: BLE001
+                return ToolResult(ok=False, error="需要登录（扫描的是你的在看列表）")
+        items = await self.client.get_all_user_collections(username, 2, 3, max_items=60)
+        subjects = [
+            (int(it["subject"]["id"]), it["subject"].get("name_cn") or it["subject"].get("name") or "")
+            for it in items if (it.get("subject") or {}).get("id")
+        ]
+        if not subjects:
+            return ToolResult(ok=False, error="在看列表为空，没有可扫描的番")
+        today = date.today()
+        since = today - timedelta(days=args.days)
+
+        async def scan_one(sid: int, name: str) -> list[BuzzHit]:
+            raw = await self.client.get_episodes(sid, ep_type=0, limit=200)
+            aired: list[dict] = []
+            for ep in raw.get("data") or []:
+                ad = str(ep.get("airdate") or "")
+                try:
+                    d = date.fromisoformat(ad[:10])
+                except ValueError:
+                    continue
+                if d <= today and ep.get("id"):
+                    aired.append({"id": int(ep["id"]), "sort": float(ep.get("sort") or 0),
+                                  "name": str(ep.get("name_cn") or ep.get("name") or ""),
+                                  "date": d, "c": int(ep.get("comment") or 0)})
+            recent = [e for e in aired if e["date"] >= since]
+            history = [e["c"] for e in aired if e["date"] < since]
+            base = float(median(history)) if history else None
+            if base is None and len(recent) > 1:
+                # 新开播无基线：只看最新一集，避免前几集全进"开播即热"刷屏
+                recent = [max(recent, key=lambda e: e["date"])]
+            out: list[BuzzHit] = []
+            for e in recent:
+                if e["c"] < args.min_comments:
+                    continue
+                if base and base > 0:
+                    r = e["c"] / base
+                    if r < args.ratio:
+                        continue
+                elif e["c"] < args.min_comments * 2:
+                    continue  # 无基线（第一集等）：用双倍绝对阈值兜底
+                else:
+                    r = None
+                out.append(BuzzHit(
+                    subject_id=sid, subject_name=name, ep_id=e["id"], sort=e["sort"],
+                    ep_name=e["name"], airdate=e["date"].isoformat(), comments=e["c"],
+                    baseline=round(base, 1) if base else None,
+                    ratio=round(r, 2) if base and base > 0 else None,
+                    url=f"https://bgm.tv/ep/{e['id']}",
+                ))
+            return out
+
+        results = await gather_limited([scan_one(sid, name) for sid, name in subjects], host="bangumi")
+        hits: list[BuzzHit] = []
+        failed = 0
+        for res in results:
+            if isinstance(res, Exception):
+                failed += 1
+                continue
+            hits.extend(res)
+        hits.sort(key=lambda h: (-(h.ratio or 0), -h.comments))
+        caveats = ["热度=分集评论计数对比该番历史集中位数；讨论多不代表口碑好（可能是炎上）。"]
+        if failed:
+            caveats.append(f"{failed} 部番分集拉取失败，结果不完整。")
+        return ToolResult(
+            ok=True,
+            data=EpisodeBuzzScanResult(
+                username=username, checked_subjects=len(subjects),
+                hits=hits[: args.limit], caveats=caveats,
+            ),
+            sources=[Citation(title=f"@{username} 在看番分集热度", url=f"https://bgm.tv/user/{username}", source="bangumi")],
+        )
+
+
 def build_discovery_tools(client: BangumiClient) -> list[Tool]:
     return [
         PredictMyRatingTool(client),
@@ -723,4 +847,5 @@ def build_discovery_tools(client: BangumiClient) -> list[Tool]:
         GetTrendingSubjectsTool(),
         GetCharacterBirthdaysTool(),
         CompareSubjectsTool(client),
+        ScanMyEpisodeBuzzTool(client),
     ]

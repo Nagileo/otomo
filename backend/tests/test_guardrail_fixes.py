@@ -853,3 +853,38 @@ def test_semantic_scores_with_local_bge():
         pytest.skip(f"bge 模型不可用: {type(e).__name__}")
     assert sims[0] > sims[1]  # 京吹（音乐百合）应比巨人（热血战斗）更像轻音+孤独摇滚
     assert sims[0] == 1.0 and sims[1] == 0.0  # 池内 min-max 归一
+
+
+def test_episode_buzz_scan_baseline():
+    """分集爆点：超基线倍数命中、低于阈值/无突增不报、首集用双倍绝对阈值。"""
+    import asyncio as _a
+    from datetime import date, timedelta
+
+    from otomo.tools.discovery.tool import EpisodeBuzzScanArgs, ScanMyEpisodeBuzzTool
+
+    today = date.today()
+
+    class FakeClient:
+        async def get_me(self):
+            return {"username": "me"}
+        async def get_all_user_collections(self, username, stype, ct, max_items=0):
+            return [{"subject": {"id": 1, "name_cn": "爆点番"}},
+                    {"subject": {"id": 2, "name_cn": "平稳番"}},
+                    {"subject": {"id": 3, "name_cn": "新开播"}}]
+        async def get_episodes(self, sid, ep_type=0, limit=200):
+            def ep(i, days_ago, c):
+                return {"id": sid * 1000 + i, "sort": i, "name_cn": f"第{i}集",
+                        "airdate": (today - timedelta(days=days_ago)).isoformat(), "comment": c}
+            if sid == 1:  # 历史中位数 40，本周 150 条 → 3.75x 爆
+                return {"data": [ep(1, 30, 38), ep(2, 23, 40), ep(3, 16, 42), ep(4, 2, 150)]}
+            if sid == 2:  # 45 vs 中位 40 → 1.13x 不爆
+                return {"data": [ep(1, 30, 38), ep(2, 23, 40), ep(3, 16, 42), ep(4, 2, 45)]}
+            # sid 3: 首集无基线，80 >= 30*2 → 开播即热
+            return {"data": [ep(1, 1, 80)]}
+
+    r = _a.run(ScanMyEpisodeBuzzTool(FakeClient()).run(EpisodeBuzzScanArgs(days=7)))
+    assert r.ok
+    names = [(h.subject_name, h.sort, h.ratio) for h in r.data.hits]
+    assert ("爆点番", 4.0, 3.75) in names
+    assert ("新开播", 1.0, None) in names
+    assert all(n != "平稳番" for n, _s, _r in names)

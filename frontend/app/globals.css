@@ -1131,3 +1131,14 @@ a.card-title:hover { color: var(--accent); }
 }
 .ep-cell.done { background: rgba(158, 206, 106, .16); border-color: rgba(158, 206, 106, .4); color: var(--green); }
 .ep-cell.drop { background: rgba(247, 118, 142, .12); border-color: rgba(247, 118, 142, .35); color: var(--red); text-decoration: line-through; }
+
+/* 分集爆点行 */
+.buzz-row {
+  display: flex; align-items: center; gap: var(--gap-md); padding: 8px 10px; margin: 6px 0;
+  border: 1px solid var(--border); border-radius: var(--radius-sm); background: #0c0e13;
+  color: inherit; text-decoration: none; font-size: var(--fs-md);
+}
+.buzz-row:hover { border-color: var(--accent); }
+.buzz-main { flex: 1; min-width: 0; }
+.buzz-main small { color: var(--dim); }
+.buzz-stats { display: inline-flex; align-items: center; gap: 6px; color: var(--dim); font-size: var(--fs-sm); white-space: nowrap; }

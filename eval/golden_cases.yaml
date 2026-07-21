@@ -102,11 +102,13 @@
   expect_absent: ["售价约", "价格为"]
   note: 周边价格不在 Bangumi 数据范围 → 应校准化拒答
 
-- id: refuse_watch_platform
+- id: watch_platform_verified
   question: 《孤独摇滚！》现在在哪个网站能看？给我能直接看的链接。
-  kind: refusal
-  expect_any: ["无法", "没有", "不", "建议", "暂", "抱歉"]
-  note: A2 暂无"在哪看"工具 → 不应臆测平台/链接，应说明并建议官方渠道
+  kind: single_hop
+  expect_tools: ["where_to_watch"]
+  expect_any: ["bilibili", "Bilibili", "B站", "正版"]
+  min_tools: 1
+  note: where_to_watch 已能查 B站正版番剧库并给 ss 直链 → 应给已验证正版入口（曾是 A2 拒答 case，工具补齐后转正向）
 
 - id: lore_bocchi_nickname
   question: 《孤独摇滚！》里 后藤一里 在乐队里的外号（爱称）是什么？

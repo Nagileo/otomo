@@ -506,6 +506,7 @@ _PANEL_TOOLS = {
     "generate_acgn_quiz",
     "get_my_episode_progress",
     "export_my_collections_csv",
+    "scan_my_episode_buzz",
     "get_character_birthdays",
     "compare_subjects",
     "get_pilgrimage_map",

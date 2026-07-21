@@ -1,0 +1,1682 @@
+[
+  {
+    "id": "bocchi_year",
+    "kind": "single_hop",
+    "passed": true,
+    "checks": [
+      {
+        "label": "含「2022」",
+        "passed": true
+      },
+      {
+        "label": "调用过 search_subjects",
+        "passed": true
+      }
+    ],
+    "answer": "电视动画《孤独摇滚！》于 **2022年10月8日** 开始播出。",
+    "tools_called": [
+      "search_subjects"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "bocchi_hitori_cv",
+    "kind": "two_hop",
+    "passed": true,
+    "checks": [
+      {
+        "label": "含「青山吉能」",
+        "passed": true
+      },
+      {
+        "label": "调用过 get_character_persons",
+        "passed": true
+      }
+    ],
+    "answer": "动画《孤独摇滚！》中 **後藤一里（後藤ひとり）** 的 **日语原版声优** 是 **青山吉能**（あおやま よしの）。\n\n此外，中文配音版由 **邱涵菲** 担任，粤语配音版是 **郭雅瑂**。\n\n青山吉能凭借对一里内心戏和吉他英雄形象的出色演绎，也让这个角色成为当年的现象级话题。",
+    "tools_called": [
+      "search_subjects",
+      "get_subject_characters",
+      "get_character_persons"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "aoyama_other_anime",
+    "kind": "two_hop",
+    "passed": true,
+    "checks": [
+      {
+        "label": "不含「无法查到」",
+        "passed": true
+      },
+      {
+        "label": "不含「查不到」",
+        "passed": true
+      },
+      {
+        "label": "不含「没有相关」",
+        "passed": true
+      },
+      {
+        "label": "调用过 get_person_subjects",
+        "passed": true
+      }
+    ],
+    "answer": "抱歉，这次没能整理出回答，请再问一次或换个问法。",
+    "tools_called": [
+      "search_persons",
+      "get_person_subjects",
+      "explore_voice_network",
+      "search_characters",
+      "get_subject_characters",
+      "get_character_persons",
+      "get_subject_characters",
+      "get_subject_characters",
+      "get_subject_characters",
+      "get_character_persons"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "clannad_nagisa_cv",
+    "kind": "two_hop",
+    "passed": true,
+    "checks": [
+      {
+        "label": "含「中原麻衣」",
+        "passed": true
+      },
+      {
+        "label": "调用过 get_character_persons",
+        "passed": true
+      }
+    ],
+    "answer": "《CLANNAD》中 **古河渚** 的声优是 **中原麻衣**。她在 TV 动画《CLANNAD》《CLANNAD 〜AFTER STORY〜》以及剧场版中均为主角配音。",
+    "tools_called": [
+      "search_subjects",
+      "search_characters",
+      "get_character_persons"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "haruhi_cv",
+    "kind": "two_hop",
+    "passed": true,
+    "checks": [
+      {
+        "label": "含任一['平野綾', '平野绫']",
+        "passed": true
+      },
+      {
+        "label": "调用过 get_character_persons",
+        "passed": true
+      }
+    ],
+    "answer": "**凉宫春日**的声优是 **平野绫**（日文原版配音）。\n\n- **平野绫** 在《凉宫春日的忧郁》（2006版和2009版）、《凉宫春日的消失》以及《小凉宫春日的忧郁》等多部相关作品中一直担任主角凉宫春日的配音，这也是她最具代表性的角色之一。\n- 英文版配音为 Wendee Lee，中文（台湾）配音为傅其慧。",
+    "tools_called": [
+      "search_subjects",
+      "search_characters",
+      "get_character_persons"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "yuru_nadeshiko_cv",
+    "kind": "two_hop",
+    "passed": true,
+    "checks": [
+      {
+        "label": "含任一['花守由美里', '花守ゆみり', '花守']",
+        "passed": true
+      },
+      {
+        "label": "调用过 get_character_persons",
+        "passed": true
+      }
+    ],
+    "answer": "在《摇曳露营△》动画中，各务原抚子的声优是 **花守由美里（花守ゆみり）**。\n\n她也持续为该角色在后续的第二季、第三季、电影版及游戏《摇曳露营△ Have a nice day!》中配音。",
+    "tools_called": [
+      "search_subjects",
+      "get_subject_characters",
+      "get_character_persons"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "steins_kurisu_cv",
+    "kind": "two_hop",
+    "passed": true,
+    "checks": [
+      {
+        "label": "含「今井麻美」",
+        "passed": true
+      },
+      {
+        "label": "调用过 get_character_persons",
+        "passed": true
+      }
+    ],
+    "answer": "牧濑红莉栖（Christina）的声优是 **今井麻美**（Imai Asami）。\n\n她在《命运石之门》本篇、0、剧场版以及所有衍生作品中均为助手配音。",
+    "tools_called": [
+      "search_subjects",
+      "search_characters",
+      "get_character_persons"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "refuse_bd_sales",
+    "kind": "refusal",
+    "passed": true,
+    "checks": [
+      {
+        "label": "含任一['无法', '查不到', '没有', '不在', '抱歉', '无法提供', '暂']",
+        "passed": true
+      },
+      {
+        "label": "不含「销量约」",
+        "passed": true
+      },
+      {
+        "label": "不含「销量为」",
+        "passed": true
+      },
+      {
+        "label": "不含「万张」",
+        "passed": true
+      }
+    ],
+    "answer": "抱歉，这次没能整理出回答，请再问一次或换个问法。",
+    "tools_called": [
+      "search_subjects",
+      "web_search",
+      "web_search",
+      "web_search",
+      "web_search",
+      "web_search",
+      "web_search",
+      "web_search"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "refuse_news",
+    "kind": "refusal",
+    "passed": true,
+    "checks": [
+      {
+        "label": "含任一['无法', '查不到', '没有', '暂', '不', '抱歉']",
+        "passed": true
+      }
+    ],
+    "answer": "我查遍了 Bangumi 图谱和网络资讯，给你捋一捋《孤独摇滚！第二季》目前**已公开确认的信息**和**最新的圈内动态**。需要先说清楚：真正的“独家内幕”我拿不到（我也不编），但下面这些是截止当下最新、最全的公开情报，有些细节你可能还没注意到 👇\n\n---\n\n## ✅ 已官方确认的事实\n\n**1. 制作决定 & 特报已发**（2025年2月16日）\n官方在乐队巡演结束后正式宣布第二季制作决定，同步公开了**特报影像**和**首张主视觉图**。Bangumi 条目（537409）已建立在库。\n\n**2. 核心 Staff 有大变动 —— 这是最值得注意的点**\n\n| 职位 | 第一季 | 第二季 |\n|------|--------|--------|\n| **监督** | 斋藤圭一郎 → | **山本裕介（山本ゆうすけ）**（前作副导演） |\n| **角色设计** | けろりら → | **けろりら + 小田景门**（双人体制） |\n| **剧本** | 吉田惠里香 → | 吉田惠里香（延续） |\n| **制作** | CloverWorks → | CloverWorks（延续） |\n\n> 山本裕介在《孤独摇滚！》第一季就是副导演，还参与过《葬送的芙莉莲》分镜，这次升正监督——很多人担心风格会不会变，但他的分镜和情感把控能力在业内口碑不错。小田景门作为追加人设，履历中有《奇蛋物语》作监，预计会给二期的修正密度再提一档。\n\n**3. 声优全沿用**\n结束乐队四人组：**青山吉能、铃代纱弓、水野朔、长谷川育美** 全数回归。\n\n**4. 播出时间：未定档**\nBangumi 打的是「未定档」标签。目前**没有任何官方公布的放送日期**，网上传的\"2026年\"只是基于制作周期的小道推测。\n\n---\n\n## 🔥 最新动态（可能你不知道的）\n\n**原作滨路晶已暂时休刊**\n作者在近几个月宣布《孤独摇滚！》漫画**暂时休刊**，理由是身心状态需要休息，而且还有线下演出和其他工作要忙。但关键的一句是——\n\n> **「线下演出在跑了，第二季在做了，具体细节暂时不能说。」**\n\n这意味着：动画制作并没有因为漫画休刊而停摆，CloverWorks 那边已经开工了。只是官方目前处于**憋大招**的状态，播出时间、集数、改编范围一律还没揭晓。\n\n---\n\n## 🎯 总结一句话\n\n| 项目 | 情况 |\n|------|------|\n| 制作状态 | ✅ **确认制作中**（CloverWorks 开工）|\n| 监督 | ⚠️ 从斋藤圭一郎→**山本裕介**，风格有变数 |\n| 角色设计 | ✅ けろりら留任 + 小田景门增援，值得期待 |\n| 播出日期 | ❌ **未公布**（小道传最早2026，但未证实）|\n| 原作漫画 | ⚠️ 作者休刊中，但官方说动画照做不误 |\n\n如果有更具体的“内幕”，除非你是 CloverWorks 内部人员，不然目前全网都和你一样在等官方下一波出牌。我可以帮你**订阅这条目的情报更新**，或者等你想起来了再查一次，有新消息我第一时间告诉你。\n\n[[panel:get_subject]]",
+    "tools_called": [
+      "search_subjects",
+      "search_subjects",
+      "web_search",
+      "get_subject",
+      "web_search"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "kon_yui_cv",
+    "kind": "two_hop",
+    "passed": true,
+    "checks": [
+      {
+        "label": "含任一['丰崎爱生', '豊崎愛生', '丰崎', '豊崎']",
+        "passed": true
+      },
+      {
+        "label": "调用过 get_character_persons",
+        "passed": true
+      }
+    ],
+    "answer": "平泽唯的声优是 **豊崎愛生**（丰崎爱生）。",
+    "tools_called": [
+      "search_subjects",
+      "search_characters",
+      "get_character_persons"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "bocchi_studio",
+    "kind": "two_hop",
+    "passed": true,
+    "checks": [
+      {
+        "label": "含任一['CloverWorks', 'Clover']",
+        "passed": true
+      },
+      {
+        "label": "调用过 get_subject_persons",
+        "passed": true
+      }
+    ],
+    "answer": "《孤独摇滚！》的动画制作由 **CloverWorks** 负责。",
+    "tools_called": [
+      "search_subjects",
+      "get_subject_persons"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "frieren_year",
+    "kind": "single_hop",
+    "passed": true,
+    "checks": [
+      {
+        "label": "含任一['2023', '2024']",
+        "passed": true
+      },
+      {
+        "label": "调用过 search_subjects",
+        "passed": true
+      }
+    ],
+    "answer": "《葬送的芙莉莲》动画于 **2023年** 开始播出，首播日期为 **2023年9月29日**（属于2023年10月新番）。",
+    "tools_called": [
+      "search_subjects",
+      "get_subject"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "madoka_cv",
+    "kind": "two_hop",
+    "passed": true,
+    "checks": [
+      {
+        "label": "含「悠木碧」",
+        "passed": true
+      },
+      {
+        "label": "调用过 get_character_persons",
+        "passed": true
+      }
+    ],
+    "answer": "《魔法少女小圆》中 **鹿目圆** 的声优是 **悠木碧**（Aoi Yūki）。她在 TV 动画、剧场版三部曲以及多部衍生游戏中均为该角色担任主演配音。",
+    "tools_called": [
+      "search_characters",
+      "search_subjects",
+      "get_character_persons"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "konosuba_aqua_cv",
+    "kind": "two_hop",
+    "passed": true,
+    "checks": [
+      {
+        "label": "含任一['雨宫天', '雨宮天', '雨宫', '雨宮']",
+        "passed": true
+      },
+      {
+        "label": "调用过 get_character_persons",
+        "passed": true
+      }
+    ],
+    "answer": "《为美好的世界献上祝福！》里**阿库娅（アクア）**的声优是 **雨宫天**（雨宮天）。\n\n她从第一季开始一直为该角色配音，后续的第二季、第三季、剧场版《红传说》以及《异世界四重奏》等衍生作品也都是由雨宫天担任阿库娅的声优。\n\n[[panel:get_character_persons]]",
+    "tools_called": [
+      "search_subjects",
+      "search_characters",
+      "get_subject_characters",
+      "get_character_persons"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "lelouch_cv",
+    "kind": "two_hop",
+    "passed": true,
+    "checks": [
+      {
+        "label": "含任一['福山润', '福山潤', '福山']",
+        "passed": true
+      },
+      {
+        "label": "调用过 get_character_persons",
+        "passed": true
+      }
+    ],
+    "answer": "鲁路修·兰佩路基的声优是 **福山润**（福山潤 / Fukuyama Jun），同时他也是该作 TV 本篇、剧场版三部曲及《复活的鲁路修》中鲁路修的主役声优。[[panel:get_character_persons]]",
+    "tools_called": [
+      "search_characters",
+      "get_character_persons"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "refuse_goods_price",
+    "kind": "refusal",
+    "passed": false,
+    "checks": [
+      {
+        "label": "含任一['无法', '查不到', '没有', '不', '抱歉', '建议']",
+        "passed": true
+      },
+      {
+        "label": "不含「售价约」",
+        "passed": false
+      },
+      {
+        "label": "不含「价格为」",
+        "passed": true
+      }
+    ],
+    "answer": "后藤一里的手办版本很多，价格因厂商、规格和现货/预购差别相当大。目前市面上主要有这几个版本：\n\n**1/7 比例手办（PROOF 出品）**\n- 2025年12月出货，官方参考价 **16,500 日元**（约合人民币 833 元）\n- 是造型比较精致的主力款，目前还在预定期\n\n**黏土人（Good Smile Company）**\n- 2026年1月再贩版本，港售价约 **HK$349**（约 ¥320）\n- 经典 Q 版造型，性价比高\n\n**figma 可动（Max Factory）**\n- 淘宝现货约 **¥539** 左右\n- 可动关节，能摆出弹吉他的各种姿势\n\n**Aniplex 女仆 Ver.（Non Scale）**\n- 香港 T Club 预订价约 **HK$249**（约 ¥230）\n- 约 170mm 高，造型可爱\n\n**其他景品/低价格带**\n- 淘宝/闲鱼上还有各类景品和散货，价格从 **¥80～¥209** 不等\n- 细节和涂装相对一般，适合入门\n\n> 网络信息，以上价格综合淘宝、Hpoi手办维基、香港代理等渠道近期数据，具体请以你所在地区平台实时标价为准。\n\n想蹲好价可以关注 Hpoi 手办维基或等再版通知，热门款现货往往有溢价。",
+    "tools_called": [
+      "web_search"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "refuse_watch_platform",
+    "kind": "refusal",
+    "passed": false,
+    "checks": [
+      {
+        "label": "含任一['无法', '没有', '不', '建议', '暂', '抱歉']",
+        "passed": false
+      }
+    ],
+    "answer": "《孤独摇滚！》以下平台均可直接观看，按地区为你整理好 👇\n\n**🇨🇳 中国大陆**\n- **Bilibili**（独播，含正版字幕）  \n  👉 [https://www.bilibili.com/bangumi/play/ss43164](https://www.bilibili.com/bangumi/play/ss43164)  \n  B 站站内评分 9.9（13 万+人评分），**需要大会员**完整观看。\n\n**🌏 海外**\n- **Netflix**（全球多数地区，含繁中字幕）  \n  👉 [https://www.netflix.com/title/81641170](https://www.netflix.com/title/81641170)\n- **Prime Video**  \n  👉 [https://www.amazon.co.jp/gp/video/detail/B0DL1C6BR2](https://www.amazon.co.jp/gp/video/detail/B0DL1C6BR2)\n- **🇭🇰🇸🇬 Viu**（港区/东南亚，带中文字幕）  \n  👉 [https://www.viu.com/ott/hk/zh-hk/vod/2230728/](https://www.viu.com/ott/hk/zh-hk/vod/2230728/)\n- **🇹🇼 巴哈姆特動畫瘋**（台湾，免费高画质）  \n  👉 [https://acg.gamer.com.tw/acgDetail.php?s=115950](https://acg.gamer.com.tw/acgDetail.php?s=115950)\n- **🇯🇵 日本区**可看 Niconico / U-NEXT / dアニメストア\n\n> 国内首选 B 站，海外优先 Netflix 或 Viu。需要我帮你确认某个平台在你的地区能否访问，或者找 BD/资源信息，随时说！\n\n[[panel:where_to_watch]]",
+    "tools_called": [
+      "search_subjects",
+      "where_to_watch"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "lore_bocchi_nickname",
+    "kind": "two_hop",
+    "passed": true,
+    "checks": [
+      {
+        "label": "含任一['波奇', 'ぼっち', '小孤独']",
+        "passed": true
+      },
+      {
+        "label": "调用过 lore_search",
+        "passed": true
+      },
+      {
+        "label": "至少调用 1 次工具",
+        "passed": true
+      }
+    ],
+    "answer": "在《孤独摇滚！》中，后藤一里的外号（爱称）是 **小孤独**（日文：**ぼっちちゃん**），中文粉丝也常亲切地叫 **波奇酱**。\n\n这个爱称是乐队贝斯手山田凉根据她名字「ひとり」（一人/孤独）的谐音以及她极度社恐的性格起的，在作品里深入人心。\n\n> 来源：萌娘百科 — 后藤一里词条",
+    "tools_called": [
+      "search_characters",
+      "lore_search"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "panel_review_bocchi",
+    "kind": "two_hop",
+    "passed": true,
+    "checks": [
+      {
+        "label": "调用过 review_subject",
+        "passed": true
+      },
+      {
+        "label": "review_subject 产出结构化面板",
+        "passed": true
+      }
+    ],
+    "answer": "以下是动画《孤独摇滚！》的多源口碑综评，**无剧透**，请放心阅读。\n\n---\n\n## 📊 综合口碑：极高评价，业界标杆级\n\n### 一、评分面板（硬指标）\n\n| 源 | 评分 | 收藏/评分人数 |\n|---|---|---|\n| **Bangumi** | **8.37** / 10（排名 **#72**） | 40,047 人评分，74,775 人收藏 |\n| **AniList**（国际圈） | **87** / 100 | 国际英文圈高分 |\n| **评分分布**（Bangumi） | 8分+占 **82%** | 10分 6,795 / 9分 12,263 / 8分 13,925 |\n\n评分争议度极低（标准差仅 1.24），属于 Bangumi 上**意见高度一致**的作品，10分和1分的极端比约为 **35:1**。\n\n[[panel:review_subject]]\n\n---\n\n### 二、口碑走势：播出即封神，热度不降\n\n来自 netaba.re 第三方快照数据（2021年～今）：\n- **开播前「想看」仅 912 人**，属于中等期待，并非开播前就万众瞩目。\n- **2022年10月开播后口碑爆发**：首月评分即冲上 8.32，次月达 8.4，被收藏数在两个月内从千级暴涨至万级。\n- **稳定期（2023年至今）**：评分长期稳定在 **8.35~8.37** 之间，近30天/90天均分变化为 **±0.0**，说明口碑已完全沉淀，没有后期反噬或刷分波动。\n- **收藏仍在稳步增长**：30天新增收藏约 **750+** 人，至今总量接近 7.5 万，长青番属性明显。\n\n**一句话总结**：开播即口碑爆发，之后两年多未见显著降分，呈现\"稳定封神\"的典型特征。\n\n[[panel:get_subject_trend]]\n\n---\n\n### 三、公认赞誉点（共识）\n\n根据 Bangumi 短评、萌娘百科条目、评分分布综合提炼，**以下为该作获得高度赞誉的核心原因**：\n\n1. **夸张演出与视觉创意**——大量使用超现实的 2D 演出手法（内心小剧场、实拍混搭、画风突变等），被观众誉为\"演出过剩（褒义）\"\"展现了动画媒介独有的魅力\"。监督**斋藤圭一郎**也因此作一战成名，后续执导了《葬送的芙莉莲》。\n\n2. **社恐主角的极致共鸣**——后藤一里的\"沟通障碍\"刻画被大量观众评价为\"过于真实\"\"我也是这样\"，将网络时代年轻人的社恐心理用夸张搞笑但不失真诚的方式展现出来，形成了极强的共情基础。\n\n3. **芳文社 × CloverWorks 的品质保障**——原作底子是芳文社 Kirara 系的轻松日常底子，CloverWorks 的作画和音画配合非常扎实，Live 场景采用手绘演奏（非 3D 偷懒）获得高度好评。\n\n4. **治愈系乐队日常**——被很多观众称为\"新时代的《轻音少女》\"，在轻松搞笑中埋入成长与羁绊，节奏紧凑不拖沓。\n\n---\n\n### 四、批评/争议点（少数派声音）\n\n评分分布显示约有 **4% 的观众打了 6 分以下**。常见理由（非虚构，来自 Bangumi 短评提炼）：\n\n- **「不够摇滚」**——一小部分观众觉得作品偏萌系日常，缺少摇滚题材应有的\"反叛感\"或\"深度\"，更接近少女日常而非真正意义上的音乐番。\n- **篇幅太短（仅 12 集）**——播出时集数被多次吐槽不够看，也被指有几个乐队成员的成长线没来得及充分展开。\n- **叙事节奏偏轻快**——对比后来同赛道的《MyGO!!!!!》，部分观众认为《孤独摇滚》缺乏强烈的戏剧冲突，不太\"上头\"。\n\n> 注意：以上争议点属于 **少数派意见**，但确实存在。\n\n---\n\n### 五、共识总结与推荐度\n\n> **置信度：高**\n\n- 如果你喜欢：**芳文社/Kirara 系日常、社恐主角搞笑共鸣、高质量手绘 Live、轻百合友情、CloverWorks 精品作画** —— 这是必看作品。\n- 如果你偏好：**沉重写实的摇滚题材、强剧情冲突、男性向乐队作** —— 可能不完全对口味。\n- 中文圈、国际圈（AniList 87分）、日本本土均给出高度一致的好评，是 **2022 年最具代表性的话题动画之一**，也是近年来音乐/乐队题材中口碑最稳的作品之一。\n\n**一句话概括**：一部用夸张演出把社恐日常玩出花的芳文系乐队动画，口碑极高且长期稳定，是少有的\"叫好又叫座\"的动画爆款。第二季已宣布制作中。\n\n[[panel:get_subject]]\n\n> 来源说明：Bangumi 条目/评分/短评（bgm.tv/subject/328609）、AniList（anilist.co/anime/130003）、netaba.re 快照（netaba.re/subject/328609）、萌娘百科条目（zh.moegirl.org.cn/孤独摇滚！）。网络数据/第三方快照与社区口碑已标注。",
+    "tools_called": [
+      "search_subjects",
+      "review_subject",
+      "get_subject_trend",
+      "get_subject",
+      "get_subject_comments",
+      "lore_search"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "panel_season_2026_07",
+    "kind": "filter",
+    "passed": true,
+    "checks": [
+      {
+        "label": "调用过 season_guide_brief",
+        "passed": true
+      },
+      {
+        "label": "未调用 web_search",
+        "passed": true
+      },
+      {
+        "label": "season_guide_brief 产出结构化面板",
+        "passed": true
+      }
+    ],
+    "answer": "# 2026年7月新番 · 你的口味分诊报告\n\n根据你的 Bangumi 画像，你的偏好集中在 **日常·百合·校园·治愈·搞笑·恋爱** 这条脉络上。这一季有好几部直击你好球区的作品，也有几部虽不完全贴合但绝对值得一试的潜力股。按匹配度高低给你排个序——\n\n---\n\n## 🎯 优先级 S · 强命中，必看级\n\n**与你相恋到生命尽头** 🏷️ 百合·校园·魔法·刀糖 —— ROLL2 制作，花田十辉系构，高桥李依×日高里菜主役。真百原作改，魔法少女×战争背景下写的既是战斗也是羁绊，7/7 开播。你的命中标签：日常/百合/校园/恋爱。 **风险提醒**：原作发刀狠，备好纸巾。  \n[[panel:season_guide_brief:541285]]\n\n**BanG Dream! YUME∞MITA** 🏷️ 音乐·乐队·百合·原创 —— 邦邦系列新TV，NICHICALINE 制作（SANZIGEN 系3D）。原创剧情+音乐番每一季都是「无法预测的命运之舞台」，7/2 周四深夜。标签：百合/校园/搞笑/奇幻。  \n[[panel:season_guide_brief:583729]]\n\n**相反的你和我 第二季** 🏷️ 校园·恋爱喜剧·反差 —— LapinTrack 制作，7.5分续作，第一季口碑稳健。校园群像+反差萌CP日常，适合捧着笑一整集。7/5 周日下午。  \n[[panel:season_guide_brief:638497]]\n\n**画完这个再去死** 🏷️ 漫画创作·校园·轻百合·治愈 —— SHIN-EI 动画制作，7.7分高起点。以漫画社团为舞台讲述创作与成长，赤城博昭监督，早见沙织参演。7/3 周五深夜。  \n[[panel:season_guide_brief:545917]]\n\n**在超市后门吸烟的二人** 🏷️ 日常·治愈·社畜·恋爱 —— 旭Production。社畜女×超市店员的都市温情短篇，6/3先行6话后7/9正式放送。标签：日常/治愈/搞笑/恋爱，跟你印象里的《宅饮》《粗点心战争》一个调性。  \n[[panel:season_guide_brief:571784]]\n\n**再见菈菈** 🏷️ 人鱼·百合·恋爱·原创 —— Kinema Citrus 制作，7.3分原创。复古童话风的人鱼故事，分集讨论峰值201条，社区关注度很高，7/5周日深夜。  \n[[panel:season_guide_brief:495291]]\n\n**Grow Up Show ～向日葵马戏团～** 🏷️ 百合·公路·马戏·原创 —— A-1 Pictures + Psyde Kick Studio，深崎暮人人设原案，龟井干太监督。公路竞技×马戏团表演，轻百合日常向原创。7/4 周六深夜。  \n[[panel:season_guide_brief:570583]]\n\n---\n\n## 🔥 热门关注（虽未全中偏好但值得一试）\n\n**尼古喵喵** 🏷️ 无厘头·奇妙日常·搞笑 —— **本季 trending 第1、doing 破万**，抽象吸烟猫漫画改，Bibury 制作。画风魔性、分集讨论峰值289条热度断层第一。你偏好里有\"搞笑\"，可以当放松泡面番试试。7/2 周四深夜。  \n[[panel:season_guide_brief:622206]]\n\n**无职转生 第三季** 🏷️ 异世界·奇幻·冒险 —— StudioBind，8.0分，doing 10534（本季规模最大）。虽然偏离你的日常百合主轴，但如果你不排斥异世界成长叙事，第三季的制作水准和剧情节奏都是顶级的。7/4 放送。  \n[[panel:season_guide_brief:501963]]\n\n---\n\n## 📌 特殊项\n\n**剧场版 魔法少女小圆〈魔女之夜的回天〉** 🏷️ 百合·魔法少女·SHAFT —— 8.1分神作续篇，**8月28日上映**。虽然不在7月TV内，但你的百合+奇幻标签全中，且不出意外会是年度话题。  \n[[panel:season_guide_brief:334105]]\n\n**穹庐下的魔女** 🏷️ 历史·蒙古·战争 —— Science SARU×山田尚子，7.9分。偏严肃历史奇幻，与你的日常百合圈层跨度较大，但品质过硬，想换口味可以追。  \n[[panel:season_guide_brief:552533]]\n\n---\n\n## ⚠️ 避雷提醒\n\n- **二十世纪电气目录**：京阿尼制作，热度高（trending第4），但 **Bangumi评分仅5.8**，且标签偏蒸汽朋克原创，跟你偏好的日常治愈系有落差，建议观望口碑再决定。\n- **超超超超超喜欢你的100个女朋友 第三季**：虽然标签命中搞笑/恋爱，但本质是后宫喜剧，如果你对多女主的设定无感可以考虑跳过。\n\n---\n\n**优先看这3部**：《与你相恋到生命尽头》→《相反的你和我 第二季》→《画完这个再去死》——从你最熟悉的百合+校园+日常起手，再逐步扩展到邦邦新作、超市后门和再见菈菈。完整清单和所有数据卡片请看下方面板👇\n\n[[panel:season_guide_brief]]",
+    "tools_called": [
+      "get_user_memory",
+      "season_guide_brief"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "panel_recommend",
+    "kind": "filter",
+    "passed": true,
+    "checks": [
+      {
+        "label": "调用过 recommend_subjects",
+        "passed": true
+      },
+      {
+        "label": "recommend_subjects 产出结构化面板",
+        "passed": true
+      }
+    ],
+    "answer": "好的，我根据你 **日常 / 百合 / 治愈 / 校园 / 搞笑** 的口味标签，筛出了几部你没看过的动画，重点推评分高、口碑稳的优质作品👇\n\n---\n\n**① ⭐ 斩服少女（Kill la Kill）** — Bangumi **8.1** / 排名 **188**\n\n虽然打着热血战斗的旗号，但内核是你的标签 **「百合」** 直击区，主角姐妹情谊贯穿始终。扳机社的顶级作画、夸张搞笑节奏、天元突破级的燃，跟你看过的《小魔女学园》风格同源。唯一提醒：偏热血/露肉，治愈度不如芳文系，但爽感和百合浓度绝对高。\n\n**② 🎀 娱乐金鱼眼** — Bangumi **7.4**\n\n90 年代经典搞笑日常番，系列构成 **佐藤順一**（也是你喜欢的《玉响》系列构成）。夸张无厘头的校园喜剧风格，轻松解压，年代感画风有独特味道。适合想换换口味的日常党。\n\n**③ 🌸 异国迷宫的十字路口** — Bangumi **7.0**\n\n同样是 **佐藤順一** 参与的作品，法式治愈日常，讲日本小女孩在巴黎生活的温暖故事。氛围舒缓、画风柔和，完美对应你「治愈」「日常」偏好。适合安静放空的时候看。\n\n**④ ✈️ 荒野的寿飞行队** — Bangumi **7.1**\n\n从「看过《玉响》的人也在看」这条社交线索挖出来的。水岛努执导的空中空战片，但日常氛围很足，妹子群像+飞行冒险，轻快有趣。整体偏燃+日常混合体。\n\n---\n\n**👑 最推荐先看：斩服少女**，高分+强口碑+百合标签直击；想看纯治愈就配 **异国迷宫的十字路口** 当调剂。\n\n如果这些你不太对胃口，可以往下继续筛选——比方说更冷门、更治愈、或者换个题材方向，我再给你重排一版！\n\n[[panel:recommend_subjects]]",
+    "tools_called": [
+      "get_user_memory",
+      "recommend_subjects"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "panel_taste_sai",
+    "kind": "two_hop",
+    "passed": true,
+    "checks": [
+      {
+        "label": "调用过 compare_user_taste",
+        "passed": true
+      },
+      {
+        "label": "compare_user_taste 产出结构化面板",
+        "passed": true
+      }
+    ],
+    "answer": "你们的口味同步率整体处于 **中等偏上（Lv.5 / 综合同步率 53）**，属于「有默契、但不至于代餐」的水平。\n\n**同步率拆解：**\n- **评分倾向高度一致**（相似度 **0.91**）— 好球区重合度极高，你俩大概率都能在《白箱》《空之境界第五章》上达成共识\n- **收藏空间也重叠明显**（相似度 **0.98**）— 说明你俩动画涉猎的「领地」相当接近\n- **但极端癖好差异较大**（极端相似度仅 0.20）— 你们各自最爱的几个作品对不上号\n\n**最大分歧也在这里：**\n- 你对《MyGO!!!!!》给了 **9 分**，对方只给 **6 分** — 说明他对重女关系和扭成一团的接受度不如你\n- 你给了《CLANNAD AS》《京吹2》**满分 10**，他给了 **8** — 你的催泪/青春阈值比他高一头\n\n**如果你想从他那里捞片：**\nsai 看过并给了高分、你还没标想看的作品中，呼声最高的是 **《化物语》《月刊少女野崎君》《穿越时空的少女》《狼的孩子雨和雪》《星际牛仔》** — 这些都是你大概率会喜欢、而且不会踩雷的稳妥选择。\n\n[[panel:compare_user_taste]]",
+    "tools_called": [
+      "compare_user_taste"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "mem_remember_dislike",
+    "kind": "two_hop",
+    "passed": true,
+    "checks": [
+      {
+        "label": "调用过 remember_user_preference",
+        "passed": true
+      }
+    ],
+    "answer": "好，已经记下了。以后做推荐时会主动过滤掉党争题材的作品，不会再推到你的面前。放心，你讨厌的类型我心里有数 👍",
+    "tools_called": [
+      "remember_user_preference"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "mem_recall_panel",
+    "kind": "two_hop",
+    "passed": true,
+    "checks": [
+      {
+        "label": "调用过 get_user_memory",
+        "passed": true
+      },
+      {
+        "label": "get_user_memory 产出结构化面板",
+        "passed": true
+      }
+    ],
+    "answer": "目前我记住的关于你的内容不多——因为我们的对话还比较短，而且你只明确提过一次偏好：\n\n---\n\n### 📌 已记住的口味信息\n\n- **明确避雷 ❌**：**党争**（你亲口说的，我很确定）\n- **好球区 ❤️**：暂时还没有你明确表达过\"喜欢\"的记录\n- **剧透默认**：无剧透模式（safe，除非你主动说可以剧透）\n- **周报订阅**：未开启\n\n---\n\n所以目前我唯一坚定记住的是：**别给你推有党争元素的作品**，其他方面我还需要慢慢了解你～\n\n你可以随时告诉我：**\"我喜欢日常/百合/热血/胃药……\"** 或者 **\"以后别推异世界/后宫/催泪\"**，我都会记下来，后续推荐会更准。\n\n另外，你对上周/上个月的记忆档案还有什么想了解的吗？",
+    "tools_called": [
+      "get_user_memory"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "rec_aspect_explain",
+    "kind": "two_hop",
+    "passed": true,
+    "checks": [
+      {
+        "label": "调用过 recommend_subjects",
+        "passed": true
+      },
+      {
+        "label": "recommend_subjects 产出结构化面板",
+        "passed": true
+      }
+    ],
+    "answer": "你的画像标签很清晰：**日常、百合、校园、治愈、搞笑**，加上明确避雷「党争」，我帮你精选了 3 部最值得一试的——\n\n---\n\n### 🥇 异国迷宫的十字路口（Bangumi 7.0）\n**治愈系·法国舞台·温馨日常**\n\n最戳你的那一部！佐藤順一系列构成，讲述日本少女在 19 世纪末巴黎古董店打工的慢生活。画面精致、氛围恬淡，没有激烈冲突，只有异国街角的温柔邂逅——完美命中你的**治愈 + 日常 + 轻百合气质**。\n\n### 🥈 娱乐金鱼眼（Bangumi 7.4）\n**搞笑日常·校园·老牌经典**\n\n同样是佐藤順一操刀系列构成，90 年代校园搞笑番的标杆。夸张表情、快节奏吐槽、无厘头日常——如果你喜欢那种笑到捶桌的放松感，这部会让你上瘾。没有党争，纯搞笑。\n\n### 🥉 斩服少女（Bangumi 8.1）\n**百合·热血·殿堂级**\n\n虽然画风和风格偏燃向战斗，和你的「日常治愈」画像有距离，但它**百合**属性拉满、姐妹情谊极具张力，评分在 Bangumi 高居 #188。作为口味拓展的首选：如果你想换个节奏、试试全开燃系百合，这是最稳妥的入口。\n\n---\n\n**先看哪部？** → 想放松治愈先看 **《异国迷宫的十字路口》**；想傻笑解压先看 **《娱乐金鱼眼》**；想试试热血百合就冲 **《斩服少女》**。\n\n[[panel:recommend_subjects]]",
+    "tools_called": [
+      "get_user_memory",
+      "recommend_subjects"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "rec_galgame_three_source",
+    "kind": "two_hop",
+    "passed": true,
+    "checks": [
+      {
+        "label": "调用过 recommend_subjects",
+        "passed": true
+      }
+    ],
+    "answer": "既然你要三源口碑都硬的作品，我筛掉了你避雷的「党争」类型，以下是结合 **Bangumi（中文圈）、批判空间（日本 gal 圈）、VNDB（国际圈）** 后最稳的选择 ——\n\n---\n\n### 🥇 **装甲恶鬼村正**\n三源全线制霸，是这堆里唯一被三个圈层同时强推的作品。日本批判空间中央值 **90（#17）**，VNDB **90/100**，Bangumi **8.6/10**。NitroPlus 的硬核反英雄物语，文本厚重，战斗描写凌厉。**注意：不是全年龄，有成人内容；剧情偏黑暗沉重，不适合想放松的时候玩。**\n\n---\n\n### 🥈 **时空轮回（Ever17 — the out of infinity）**\n全年龄轮回系天花板。Bangumi **9.1/10**（#5）、VNDB **84.5/100**，中文圈和国际化口碑都极强。缺点：批判空间未收录，缺日本圈数据，不过就作品地位而言这不算硬伤。**千万别搜任何剧透，否则体验报废。**\n\n---\n\n### 🥉 **逆转裁判（1代）**\n虽然是全年龄+视觉小说，但经常被 gal 玩家当入门强推。Bangumi **8.3/10**、VNDB **80.8/100**（近万样本）。法庭辩论+搜证玩法，节奏爽快，不需要日语基础。**严格说不算传统 galgame（无恋爱线），但你要高口碑的话它稳得很。**\n\n---\n\n### ⭐ **海猫鸣泣之时（上篇）**\nBangumi **8.4/10**、VNDB **88.7/100**（1.3 万样本），龙骑士07 的魔幻悬疑巨著。没有选项的纯视觉小说，完全看故事，声优演技炸裂。**缺点：篇幅极长（上篇+散篇加起来几百小时），而且没有解篇单推容易骂街。**\n\n---\n\n### 🌸 **女仆咖啡帕露菲**\n如果你想要恋爱+日常向的轻快作品——Bangumi **8.0/10**、VNDB **77.4/100**。丸户史明早期的看家作，日常甜度拉满，角色塑造非常细腻。**没有党争，每条线各走各的，适合你。**\n\n---\n\n**我的首推**：想入硬核门→ **装甲恶鬼村正**；想入轮回门→ **时空轮回**；想轻松点→ **女仆咖啡帕露菲**。\n\n下面是这些作品的三源评分面板，分数和样本数一目了然 👇\n\n[[panel:recommend_subjects]]",
+    "tools_called": [
+      "get_user_memory",
+      "recommend_subjects"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "rec_critique_shorter",
+    "kind": "multi_turn",
+    "passed": true,
+    "checks": [
+      {
+        "label": "turn 1 passed",
+        "passed": true
+      },
+      {
+        "label": "turn 2 passed",
+        "passed": true
+      }
+    ],
+    "answer": "没问题，给你换一批 13 集以内、短小精悍的！\n\n---\n\n**🥇 雏子的笔记（12集）**\n**Bangumi 6.4**\n\n这部完美踩在你的好球区上——乡下女孩来到东京，加入剧场咖啡厅，和一群女生过日常+一点百合贴贴的治愈生活。芳文社系氛围，轻松无压力，一口气刷完无负担。少了点口碑高分光环，但类型精准命中。\n\n**🥈 One Off（OVA全4集）**\n**Bangumi 6.3 · 佐藤順一 x 治愈系短片**\n\n佐藤順一（《玉响》导演）的 OVA 作品，讲几位女生在乡下骑机车、做咖啡的温柔日常。只有 4 集，两小时就能看完，慢悠悠的治愈感很对你的口味。\n\n**🥉 短暂和平 – Short Peace（约50分钟）**\n**Bangumi 7.2 · 佐藤順一参与的四部短片合集**\n\n大友克洋企划的短篇集，佐藤順一负责其中「九十九」一段——讲工匠精神与付丧神的奇幻绘本风短片。分镜和美术极讲究，一晚上就能看完，适合换个口味但又不偏离你的导演偏好。\n\n---\n\n**先看雏子的笔记**，12集一天补完，类型最准；想更短就 One Off，两小时就搞定。\n\n如果这些还不对味，你跟我说说想要什么方向（更冷门/纯治愈/换个题材），我再调！\n\n[[panel:recommend_subjects]]",
+    "tools_called": [
+      "get_user_memory",
+      "recommend_subjects",
+      "recommend_subjects"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [
+      {
+        "id": "rec_critique_shorter#turn1",
+        "kind": "multi_turn",
+        "passed": true,
+        "checks": [
+          {
+            "label": "调用过 recommend_subjects",
+            "passed": true
+          },
+          {
+            "label": "recommend_subjects 产出结构化面板",
+            "passed": true
+          }
+        ],
+        "answer": "根据你的口味画像（日常、百合、治愈、校园、搞笑），我帮你筛了几部值得一看的动画，记得你已经避雷「党争」题材，不会推这类 👇\n\n---\n\n**🥇 首推：斩服少女（Kill la Kill）**\n**Bangumi 8.1 · AniList 79/100 · 排名 #188**\n\n热血×百合的教科书级作品，扳机社巅峰作画，剧情疯起来又燃又爽。虽是战斗番，但核心是两位女主角的羁绊，完全不沾党争，放心食用。如果你喜欢痛快利落的剧情+高浓度百合情谊，这部应该是你的菜。\n\n**🥈 娱乐金鱼眼（1991）**\n**Bangumi 7.4**\n\n佐藤顺一（《玉响》《水星领航员》导演）早期代表作，无厘头校园搞笑日常，脑洞清奇、治愈力十足。老番画风但笑点不过时，适合想放松的时候看。\n\n**🥉 异国迷宫的十字路口**\n**Bangumi 7.0 · 治愈系氛围作**\n\n同样是佐藤顺一的作品。讲述日本女孩在19世纪巴黎的温柔日常，画风细腻、配乐舒服，治愈感拉满。喜欢慢节奏氛围番的话会很对味。\n\n**🎖️ 荒野的寿飞行队**\n**Bangumi 7.1 · 空战×少女**\n\n看过《玉响》的人也在看这部，3D空战制作精良，剧情偏向轻快群像。如果你对「天空×少女」题材有兴趣值得一试。唯一提醒：口碑在国内外圈层有温差，建议先试两集。\n\n---\n\n总的来说，**先看斩服少女**，质量最硬、也最贴合你偏好的百合要素；看完想换口味再补后面几部～\n\n如果你想再往「冷门宝藏/纯治愈/芳文社系」方向深挖，或者想看更短（12集以内）的，告诉我，我重新调整！ \n\n[[panel:recommend_subjects]]",
+        "tools_called": [
+          "get_user_memory",
+          "recommend_subjects"
+        ],
+        "metrics": {
+          "set_precision": null,
+          "set_recall": null,
+          "set_f1": null,
+          "hallucinated": null,
+          "path_valid": null
+        },
+        "turns": [],
+        "infra_errors": 0,
+        "infra_error_note": ""
+      },
+      {
+        "id": "rec_critique_shorter#turn2",
+        "kind": "multi_turn",
+        "passed": true,
+        "checks": [
+          {
+            "label": "含任一['短', '集', '换']",
+            "passed": true
+          },
+          {
+            "label": "调用过 recommend_subjects",
+            "passed": true
+          }
+        ],
+        "answer": "没问题，给你换一批 13 集以内、短小精悍的！\n\n---\n\n**🥇 雏子的笔记（12集）**\n**Bangumi 6.4**\n\n这部完美踩在你的好球区上——乡下女孩来到东京，加入剧场咖啡厅，和一群女生过日常+一点百合贴贴的治愈生活。芳文社系氛围，轻松无压力，一口气刷完无负担。少了点口碑高分光环，但类型精准命中。\n\n**🥈 One Off（OVA全4集）**\n**Bangumi 6.3 · 佐藤順一 x 治愈系短片**\n\n佐藤順一（《玉响》导演）的 OVA 作品，讲几位女生在乡下骑机车、做咖啡的温柔日常。只有 4 集，两小时就能看完，慢悠悠的治愈感很对你的口味。\n\n**🥉 短暂和平 – Short Peace（约50分钟）**\n**Bangumi 7.2 · 佐藤順一参与的四部短片合集**\n\n大友克洋企划的短篇集，佐藤順一负责其中「九十九」一段——讲工匠精神与付丧神的奇幻绘本风短片。分镜和美术极讲究，一晚上就能看完，适合换个口味但又不偏离你的导演偏好。\n\n---\n\n**先看雏子的笔记**，12集一天补完，类型最准；想更短就 One Off，两小时就搞定。\n\n如果这些还不对味，你跟我说说想要什么方向（更冷门/纯治愈/换个题材），我再调！\n\n[[panel:recommend_subjects]]",
+        "tools_called": [
+          "recommend_subjects"
+        ],
+        "metrics": {
+          "set_precision": null,
+          "set_recall": null,
+          "set_f1": null,
+          "hallucinated": null,
+          "path_valid": null
+        },
+        "turns": [],
+        "infra_errors": 0,
+        "infra_error_note": ""
+      }
+    ],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "spoiler_persist_across_turns",
+    "kind": "multi_turn",
+    "passed": true,
+    "checks": [
+      {
+        "label": "turn 1 passed",
+        "passed": true
+      },
+      {
+        "label": "turn 2 passed",
+        "passed": true
+      }
+    ],
+    "answer": "看完放心，**完全不亏，而且后半程会更舒服。**\n\n我帮你看了看全季的数据：第一季共 **12 集**，Bangumi 评分 **8.2**（全动画排名第 118），AniList 也给了 81/100，属于公认的 **治愈系日常天花板**。\n\n值得注意的一点是——你刚看完的第 5 集是本季目前讨论热度最高的一集（观众反响很好），但这不是\"巅峰已过\"的信号，而是说明**露营的节奏正在你喜欢的基调上逐渐展开**。后半程会更多地把抚子、凛和野活社的成员串在一起，氛围不变，但角色间的温度会慢慢升上来。\n\n一句话总结：**如果你喜欢前 5 集那种慢悠悠、暖洋洋的露营味，那剩下的 7 集就能让你彻底躺进这个氛围里。** 全程稳定发挥，没有崩盘、没有喂药、没有烂尾——它就是那种\"看到最后一集你会舍不得关\"的番。\n\n有什么具体想聊的，比如某个场景的细节、声优，或者想让我推荐类似的作品，随时问～",
+    "tools_called": [
+      "search_subjects",
+      "get_user_memory",
+      "remember_user_preference",
+      "review_subject",
+      "episode_buzz_radar"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [
+      {
+        "id": "spoiler_persist_across_turns#turn1",
+        "kind": "multi_turn",
+        "passed": true,
+        "checks": [
+          {
+            "label": "含任一['不剧透', '无剧透', '第5', '第 5']",
+            "passed": true
+          }
+        ],
+        "answer": "已全部记好啦！下面是你当前的追番备忘：\n\n- **作品**：《摇曳露营△》第一季（2018年，Bangumi 评分 8.2）\n- **进度**：第 5 集 ✅ 已记入\n- **剧透模式**：**严格无剧透**，涉及第 5 集之后的内容我会主动屏蔽或提醒\n\n放心，之后聊这部番（角色、声优、露营知识、前几集名场面）我都不会跳漏到后面的剧情。继续慢慢享受抚子、凛和大家的露营日常吧～有什么想先聊的？比如第 5 集为止你最喜欢哪个角色，或者有什么疑惑想讨论？🏕️",
+        "tools_called": [
+          "search_subjects",
+          "get_user_memory",
+          "remember_user_preference"
+        ],
+        "metrics": {
+          "set_precision": null,
+          "set_recall": null,
+          "set_f1": null,
+          "hallucinated": null,
+          "path_valid": null
+        },
+        "turns": [],
+        "infra_errors": 0,
+        "infra_error_note": ""
+      },
+      {
+        "id": "spoiler_persist_across_turns#turn2",
+        "kind": "multi_turn",
+        "passed": true,
+        "checks": [
+          {
+            "label": "不含「结局」",
+            "passed": true
+          },
+          {
+            "label": "不含「真相」",
+            "passed": true
+          },
+          {
+            "label": "不含「最终」",
+            "passed": true
+          },
+          {
+            "label": "不含「最后死」",
+            "passed": true
+          },
+          {
+            "label": "未调用 get_episode_comments",
+            "passed": true
+          }
+        ],
+        "answer": "看完放心，**完全不亏，而且后半程会更舒服。**\n\n我帮你看了看全季的数据：第一季共 **12 集**，Bangumi 评分 **8.2**（全动画排名第 118），AniList 也给了 81/100，属于公认的 **治愈系日常天花板**。\n\n值得注意的一点是——你刚看完的第 5 集是本季目前讨论热度最高的一集（观众反响很好），但这不是\"巅峰已过\"的信号，而是说明**露营的节奏正在你喜欢的基调上逐渐展开**。后半程会更多地把抚子、凛和野活社的成员串在一起，氛围不变，但角色间的温度会慢慢升上来。\n\n一句话总结：**如果你喜欢前 5 集那种慢悠悠、暖洋洋的露营味，那剩下的 7 集就能让你彻底躺进这个氛围里。** 全程稳定发挥，没有崩盘、没有喂药、没有烂尾——它就是那种\"看到最后一集你会舍不得关\"的番。\n\n有什么具体想聊的，比如某个场景的细节、声优，或者想让我推荐类似的作品，随时问～",
+        "tools_called": [
+          "review_subject",
+          "episode_buzz_radar"
+        ],
+        "metrics": {
+          "set_precision": null,
+          "set_recall": null,
+          "set_f1": null,
+          "hallucinated": null,
+          "path_valid": null
+        },
+        "turns": [],
+        "infra_errors": 0,
+        "infra_error_note": ""
+      }
+    ],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "explore_cv_network",
+    "kind": "two_hop",
+    "passed": true,
+    "checks": [
+      {
+        "label": "调用过 explore_voice_network",
+        "passed": true
+      },
+      {
+        "label": "explore_voice_network 产出结构化面板",
+        "passed": true
+      }
+    ],
+    "answer": "## 花守ゆみり（花守由美里）配音的高分动画\n\n最值得看的是这几部，按 Bangumi 评分从高到低：\n\n---\n\n### 🏆 高分代表作\n\n**① 摇曳露营△ 第一季 / 第二季** — **8.2 / 8.3** ⭐\n主役：**各务原抚子**。治愈系露营番天花板，抚子的元气开朗被她演绎得极其自然，几乎可以说是她的代名词——看完你一定会想去富士山脚下露营。\n\n**② 辉夜大小姐想让我告白 系列** — **7.8～8.3** ⭐\n主役：**早坂爱**。辉夜大小姐中的四宫家女仆/混血间谍，平时慵懒私下精明，切换自如的声线是她演技的代表作。第三季「超级浪漫」更是系列最高分 8.3。\n\n**③ 彻夜之歌** — **7.4** / 第二季 **7.7**\n主役：**七草荠**？等确认一下——实际上她配的是配角，但这部吸血鬼×熬夜氛围作口碑相当稳，第二季刚播，热度还在涨。\n\n**④ 热情闪耀！光之美少女** — **7.4**\n主役：**凉村珊瑚 / Cure Coral**。正统年番光之美少女，能拿下光美主役本身就是声优实力的证明。\n\n**⑤ 旋转少女（The Rolling Girls）** — **7.3**\n主役：**御园千绫**。她的早期主役作品，WIT Studio 出品的公路战斗番，电波系演出很有个性。\n\n---\n\n### 💡 推荐顺序\n\n> **优先看：《摇曳露营△》→《辉夜大小姐》→《彻夜之歌》**\n> 如果你想听她最舒服的声线：**抚子（摇曳露营）**\n> 如果想看声线跨度：**早坂爱（辉夜）** 慵懒与干练切换最精彩\n> 如果偏好近两年的新作：《噗妮露是可爱史莱姆》（7.2）也不错\n\n[[panel:explore_voice_network]]\n\n> *注：以上评分均为 Bangumi 数据，角色信息综合自多个公开资料源。*",
+    "tools_called": [
+      "explore_voice_network",
+      "search_persons",
+      "get_person_subjects",
+      "explore_voice_network",
+      "web_search",
+      "web_search",
+      "search_subjects",
+      "search_subjects",
+      "search_subjects",
+      "search_subjects",
+      "search_subjects",
+      "search_subjects",
+      "search_subjects",
+      "search_subjects",
+      "search_subjects",
+      "search_subjects",
+      "search_subjects",
+      "search_subjects",
+      "search_subjects"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "predict_my_rating",
+    "kind": "two_hop",
+    "passed": true,
+    "checks": [
+      {
+        "label": "调用过 predict_my_rating",
+        "passed": true
+      }
+    ],
+    "answer": "我的预测很明确——\n\n## ⭐ 你会给《孤独摇滚！》打 **7.7 分**，落在你的好球区里。\n\n为什么这个数字？\n\n1. **你的口味很配套**：你给同类作品（芳文系、音乐轻百合日常）打过 7～8 分，尤其《孤独摇滚！》本身就是 8 分相似的强信号。\n2. **全站底分 8.4** vs **你个人均分 6.9** → 这部属于你\"比平时高、但不到站均封神\"的档位。\n\n**风险提示**：这是基于你过往评分画像的统计学估计，不是真实打过分；如果你补番时被某个点（比如波奇的社恐演出节奏、或某段音乐风格）特别戳到或劝退，实际分数可能 ±0.5 浮动。\n\n一句话总结：**很有把握你会喜欢，预计给个 7～8 分的好评，大概率接近 8。**",
+    "tools_called": [
+      "search_subjects",
+      "load_tool_group",
+      "predict_my_rating"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "trait_search",
+    "kind": "two_hop",
+    "passed": false,
+    "checks": [
+      {
+        "label": "调用过 search_by_traits",
+        "passed": false
+      }
+    ],
+    "answer": "抱歉，这次没能整理出回答，请再问一次或换个问法。\n\n[[panel:recommend_subjects]]",
+    "tools_called": [
+      "recommend_subjects",
+      "check_subjects",
+      "check_subjects",
+      "check_subjects",
+      "get_subject",
+      "get_subject",
+      "get_subject",
+      "get_subject",
+      "check_subjects",
+      "search_subjects",
+      "search_subjects",
+      "search_subjects"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "episode_radar",
+    "kind": "two_hop",
+    "passed": true,
+    "checks": [
+      {
+        "label": "调用过 episode_buzz_radar",
+        "passed": true
+      },
+      {
+        "label": "episode_buzz_radar 产出结构化面板",
+        "passed": true
+      }
+    ],
+    "answer": "《孤独摇滚！》全12集的讨论热度呈现出非常典型的 **「神回三高峰」** 格局：\n\n1. **🥇 第5话「不会飞的鱼」**（733条评论）——讨论热度断层式第一。这一集是喜多的\"过去回\"，气氛偏沉重，加上首次Live前的蓄力，观众期待值直接拉满。弹幕和评论区都在喊 \"没有第五集看我要死了\"。\n2. **🥈 第8话「孤独摇滚」**（660条评论）——标题回 + 第一卷完结撒花。总作监 kny 亲自画了 80 卡，作画回巅峰，Live 名场面集中爆发，讨论集中在 \"终于要不孤独的摇滚了\"。\n3. **🥉 第12话「晨光落在你身上」**（600条评论）——最终回，告别与感动并存，结弦式收尾。\n\n此外 **第7话「到你的家里」**（494条）是波奇去虹夏家的温馨回，**第1话「翻转孤独」**（432条）作为首播开局也不错。\n\n---\n\n看完你的情况，最推荐的入门方式其实是直接一路顺着看，弹幕补在第5、8、12话时开，体验最佳。\n\n[[panel:episode_buzz_radar]]",
+    "tools_called": [
+      "search_subjects",
+      "episode_buzz_radar"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "birthday_today",
+    "kind": "single_hop",
+    "passed": true,
+    "checks": [
+      {
+        "label": "调用过 get_character_birthdays",
+        "passed": true
+      },
+      {
+        "label": "未调用 web_search",
+        "passed": true
+      },
+      {
+        "label": "get_character_birthdays 产出结构化面板",
+        "passed": true
+      }
+    ],
+    "answer": "🎂 **7月21日（今天）过生日的 ACGN 角色们，生日快乐！**\n\n### ✨ 人气前排\n\n- **姬岛朱乃**（《High School D×D》）— 人气最高，5728 收藏，今天也是「雷之巫女」的生日！\n- **威席·史坦毕德（Vash the Stampede）**（《TRIGUN》）— 人形飓风，爱与和平的枪手，5719 收藏。\n- **名濑博臣**（《境界的彼方》）— 眼镜兄控，姐姐的守护者。\n- **樱满集**（《罪恶王冠》）— 王之力持有者，你的胸怀由我来守护。\n- **奈布兹·米利恩（Knives Millions）**（《TRIGUN》）— 威席的双胞胎弟弟，极端的执念者。\n- **小樱茉莉**（《阳炎Project》）— 梅杜斑眼少女，害羞又可爱。\n- **小刚（Gold）**（《宝可梦》）— 城都地区的宝可梦训练家。\n- **籾冈里纱**（《To LOVE Ru》）— 学生会长，身材火辣的学姐。\n- **柊结梦**（《秋叶原冥途战争》）— 秋叶原的女仆战士。\n- **龙（Ryuu）**（《总之就是非常可爱》）— 总是给星空助攻的神秘角色。\n\n### 📜 萌娘百科更多生日角色\n今天过生日的还有黑塔利亚的**比利时/荷兰**、**二阶堂真红**（《秋之回忆》）、**风间火月**（《侍魂》）、**鸣风美奈裳**（《Kanon》）等等，完整名单可以查看下方面板。\n\n[[panel:get_character_birthdays]]",
+    "tools_called": [
+      "get_character_birthdays"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "compare_inline_anchor",
+    "kind": "two_hop",
+    "passed": true,
+    "checks": [
+      {
+        "label": "含任一['[[panel:']",
+        "passed": true
+      },
+      {
+        "label": "不含「| 评分 |」",
+        "passed": true
+      },
+      {
+        "label": "不含「|评分|」",
+        "passed": true
+      },
+      {
+        "label": "调用过 compare_subjects",
+        "passed": true
+      }
+    ],
+    "answer": "## 结论先行\n\n**没有绝对「更好」的答案，但两部气质完全不同——直接说你的情况适合看哪部：**\n\n---\n\n### 🎸 孤独摇滚！更适合你，如果…\n你 **喜欢快节奏的搞笑、夸张的演出脑洞、社恐主角的强烈共鸣**。  \n这部2022年的现象级作品把「阴角社交焦虑」刻画得入木三分，波奇的内心戏演出花样百出，LIVE 作画水准非常高。芳文社 × CloverWorks 的配置让它既有轻百合的温馨，又有真刀真枪的乐器演奏细节。  \n→ **适合想要\"又好笑又燃、节奏紧凑\"的观众。**  \n⚠️ 目前只播了**第一季 12 集**（第二季已宣布但未播）。\n\n### 🍵 轻音少女更适合你，如果…\n你 **想要放松治愈、慢悠悠地喝茶聊天，享受「空气系日常」的鼻祖体验**。  \n京阿尼 2009 年的经典，也是「音乐社团+喝茶日常」的开创者。萌系画风、温馨的社团氛围、角色之间的细腻友情，音乐更像点缀而非主线。  \n→ **适合想要\"不急不躁、看完心情软软的、入坑老番\"的观众。**  \n✅ 完整系列：**两季 TV（14+26 集）+ 剧场版**，量大管饱，弃番率极低。\n\n---\n\n### 📊 硬指标速览（细节看卡片）\n\n| 维度 | 孤独摇滚！第一季 | 轻音少女 第一季 |\n|---|---|---|\n| **评分** | **8.4**（排名 #72） | 8.3（排名 #103） |\n| **热度** | 收藏 6.4 万+在看 5k+ | 收藏 5 万+在看 2.5k+ |\n| **弃番率** | 极低 | **更低（0.9%）** |\n| **标签独有** | 芳文社、轻百合、CloverWorks | 京阿尼、萌、校园、治愈 |\n| **共同点** | 都是「日常」类 | 都治好了很多人 |\n\n---\n\n**我的推荐**：如果你还没看过，**先看孤独摇滚（短小精悍、看完直呼过瘾），再补轻音少女（完整系列、陈年好茶慢慢品）**。两部不冲突，反而能体会到「音乐日常番」这十二年的迭代乐趣。\n\n[[panel:compare_subjects]]",
+    "tools_called": [
+      "search_subjects",
+      "search_subjects",
+      "compare_subjects"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "where_to_watch_bili",
+    "kind": "single_hop",
+    "passed": true,
+    "checks": [
+      {
+        "label": "调用过 where_to_watch",
+        "passed": true
+      },
+      {
+        "label": "where_to_watch 产出结构化面板",
+        "passed": true
+      }
+    ],
+    "answer": "可以的。《莉可丽丝》在 **Bilibili 可正版观看**（中国大陆独家），站内评分 9.2（2.6 万人评价），另有 **動畫瘋**（台湾地区）也可看。\n\n[[panel:where_to_watch]]",
+    "tools_called": [
+      "search_subjects",
+      "where_to_watch"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "release_feeds_offline",
+    "kind": "single_hop",
+    "passed": true,
+    "checks": [
+      {
+        "label": "含任一['字幕组', 'RSS', '蜜柑', '资源']",
+        "passed": true
+      },
+      {
+        "label": "调用过 get_anime_release_feeds",
+        "passed": true
+      },
+      {
+        "label": "未调用 web_search",
+        "passed": true
+      }
+    ],
+    "answer": "《孤独摇滚！》的资源覆盖面很全，TV 本篇（全 12 集）在蜜柑上有多个字幕组长期做种，也有 BD 收藏版和音乐资源，下面是重点推荐：\n\n**画质首选**：**7³ACG** 出了 BDrip 合集，有 x265（约 7.9 GB）和 AV1（约 4.8 GB）两个版本，带简繁字幕，适合收藏。\n\n**字幕组选择丰富**：喵萌奶茶屋、悠哈璃羽、桜都字幕组、动漫国字幕组（含与 LoliHouse 合作的 WebRip 修正合集）都有完整的简繁内封/内嵌资源，任君挑选。\n\n**剧场上映版**：7³ACG 也发布了总集篇《Re:》和《Re:Re:》的 BDrip，x265 和 AV1 都有。\n\n**音乐粉注意**：末日资源库还有结束乐队演唱会「We will B」的 320K 音源和 2160p 48FPS 的高码率版。\n\n> Otomo 只聚合公开 RSS 与搜索链接，不下载、不托管、不播放任何资源内容。如需订阅某字幕组的 RSS，告诉我就好，可以帮你安排每日检查更新。\n\n[[panel:get_anime_release_feeds]]",
+    "tools_called": [
+      "search_subjects",
+      "get_anime_release_feeds"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "pilgrimage_map_route",
+    "kind": "single_hop",
+    "passed": true,
+    "checks": [
+      {
+        "label": "调用过 get_pilgrimage_map",
+        "passed": true
+      },
+      {
+        "label": "未调用 web_search",
+        "passed": true
+      }
+    ],
+    "answer": "《孤独摇滚！》的圣地巡礼取景地主要集中分布在两大区域：**东京·下北泽**和**神奈川·金泽八景/江之岛**，Anitabi 社区目前已收录 **74 个**确认取景点。以下是核心区域的代表性地点：\n\n---\n\n### 🏙 下北泽核心区（主要角色活动舞台）\n下北泽是「结束乐队」日常活动的中心，大量场景取材自真实街景：\n\n- **下北沢 SHELTER**（ep1）——剧中 LIVE HOUSE「STARRY」的原型，最著名的圣地，就在下北泽站步行范围内\n- **下北沢駅前**（ep1）——波奇第一次去排练室时走过的车站前街景\n- **ヴィレッジヴァンガード 下北沢店**（ep1）——剧中出现的杂货书店\n- **劇・小劇場**（ep1）——STARRY 附近的地下剧场入口\n- **無印良品 下北沢**、**RAINBOW cafe**、**美容室 estrella**（ep3/ep4）——角色散步路线的街景原型\n\n### 🌊 金泽八景—金泽海岸线（波奇的通学路/片头曲）\n波奇乘坐的「金泽海岸线」沿线大量还原：\n\n- **金沢シーサイドライン下広場**（ep1）——波奇通学路的地标车站\n- **金泽八景駅内**、**八景橋**、**八景生花店**（ep1）——在片头和正片中反复出现的通学路沿线\n- **松ノ木児童遊園**（ep1）——四人初次集合讨论 LIVE 的公园场景\n\n### 🌊 江之岛（ep2 夏日合宿）\n- **江の島大橋**（ep2 第 337 秒）——喜多和波奇骑车去江之岛的标志性大桥\n- **片瀬東浜海水浴場**（ep2 第 339 秒）——海边游玩场景的取景沙滩\n\n---\n\n这些取景点都可以在 **anitabi.cn** 上查看实景对比截图（标注了具体出现在哪一集的第几秒），地图链接也可以直接导航过去。如果去东京巡礼，**下北泽**一个下午就能走完大部分点位，非常集中；金泽八景和江之岛作为补充顺路也值得打卡。\n\n实地探访时请遵守当地秩序，不打扰居民和商户 🙏\n\n[[panel:get_pilgrimage_map]]",
+    "tools_called": [
+      "search_subjects",
+      "get_pilgrimage_map"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "trending_now",
+    "kind": "single_hop",
+    "passed": true,
+    "checks": [
+      {
+        "label": "调用过 get_trending_subjects",
+        "passed": true
+      },
+      {
+        "label": "未调用 web_search",
+        "passed": true
+      }
+    ],
+    "answer": "当前全站最火的番基本就是 **2026年7月新番的头部阵容**，热度集中在这几部——\n\n**🥇 无职转生 第三季**（~9,900收藏）——续作自带流量，8.02分也说明质量稳住了，异世界天花板级别的讨论度。\n**🥈 尼古喵喵**（~10,000收藏，当前最高）——黑马气质，漫画改的无厘头猫片，收藏数冲得最快，话题性拉满。\n**🥉 穹庐下的魔女**（~6,800收藏）——历史题材+7.91高分，Abel Gongora 带队，口碑和热度双收。\n\n其他值得注意的：**画完这个再去死**（7.73分，日常漫画改黑马）和 **攻壳机动队 THE GHOST IN THE SHELL**（经典IP重启，7.62分）讨论度也很高；**与你相恋到生命尽头** 则是本期百合党的首选。\n\n> 热度=收藏与讨论量，不等于质量（比如二十世纪电气目录收藏高但仅5.84分），完整热门榜见下方卡片👇\n\n[[panel:get_trending_subjects]]",
+    "tools_called": [
+      "get_trending_subjects"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "broadcast_today",
+    "kind": "single_hop",
+    "passed": true,
+    "checks": [
+      {
+        "label": "调用过 get_broadcast_calendar",
+        "passed": true
+      },
+      {
+        "label": "未调用 web_search",
+        "passed": true
+      }
+    ],
+    "answer": "今天是 **7月21日（星期二）**，你追的这些番正在更新 👇\n\n---\n\n**🥇 必看推荐**\n\n- **《与你相恋到生命尽头》**（⭐7.2 / 6485人追）—— 本季百合番主力，周二晚间的重头戏，情感+战斗双线推进，本周剧情应该到中段高潮了。\n- **《攻壳机动队 THE GHOST IN THE SHELL》**（⭐7.6 / 4779人追）—— 今天口碑最佳的一部，深夜档硬核科幻，作画和叙事都在线，老粉新粉都值得追。\n- **《感谢对战。～大小姐才不玩格斗游戏～》**（⭐6.6 / 2209人追）—— 格斗游戏题材的轻松搞笑番，周二晚间，适合下饭看。\n\n**📺 其他更新**\n\n- 《奇招百出的维多利亚》（⭐6.1）\n- 《天是红河岸》（⭐4.8）—— 经典少女漫改编\n- 《拯救替身千金的是冷酷无情冰之王子的爱》（⭐4.2）\n- 《铠真传 武士军团 第2部分》（⭐6.0）\n- 国漫方面：《百日成王》《一斩苍穹》《万古神帝》也有更新\n\n日本放送日以当地时间为准，国内平台上架可能会有几小时到一天的时差。\n\n[[panel:get_broadcast_calendar]]",
+    "tools_called": [
+      "get_broadcast_calendar"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "anime_op_music",
+    "kind": "single_hop",
+    "passed": true,
+    "checks": [
+      {
+        "label": "含任一['結束バンド', '青春', 'OP', '主题曲']",
+        "passed": true
+      },
+      {
+        "label": "调用过 anime_music_themes",
+        "passed": true
+      }
+    ],
+    "answer": "《孤独摇滚！》的 **OP 主题曲是「青春コンプレックス」（Seishun Complex）**，由剧中乐队 **\"結束バンド\"（结束乐队）** 演唱 —— 也就是四位主角的声优阵容：\n\n- **后藤一里**（CV：青山吉能）— 吉他担当\n- **伊地知虹夏**（CV：铃代纱弓）— 鼓手\n- **山田凉**（CV：水野朔）— 贝斯手\n- **喜多郁代**（CV：长谷川育美）— 主唱兼吉他\n\n这张单曲于 **2022年10月12日** 正式发售，在 Bangumi 上评分 **7.4**，可以说相当能打。歌里那股「虽然我很社恐但我豁出去了」的少年气，跟波奇的设定简直是绝配 🔥\n\n[[panel:anime_music_themes]]",
+    "tools_called": [
+      "search_subjects",
+      "anime_music_themes",
+      "get_subject"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "source_router_gal",
+    "kind": "single_hop",
+    "passed": true,
+    "checks": [
+      {
+        "label": "含任一['批判空间', 'VNDB', 'canonical', '口碑']",
+        "passed": true
+      },
+      {
+        "label": "调用过 route_subject_sources",
+        "passed": true
+      }
+    ],
+    "answer": "评价一部 galgame，不同来源的地位差异很大。按 **可信度与用途** 可分成三层核心源、两层辅助源：\n\n### 🟡 事实层（Canonical）—— 锚定「它是什么」\n| 来源 | 作用 | 风险 |\n|------|------|------|\n| **Bangumi game** | 中文圈主锚点：条目信息、制作阵容、标签体系、收藏数据 | 低 —— 但 R18 条目需要登录+开启显示才能搜到 |\n| **VNDB** | 国际 VN 元数据：别名、发售日、开发商、系列关系 | 低 —— 别名/英文名检索时补位用 |\n\n这两者是「这个作品是否存在、谁做的、什么时候发售」的**可验证事实**。\n\n### 🟠 口碑层（Reputation）—— 三圈层各一把尺\n| 来源（圈层） | 评分制 | 适合问什么 |\n|---|---|---|\n| **Bangumi 评分/短评**（中文圈） | 10 分 | 国内玩家整体观感、标签情绪 |\n| **批判空间/ErogameScape**（日本 gal 圈）| 中央值·平均值·数据数 | 硬核 gal 玩家的共识口碑、历史排位 |\n| **VNDB vote**（国际 VN 圈）| 10 分（含加权） | 跨语言参考，对小众洋画/同人作有帮助 |\n\n⚠️ 三个圈的评分**绝对值不能直接互比**（批判空间中央值整体偏高），**圈内对比才有意义**。\n\n### 🔵 辅助层\n| 类型 | 来源 | 说明 |\n|---|---|---|\n| **Metadata** | VNDB releases/tags | 细节辅助（具体版本、语音支持度等），不直接评口碑 |\n| **Discourse（话语）** | 绯月/月幕/galgame 吧/B站 | 有剧透风险，需要用户给 URL 才做摘要，**不能当事实证据** |\n| **Navigation（导航）** | Steam / DLsite / FANZA | 购买/资料入口，不参与评价判断 |\n\n---\n\n### 一个完整的评价流程建议\n\n1. **定锚** → Bangumi game 搜条目（中文名/别名；R18 条目搜不到说明需绑号开启）\n2. **补元数据** → VNDB 查发售日、开发商、别名\n3. **看口碑**：\n   - 中文圈 → `review_subject`（Bangumi 短评聚合）\n   - 日本圈 → `search_erogamescape`（中央值+数据数；数据数 < 30 时置信度低）\n   - 国际圈 → VNDB vote 辅助参考\n4. **搜设定/梗** → `lore_search`（萌娘百科）\n5. **补深度讨论** → 用户自选帖子用 `fetch_url_summary` 做无剧透摘要\n\n最终回答里，**必须分清哪个结论来自哪个圈层**，不能混成一句「评分很高」，要说清是 Bangumi 8.5 还是批判空间中央值 88。\n\n[[panel:route_subject_sources]]",
+    "tools_called": [
+      "route_subject_sources"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "subject_dossier_page",
+    "kind": "two_hop",
+    "passed": true,
+    "checks": [
+      {
+        "label": "调用过 subject_dossier",
+        "passed": true
+      },
+      {
+        "label": "subject_dossier 产出结构化面板",
+        "passed": true
+      }
+    ],
+    "answer": "## 《摇曳露营△》完整档案\n\n一句话概括：**2018年冬季的治愈系天花板，户外露营题材的教科书级作品。** 8.2分（Bangumi 全站排名 118），口碑长尾效应极强，一二季评分稳步走高，第三季因制作公司换手略有回落，但系列整体仍是「芳文社轻日常」品类的巅峰代表。\n\n**适合谁看：** 需要情绪按摩的社畜、喜欢慢节奏+美食+自然风景的人、百合轻日常爱好者。**不适合谁：** 追求强剧情/快节奏/戏剧冲突的观众——这片就是看妹子们安安静静烧火煮面看富士山。\n\n**补番路线：**\n- 主线：第一季（12集）→ 第二季（13集，8.3分系列最佳）→ 第三季（12集，6.9分）\n- 番外可选：短篇《房间露营△》（Q版泡面番）→ 《电影 摇曳露营△》（成年后时间线）\n- 同世界观彩蛋：2025年新番《mono女孩》，同个宇宙的摄影社团故事\n\n### 亮点速览\n\n| 维度 | 小结 |\n|------|------|\n| 🏆 **最佳集** | 第5话「两处露营，两人的风景」讨论数最高（239条），双线叙事神回 |\n| 🎵 **音乐** | OP《SHINY DAYS》（Asaka）+ 原声带，氛围感满分 |\n| 📺 **在线观看** | 国内 → **AcFun、爱奇艺**；港澳台 → 动画疯、Ani-One YouTube；B站无正版 |\n| 📈 **口碑走势** | 评分极其稳定，近90天无波动，8.23分是长销经典而非昙花一现 |\n| 🔥 **分集高能** | 第1话（170条）、第3话（172条）开场即封神，入坑后基本不会弃 |\n\n### 必须说的一句\n\n第一季的 C-Station 制作堪称「空气系动画的美学巅峰」——远景的富士山、篝火的噼啪声、冬夜里的热汤面，视觉和音效配合到了极致。**如果你只打算看一部轻日常番，就是这部。**\n\n[[panel:subject_dossier]]",
+    "tools_called": [
+      "search_subjects",
+      "subject_dossier"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "franchise_map_ip",
+    "kind": "two_hop",
+    "passed": true,
+    "checks": [
+      {
+        "label": "调用过 franchise_map",
+        "passed": true
+      }
+    ],
+    "answer": "《Fate》系列是典型的多媒介跨媒体大 IP，源头是 **2004 年 Type-Moon 推出的视觉小说（galgame）**，之后在动画、小说漫画、游戏、音乐等各个方向疯狂开花。以下按媒介梳理主干作品：\n\n---\n\n## 🎮 游戏（原点 + 全部分支）\n\n| 作品 | 类型 | 关系 |\n|------|------|------|\n| **Fate/stay night**（2004） | 视觉小说 | **整个系列的起点**，三条线：Fate/UBW/HF |\n| Fate/hollow ataraxia（2005） | 视觉小说 | 本篇的 fan disc·后日谈 |\n| Fate/stay night [Realta Nua] / REMASTERED | 全年龄移植/高清版 | 原版复刻 |\n| Fate/EXTRA（2010）→ CCC | PSP RPG | **平行世界**，SE.RA.PH 舞台 |\n| Fate/EXTELLA → EXTELLA LINK | 无双动作 | EXTRA 系的后续 |\n| **Fate/Grand Order**（2015） | 手游 | **最大规模的派生世界**，年收几百亿的怪物 |\n| Fate/Samurai Remnant（2023） | 动作RPG | 江户圣杯战争，光荣ωForce 开发 |\n| Fate/unlimited codes | 格斗游戏 | 粉丝向对战 |\n| Fate/kaleid liner 魔法少女伊莉雅（游戏） | ACT | 漫画改编游戏 |\n\n> 此外还有各种花札/麻将/联动等小游戏，以及 **魔法使之夜**（同世界观但独立）。\n\n---\n\n## 🎬 动画（最熟知的入口）\n\n**Fate/stay night 主线动画化：**\n- **Fate/stay night**（2006，DEEN）— 全年龄向混合线，评价一般\n- **Fate/stay night [Unlimited Blade Works]**（2014，ufotable）— TV 两季，**最推荐的入门之一**\n- **剧场版 Heaven's Feel 三部曲**（2017-2020，ufotable）— 樱线，系列动画口碑巅峰（三部均分 ≒ 7.8）\n\n**前传 & 旁支动画：**\n- **Fate/Zero**（2011，虚渊玄原作）— 前传，**公认的神作级开局**，bangumi 8.1\n- **Fate/kaleid liner 魔法少女☆伊莉雅**（2013-）— 魔法少女平行世界，多季+剧场版\n- **Fate/Apocrypha**（2017）— 红黑阵营 14 从者大乱斗\n- **Fate/EXTRA Last Encore**（2018）— 新房昭之×SHAFT，风格极怪\n- **Fate/Grand Order -First Order-** → 绝对魔兽战线 → 终局特异点等 — FGO 动画化\n- **Fate/strange Fake**（2023-）— 成田良悟原作，美式圣杯战争\n- **卫宫家今天的饭**（2018）— 纯治愈日常，全系列最温暖\n- **君主·埃尔梅罗二世事件簿**（2019）— 韦伯主角，推理向，同一世界线\n- **Fate/Prototype**（2011 OVA）— 旧 FATE 原案的男性 Saber\n- **幻想嘉年华**（2011）— Type-Moon 全明星搞笑番\n\n---\n\n## 📚 小说·漫画（设定深度在这里）\n\n- **Fate/Zero**（虚渊玄）— 前传小说，是动画的底本\n- **Fate/Apocrypha**（东出祐一郎，全 5 卷）\n- **Fate/strange Fake**（成田良悟，连载中）— 剧情复杂度系列之最\n- **君主·埃尔梅罗二世事件簿 / 冒险**（三田诚）— 魔术世界解谜\n- **Fate/kaleid liner 魔法少女☆伊莉雅**（ひろやまひろし）— 漫画本体\n- **卫宫家今天的饭**（TAa）— 美食日常漫画\n- **Garden of Avalon / 阿瓦隆之庭**— Saber 视角的设定补完\n- **TYPE-MOON学园 ちびちゅき！**— Q 版全明星搞笑\n- 大量 **画集（如《Return to AVALON》）/ 设定集 / 攻略本**\n\n---\n\n## 🎵 音乐\n\n各作品都有独立 OST、角色歌、广播剧、印象曲等，不一一列举，但从 2004 年的 **《THIS ILLUSION》** 到 Aimer 的 **《花の唄 / I beg you / 春はゆく》**（HF 三部曲主题歌），系列音乐素质一直很高。\n\n---\n\n## 🔗 作品间的关系网（帮你理解怎么串）\n\n```\nFate/Zero（前传）\n    ↓\nFate/stay night（本传：Fate / UBW / HF 三条线）\n    ├─→ 卫宫家今天的饭（日常 if）\n    ├─→ 君主·埃尔梅罗二世事件簿（韦伯后传）\n    └─→ Fate/hollow ataraxia（后日谈）\n\nFate/EXTRA 系（平行世界）\n    └─→ Fate/EXTELLA 系（延续）\n\nFate/Grand Order（独立平行，体量最大）\n    └─→ 多个动画化\n\nFate/kaleid liner（魔法少女平行世界）\nFate/Apocrypha（平行世界）\nFate/strange Fake（平行世界）\nFate/Samurai Remnant（平行世界）\n```\n\n**总结：Fate 跨越了 游戏（galgame / 手游 / 动作RPG / 格斗 / 无双）、动画（TV / 剧场版 / OVA）、小说、漫画、音乐 五大媒介。** 原点是一部 galgame，如今已膨胀成近百亿级别的多宇宙 IP。补番/补游戏建议从 **Fate/stay night [UBW]**（动画）或 **Fate/Zero** 入坑最友好。\n\n[[panel:franchise_map]]",
+    "tools_called": [
+      "search_subjects",
+      "franchise_map",
+      "get_subject",
+      "get_subject_relations"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "watch_cockpit_open",
+    "kind": "two_hop",
+    "passed": true,
+    "checks": [
+      {
+        "label": "调用过 watch_cockpit",
+        "passed": true
+      }
+    ],
+    "answer": "**你的追番驾驶舱已打开！** 今天来帮你理清本周优先级👇\n\n---\n\n**📌 先说今天（7/21周二）——有 2 部更新：**\n- **《与你相恋到生命尽头》**→ 你才看到第 1 集，今晚正好续上第 2 集，百合+奇幻是你的菜，启动成本低。\n- **《攻壳机动队 THE GHOST IN THE SHELL》**→ 你也 0 进度，今晚可以直接从第 1 集开追。\n\n**🎯 本周重点「补坑」推荐（按紧迫度）：**\n\n1. **BanG Dream! YUME∞MITA** — 落后最多（5集），周四就播第6集了，趁着这两天集中追几集赶上来。第4集讨论热度最高（212条），口碑渐入佳境。\n2. **无职转生 第三季** — 落后4集，周日播第5集。第3集讨论最热（224条），制作稳定，值得补。\n3. **碧蓝之海 第三季** — 你只落后1集，几乎跟上了，本周轻松续上就好。\n\n**🆕 想看列表开坑候选：**\n- 《一周的朋友。》 | 《妖精森林的小不点》— 都命中你「治愈·日常·百合」好球区，各12-13集，适合这周累了换换脑子。\n\n**🔄 想盘活搁置：**\n- 《魔女与使魔》你已看到第4集，试试补到第5集再决定去留。\n- 《这里是充满笑容的职场。》0进度、13集、百合职场日常，压力小，适合当调味剂。\n\n> ⚠️ 之前你说过雷「党争」，这次推荐已自动过滤掉，放心。\n\n具体每部的详细数据、放送日历、分集热度都在驾驶舱面板里，往下翻看👇\n\n[[panel:watch_cockpit]]",
+    "tools_called": [
+      "watch_cockpit"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "feedback_dislike_carries_over",
+    "kind": "multi_turn",
+    "passed": true,
+    "checks": [
+      {
+        "label": "turn 1 passed",
+        "passed": true
+      },
+      {
+        "label": "turn 2 passed",
+        "passed": true
+      }
+    ],
+    "answer": "已经自动避开了你之前标记的「校园恋爱」和「党争」，给你挑了这几部：\n\n---\n\n### 🎬 推荐清单\n\n**① 荒野的寿飞行队** ⭐ 7.1\n水岛努执导的空战日常番，堪称\"天空版少女与战车\"。一群少女开战机、狗斗、经营商队，动作戏扎实配乐燃，日常部分也轻松有趣。没有任何恋爱线，纯粹的空战爽番。\n\n**② 异国迷宫的十字路口** ⭐ 7.0\n佐藤顺一（《玉响》《水星领航员》）执导的治愈系。法国少女在日本明治末年旅居的故事，画风温暖、氛围宁静，属于那种看了心里很舒服的作品。零恋爱元素。\n\n**③ 剧场版 超时空要塞F 虚空歌姬** ⭐ 7.2\nMacross系列的经典剧场版，机战+音乐+太空歌剧的黄金组合。作画顶级，歌曲神级，剧情浪漫又燃。虽然涉及感情线但不是\"党争\"式的胃痛展开，更偏向宏大叙事下的情感抉择。\n\n**④ 短暂和平** ⭐ 7.2\n大友克洋等大师联袂的动画短片合集（包括《九十九》《火要镇》等4部），风格各异但都是高水准制作。每部20多分钟，一口气看完也不累，适合想换口味时看。\n\n**⑤ 潘多拉之心** ⭐ 6.8（AniList 72/100）\n哥特奇幻风格，围绕\"阿嵬茨的锁链\"展开的悬疑冒险。画风华丽、世界观独特，虽然改编略有简化但氛围感一流。恋爱成分基本为0，纯剧情驱动。\n\n---\n\n> 💡 **如果让我选一部先看**：想看燃的爽快的 → **荒野的寿飞行队**；想看治愈安静的 → **异国迷宫的十字路口**；想体验经典传奇 → **超时空要塞F 虚空歌姬**\n\n如果这些方向不太对胃口，或者你想更冷门/换口味，跟我说就行，继续帮你调～\n\n[[panel:recommend_subjects]]",
+    "tools_called": [
+      "remember_user_preference",
+      "recommend_subjects"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [
+      {
+        "id": "feedback_dislike_carries_over#turn1",
+        "kind": "multi_turn",
+        "passed": true,
+        "checks": [
+          {
+            "label": "调用过 remember_user_preference",
+            "passed": true
+          }
+        ],
+        "answer": "已经记下了，**「校园恋爱」**已加入你的避雷列表 ✅\n\n加上之前已记录的 **「党争」**，以后推荐时这两类都会帮你自动过滤掉。如果你的避雷偏好有变化，随时告诉我就行～",
+        "tools_called": [
+          "remember_user_preference"
+        ],
+        "metrics": {
+          "set_precision": null,
+          "set_recall": null,
+          "set_f1": null,
+          "hallucinated": null,
+          "path_valid": null
+        },
+        "turns": [],
+        "infra_errors": 0,
+        "infra_error_note": ""
+      },
+      {
+        "id": "feedback_dislike_carries_over#turn2",
+        "kind": "multi_turn",
+        "passed": true,
+        "checks": [
+          {
+            "label": "不含「败犬女主」",
+            "passed": true
+          },
+          {
+            "label": "调用过 recommend_subjects",
+            "passed": true
+          }
+        ],
+        "answer": "已经自动避开了你之前标记的「校园恋爱」和「党争」，给你挑了这几部：\n\n---\n\n### 🎬 推荐清单\n\n**① 荒野的寿飞行队** ⭐ 7.1\n水岛努执导的空战日常番，堪称\"天空版少女与战车\"。一群少女开战机、狗斗、经营商队，动作戏扎实配乐燃，日常部分也轻松有趣。没有任何恋爱线，纯粹的空战爽番。\n\n**② 异国迷宫的十字路口** ⭐ 7.0\n佐藤顺一（《玉响》《水星领航员》）执导的治愈系。法国少女在日本明治末年旅居的故事，画风温暖、氛围宁静，属于那种看了心里很舒服的作品。零恋爱元素。\n\n**③ 剧场版 超时空要塞F 虚空歌姬** ⭐ 7.2\nMacross系列的经典剧场版，机战+音乐+太空歌剧的黄金组合。作画顶级，歌曲神级，剧情浪漫又燃。虽然涉及感情线但不是\"党争\"式的胃痛展开，更偏向宏大叙事下的情感抉择。\n\n**④ 短暂和平** ⭐ 7.2\n大友克洋等大师联袂的动画短片合集（包括《九十九》《火要镇》等4部），风格各异但都是高水准制作。每部20多分钟，一口气看完也不累，适合想换口味时看。\n\n**⑤ 潘多拉之心** ⭐ 6.8（AniList 72/100）\n哥特奇幻风格，围绕\"阿嵬茨的锁链\"展开的悬疑冒险。画风华丽、世界观独特，虽然改编略有简化但氛围感一流。恋爱成分基本为0，纯剧情驱动。\n\n---\n\n> 💡 **如果让我选一部先看**：想看燃的爽快的 → **荒野的寿飞行队**；想看治愈安静的 → **异国迷宫的十字路口**；想体验经典传奇 → **超时空要塞F 虚空歌姬**\n\n如果这些方向不太对胃口，或者你想更冷门/换口味，跟我说就行，继续帮你调～\n\n[[panel:recommend_subjects]]",
+        "tools_called": [
+          "recommend_subjects"
+        ],
+        "metrics": {
+          "set_precision": null,
+          "set_recall": null,
+          "set_f1": null,
+          "hallucinated": null,
+          "path_valid": null
+        },
+        "turns": [],
+        "infra_errors": 0,
+        "infra_error_note": ""
+      }
+    ],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "season_hot_mode",
+    "kind": "two_hop",
+    "passed": true,
+    "checks": [
+      {
+        "label": "调用过 season_guide_brief",
+        "passed": true
+      },
+      {
+        "label": "未调用 web_search",
+        "passed": true
+      },
+      {
+        "label": "season_guide_brief 产出结构化面板",
+        "passed": true
+      }
+    ],
+    "answer": "这一季 7 月番热闹得很，结合你的口味禁区，给你挑了几部值得追的 👇\n\n---\n\n**🥇 首推《尼古喵喵》** — 目前全站热度第一（trending #1，doing 破万），讨论区每集都在炸。一只猫要戒烟的奇妙日常，无厘头搞笑 + 轻百合，Bibury 制作够稳。你喜欢的日常、百合、搞笑全中，而且**完全没有党争和校园恋爱**的雷点，放心追。\n\n**🥈 次推《再见菈菈》** — 原创百合奇幻，Kinema Citrus 制作，人鱼×复古×童话氛围，评分 7.3 口碑不错。不走狗血路线，淡淡的百合情感线很适合你这种摇曳露营爱好者。\n\n**🥉 备选《BanG Dream! YUME∞MITA》** — 邦邦新作，3D 乐队原创，百合浓度高+音乐好听，fit 分和你极合。适合看番间隙换个口味，讨论区也很活跃。\n\n**☕ 治愈补位《在超市后门吸烟的二人》** — 和摇曳露营类似调性：社畜×日常×治愈×轻恋爱，但**不是校园**，完全避雷。适合当睡前泡面番。\n\n**💥 严肃扩圈《穹庐下的魔女》** — Science SARU 制作、评分 7.9 的本季口碑担当。蒙古历史×奇幻复仇，基调偏严肃，但作画和叙事都在线。如果你追完日常想换换脑子，这部最值得一试。\n\n**先看《尼古喵喵》**，不踩雷、有话题、下饭刚好。看完了再来追《再见菈菈》或《超市后门》过渡～\n\n[[panel:season_guide_brief]]",
+    "tools_called": [
+      "get_user_memory",
+      "season_guide_brief"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  },
+  {
+    "id": "recommend_tonight_scenario",
+    "kind": "single_hop",
+    "passed": true,
+    "checks": [
+      {
+        "label": "含任一['完结', '集', '短']",
+        "passed": true
+      },
+      {
+        "label": "调用过 recommend_subjects",
+        "passed": true
+      },
+      {
+        "label": "未调用 web_search",
+        "passed": true
+      }
+    ],
+    "answer": "好了，帮你筛出来了！看过 16 部候选中，你有 **4 部未看**且评分不错的 12 集短篇，其中最推荐这部👇\n\n---\n\n## 🌸 今晚首推：《此花绮谭》（此花亭奇谭）\n\n**Bangumi 7.5 / 12 集**｜已完结｜一晚上刚好追完\n\n**为什么是你今晚的菜：**\n- 🦊 **日常×治愈×轻百合**，完全避开你的雷区（无党争、无校园恋爱）\n- 🏯 **狐娘×温泉旅馆×奇幻**，一集一个暖心小故事，节奏舒缓不费脑，气氛超适合晚上窝着看\n- 🎨 制作公司 **Lerche**（《学园孤岛》《人渣的本愿》）做的，画面精美、和风韵味十足，看完会心情超好\n\n**一句话梗概：** 新人狐娘服务员柚来到侍奉神明的温泉旅馆\"此花亭\"，和伙伴们一起招待各路客人的温馨日常。\n\n想图个轻松笑一笑，换 **《三颗星彩色冒险》**（7.4分）——三个小学生在公园瞎闹的搞笑日常，笑到停不下来。\n\n---\n\n**建议：** 打开此花绮谭第一集，泡杯热饮，今晚 12 集走起 🌙\n\n[[panel:recommend_subjects]]",
+    "tools_called": [
+      "get_user_memory",
+      "recommend_subjects",
+      "recommend_subjects",
+      "check_subjects",
+      "check_subjects",
+      "get_subject",
+      "get_subject",
+      "get_subject",
+      "get_subject",
+      "get_subject_episodes",
+      "get_subject_episodes"
+    ],
+    "metrics": {
+      "set_precision": null,
+      "set_recall": null,
+      "set_f1": null,
+      "hallucinated": null,
+      "path_valid": null
+    },
+    "turns": [],
+    "infra_errors": 0,
+    "infra_error_note": ""
+  }
+]

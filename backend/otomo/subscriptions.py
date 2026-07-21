@@ -43,6 +43,7 @@ SubscriptionKind = Literal[
     "bili_up_video",
     "rating_alert",
     "friends_activity",
+    "episode_buzz",
 ]
 SubscriptionChannel = Literal["inbox", "email", "webhook"]
 SubscriptionTemplate = Literal["brief", "normal", "detailed"]
@@ -467,6 +468,8 @@ class SubscriptionService:
                 return await self._rating_alert_payload(rule, client)
             if rule.kind == "friends_activity":
                 return await self._friends_activity_payload(rule, client)
+            if rule.kind == "episode_buzz":
+                return await self._episode_buzz_payload(rule, client)
             raise ValueError(f"unsupported subscription kind: {rule.kind}")
         finally:
             if hasattr(client, "aclose"):
@@ -506,6 +509,34 @@ class SubscriptionService:
         return {
             "sections": [{"title": "口碑异动", "items": lines}] if lines else [],
             "caveats": ["异动数据来自 netaba.re 近30天快照；无命中时不推送。"],
+        }
+
+    async def _episode_buzz_payload(self, rule: SubscriptionRule, client: Any) -> dict[str, Any]:
+        """分集热度哨兵：在看番最近播出的集评论量突增（对比该番历史中位数）→ 提醒。
+        复用 scan_my_episode_buzz 工具；无爆点不推送。"""
+        from .tools.discovery.tool import EpisodeBuzzScanArgs, ScanMyEpisodeBuzzTool
+
+        if not rule.username:
+            return {"sections": [], "caveats": ["episode_buzz 需要绑定用户名"]}
+        res = await ScanMyEpisodeBuzzTool(client).run(EpisodeBuzzScanArgs(
+            username=rule.username,
+            days=int(rule.filters.get("days") or 3),
+            min_comments=int(rule.filters.get("min_comments") or 30),
+            ratio=float(rule.filters.get("ratio") or 1.8),
+        ))
+        if not res.ok or res.data is None:
+            return {"sections": [], "caveats": [res.error or "分集热度扫描失败"]}
+        lines = [{
+            "id": h.subject_id,
+            "name": h.subject_name,
+            "summary": f"🔥 你在看的《{h.subject_name}》第 {h.sort:g} 集讨论量 {h.comments} 条"
+                       + (f"（约为该番平常的 {h.ratio} 倍）" if h.ratio else "（开播即热）")
+                       + "，可能有名场面",
+            "url": h.url,
+        } for h in res.data.hits]
+        return {
+            "sections": [{"title": "分集爆点", "items": lines}] if lines else [],
+            "caveats": ["讨论量突增不代表口碑好（可能是炎上）；无爆点时不推送。"],
         }
 
     async def _friends_activity_payload(self, rule: SubscriptionRule, client: Any) -> dict[str, Any]:
@@ -823,6 +854,7 @@ def default_subscription_title(kind: str) -> str:
         "bili_up_video": "B站导视/漫评新视频",
         "rating_alert": "口碑哨兵：你的番评分异动",
         "friends_activity": "好友动态：他们在看什么打了几分",
+        "episode_buzz": "分集爆点：你追的番哪集突然火了",
     }.get(kind, "Otomo 订阅")
 
 

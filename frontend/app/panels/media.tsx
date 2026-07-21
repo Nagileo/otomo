@@ -1412,3 +1412,29 @@ export function CsvExportPanel({ data }: { data: AnyRecord }) {
     </Panel>
   );
 }
+
+
+export function EpisodeBuzzScanPanel({ data }: { data: AnyRecord }) {
+  const hits = list(data.hits);
+  return (
+    <Panel
+      title="分集爆点雷达"
+      subtitle={`扫描 ${data.checked_subjects ?? 0} 部在看番 · ${hits.length} 个爆点`}
+    >
+      {hits.length === 0 && <EmptyHint text="最近你追的番没有讨论量突增的集——岁月静好。" />}
+      {hits.map((h, i) => (
+        <a key={i} className="buzz-row" href={text(h.url, "#")} target="_blank" rel="noreferrer">
+          <span className="buzz-flame">🔥</span>
+          <span className="buzz-main">
+            <b>{text(h.subject_name)}</b> 第 {h.sort} 集{h.ep_name ? `「${h.ep_name}」` : ""}
+            <small> · {h.airdate}</small>
+          </span>
+          <span className="buzz-stats">
+            {h.comments} 条讨论{h.ratio ? <Badge tone="warn">{h.ratio}× 平常</Badge> : <Badge tone="good">开播即热</Badge>}
+          </span>
+        </a>
+      ))}
+      <Meta notes={list<string>(data.caveats)} />
+    </Panel>
+  );
+}

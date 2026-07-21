@@ -78,8 +78,8 @@ TOOL_GROUPS: dict[str, dict[str, Any]] = {
     },
     "season_hot": {
         "desc": "季度新番表、放送日历、追番进度、全站热门/热播榜",
-        "tools": {"list_season_anime", "list_year_anime", "list_yuc_season", "get_airing_progress", "get_trending_subjects", "get_rating_movers"},
-        "keywords": ["新番", "这季", "本季", "几月", "放送", "追什么", "热播", "热门", "最热", "最火", "火爆", "热度", "排行", "榜", "时间表", "追番", "在追", "更新", "开播", "落后", "现在.{0,4}看"],
+        "tools": {"list_season_anime", "list_year_anime", "list_yuc_season", "get_airing_progress", "get_trending_subjects", "get_rating_movers", "scan_my_episode_buzz"},
+        "keywords": ["新番", "这季", "本季", "几月", "放送", "追什么", "热播", "热门", "最热", "最火", "火爆", "热度", "排行", "榜", "时间表", "追番", "在追", "更新", "开播", "落后", "现在.{0,4}看", "哪集", "炸了", "爆点", "名场面"],
     },
     "recommend_extra": {
         "desc": "萌点标签检索、评分预测、好友同步召回、推荐清单保存、口味/aspect 画像",
