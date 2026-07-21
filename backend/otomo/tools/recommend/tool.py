@@ -401,6 +401,7 @@ class RecommendArgs(BaseModel):
     use_curation: bool = Field(True, description="是否用精选 Bangumi 目录作为低权重策展召回")
     use_semantic: bool = Field(True, description="bge 语义相似特征：候选与你高分作品的标签语义距离进重排（已验证 +7.5% NDCG；模型缺失自动跳过）")
     use_semantic_recall: bool = Field(False, description="实验性：用全站语义索引做召回补标签盲区（小样本消融未见增益甚至稀释，默认关，待大样本验证）")
+    export_features: bool = Field(False, description="调试/训练用：在每个候选上附 features 特征向量（LTR 训练数据），生产不用")
     use_friends: bool = Field(False, description="好友圈社交召回：好友们想看/高分的未看作品进候选（要抓好友收藏，较慢；用户提到好友/圈子时开启）")
     enrich_evidence: bool = Field(True, description="为推荐结果补充统一评价证据；game 会补批判空间/VNDB，默认开启")
     use_aspect_profile: bool = Field(True, description="是否读取长期记忆中的 aspect 好球区/雷区参与 rerank 与解释")
@@ -460,6 +461,7 @@ class RecItem(BaseModel):
     source_routes: list[str] = Field(default_factory=list)
     media_subtype: str | None = None
     media_notes: list[str] = Field(default_factory=list)
+    features: dict[str, float] | None = None  # export_features=True 时填；LTR 训练用
 
 
 class RecommendResult(BaseModel):
@@ -1186,6 +1188,23 @@ class RecommendTool(Tool):
         def semantic_bonus(c: dict, sid: int) -> float:
             return self.w.semantic * sem_scores.get(sid, 0.0)
 
+        def feature_vector(sid: int, c: dict) -> dict[str, float]:
+            """LTR 训练用：候选的原始特征分量（未乘权重的语义/质量用裸值，其余为已加权 bonus）。
+            scripts.train_ltr 收集 (features, 是否命中 hold-out) 训学习排序，替代手调线性和。"""
+            return {
+                "affinity": affinity(c),
+                "graph": graph_bonus(c),
+                "cf": cf_bonus(c),
+                "external": external_bonus(c),
+                "explicit": explicit_tag_adjust(c),
+                "memory_pen": memory_penalty(c),
+                "temporary_pen": temporary_penalty(c),
+                "aspect": aspect_bonus(c),
+                "subtype_pen": media_subtype_penalty(c),
+                "semantic": sem_scores.get(sid, 0.0),
+                "quality": _quality_popular(c["rating"]),
+            }
+
         def score(sid: int, c: dict) -> float:
             if args.niche:  # 挖冷门：协同偏热门，权重压低
                 return (0.5 * affinity(c) + 0.5 * graph_bonus(c)
@@ -1213,6 +1232,8 @@ class RecommendTool(Tool):
         seen_series: set[str] = set()
         seen_ids: set[int] = set()
         pool_limit = min(args.limit * 2, 20) if args.enrich_evidence else args.limit
+        if args.export_features:
+            pool_limit = 60  # LTR 训练：导出更大候选池以容纳 hold-out 正样本（训练专用路径）
         series_contexts: dict[int, tuple] = {}
         if args.use_series:
             series_targets = [
@@ -1339,6 +1360,7 @@ class RecommendTool(Tool):
                 aspect_warnings=aspect_warnings,
                 media_subtype=subtype,
                 media_notes=subtype_notes,
+                features=feature_vector(r_id, c) if args.export_features else None,
             ))
             if len(out) >= pool_limit:
                 break

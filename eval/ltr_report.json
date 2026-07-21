@@ -1,0 +1,33 @@
+{
+  "samples": 721,
+  "positives": 13,
+  "cv_auc_mean": 0.798936170212766,
+  "cv_auc_std": 0.15526641991419537,
+  "ltr_coefficients": {
+    "affinity": 1.138,
+    "graph": -2.528,
+    "cf": 1.718,
+    "external": 0.0,
+    "explicit": 0.0,
+    "memory_pen": 0.0,
+    "temporary_pen": 0.0,
+    "aspect": 0.0,
+    "subtype_pen": 0.0,
+    "semantic": 3.929,
+    "quality": -1.156
+  },
+  "hand_weights": {
+    "graph_per_hit": 0.45,
+    "cf_cap": 1.5,
+    "external_cap": 0.65,
+    "aspect_like": 0.28,
+    "aspect_dislike": 0.42,
+    "explicit_hit": 0.8,
+    "explicit_miss": -1.2,
+    "memory_penalty": -2.2,
+    "temporary_penalty": -1.5,
+    "quality_popular": 1.2,
+    "semantic": 0.5
+  },
+  "note": "特征重要性信号；正样本稀疏 AUC 有方差，是否接入生产由更大样本增益定。"
+}
