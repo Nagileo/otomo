@@ -12,7 +12,7 @@ services:
     volumes:
       - ./cache:/app/cache
       - ./logs:/app/logs
-      - ./models:/app/models
+      - ./models:/models
     expose:
       - "8000"
     healthcheck:
@@ -36,7 +36,7 @@ services:
     volumes:
       - ./cache:/app/cache
       - ./logs:/app/logs
-      - ./models:/app/models
+      - ./models:/models
     depends_on:
       backend:
         condition: service_healthy
