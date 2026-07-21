@@ -17,6 +17,7 @@ import asyncio
 import json
 import os
 import re
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -268,6 +269,65 @@ def _eps_value(value) -> int | None:
     return n if n > 0 else None
 
 
+# tool.py 在 otomo/tools/recommend/ → parents[1]=otomo/tools；索引落在 otomo/data/
+_SEMANTIC_INDEX_PATH = Path(__file__).resolve().parents[2] / "data" / "semantic_index.npz"
+_semantic_index_cache: dict[str, Any] = {}
+
+
+def _load_semantic_index() -> dict[str, Any] | None:
+    """全站语义召回索引（scripts.build_semantic_index 产出）。缺失返回 None（不硬失败）。"""
+    if "loaded" in _semantic_index_cache:
+        return _semantic_index_cache.get("index")
+    _semantic_index_cache["loaded"] = True
+    _semantic_index_cache["index"] = None
+    if not _SEMANTIC_INDEX_PATH.exists():
+        return None
+    try:
+        import json as _json
+
+        import numpy as _np
+
+        data = _np.load(_SEMANTIC_INDEX_PATH, allow_pickle=True)
+        _semantic_index_cache["index"] = {
+            "ids": data["ids"],
+            "vecs": data["vecs"],
+            "meta": [_json.loads(m) for m in data["meta"]],
+        }
+    except Exception:  # noqa: BLE001
+        _semantic_index_cache["index"] = None
+    return _semantic_index_cache["index"]
+
+
+def _semantic_recall(user_texts: list[str], seen: set[int], top_k: int) -> list[dict]:
+    """用户高分作品向量 → 全站索引近邻 top_k（排除已看）。返回候选 meta 列表。"""
+    index = _load_semantic_index()
+    if index is None or not user_texts:
+        return []
+    import numpy as _np
+
+    from .._rag import _embedder
+
+    emb = _embedder()
+    uvecs = emb.encode(user_texts, normalize_embeddings=True)
+    uvec = _np.asarray(uvecs, dtype=_np.float32).mean(axis=0)
+    norm = float((uvec ** 2).sum() ** 0.5)
+    if norm > 0:
+        uvec = uvec / norm
+    sims = index["vecs"] @ uvec  # 已归一，点积=余弦
+    order = _np.argsort(-sims)
+    out: list[dict] = []
+    for i in order:
+        sid = int(index["ids"][i])
+        if sid in seen:
+            continue
+        meta = dict(index["meta"][i])
+        meta["_sim"] = float(sims[i])
+        out.append(meta)
+        if len(out) >= top_k:
+            break
+    return out
+
+
 def _semantic_scores(user_texts: list[str], cand_texts: list[str]) -> list[float]:
     """bge 语义相似：用户高分作品文本的均值向量 vs 每个候选，池内 min-max 归一到 [0,1]。
 
@@ -339,7 +399,8 @@ class RecommendArgs(BaseModel):
     use_series: bool = Field(True, description="系列入口回溯：若推荐项是续集而你没看前作，自动换成入口作（别莫名其妙推你第二季）")
     use_external_recall: bool = Field(True, description="game/galgame 推荐时，是否用批判空间排行做前置召回并映射回 Bangumi")
     use_curation: bool = Field(True, description="是否用精选 Bangumi 目录作为低权重策展召回")
-    use_semantic: bool = Field(True, description="bge 语义相似特征：候选与你高分作品的标签语义距离进重排（本地模型缺失时自动跳过）")
+    use_semantic: bool = Field(True, description="bge 语义相似特征：候选与你高分作品的标签语义距离进重排（已验证 +7.5% NDCG；模型缺失自动跳过）")
+    use_semantic_recall: bool = Field(False, description="实验性：用全站语义索引做召回补标签盲区（小样本消融未见增益甚至稀释，默认关，待大样本验证）")
     use_friends: bool = Field(False, description="好友圈社交召回：好友们想看/高分的未看作品进候选（要抓好友收藏，较慢；用户提到好友/圈子时开启）")
     enrich_evidence: bool = Field(True, description="为推荐结果补充统一评价证据；game 会补批判空间/VNDB，默认开启")
     use_aspect_profile: bool = Field(True, description="是否读取长期记忆中的 aspect 好球区/雷区参与 rerank 与解释")
@@ -887,6 +948,33 @@ class RecommendTool(Tool):
 
         if args.use_friends and username:
             await self._friends_recall(cand, stype, username, seen)
+
+        # 语义召回（实验性，默认关）：用户高分作品向量 → 全站索引近邻，补标签精确匹配的
+        # 盲区（"百合"召不回"GL"）。消融显示小样本上会稀释 top-K，待大样本验证再默认开。
+        semantic_hits = 0
+        if args.use_semantic_recall and args.subject_type == "anime" and watched:
+            user_texts = [
+                _taste_text(it["subject"].get("name_cn") or it["subject"].get("name") or "",
+                            [t.get("name") for t in (it["subject"].get("tags") or []) if isinstance(t, dict)])
+                for it in sorted(watched, key=lambda x: -(x.get("rate") or 0))[:40]
+                if (it.get("subject") or {}).get("id") and int(it.get("rate") or 0) >= 7
+            ]
+            try:
+                import asyncio as _aio
+                recalled = await _aio.to_thread(_semantic_recall, user_texts, seen, max(args.limit * 3, 20))
+            except Exception:  # noqa: BLE001 - 索引缺失/模型故障：静默跳过
+                recalled = []
+            for meta in recalled:
+                sid = int(meta["id"])
+                if sid in seen:
+                    continue
+                c = cand.setdefault(sid, _blank({"id": sid, "name_cn": meta.get("name"),
+                                                 "tags": [{"name": t} for t in meta.get("tags") or []],
+                                                 "rating": {"score": meta.get("score"), "total": meta.get("total")}}))
+                c["tags"].update(meta.get("tags") or [])
+                c["external"].add("语义相似召回")
+                c["external_boost"] = max(c.get("external_boost", 0.0), min(0.1 + meta.get("_sim", 0.0) * 0.3, 0.35))
+                semantic_hits += 1
 
         # 用户最爱作品（按评分降序）——图谱召回与协同召回共用作种子
         fav_sorted = sorted(watched, key=lambda it: -(it.get("rate") or 0))

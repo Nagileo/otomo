@@ -1,0 +1,59 @@
+{
+  "users": [
+    "sunshineclover",
+    "477538",
+    "huoe",
+    "557902",
+    "puson_pp",
+    "xhn1114028870",
+    "515057",
+    "420562"
+  ],
+  "params": {
+    "username": "",
+    "subject_type": "anime",
+    "min_rate": 8,
+    "holdout": 5,
+    "trials": 2,
+    "k": 10,
+    "seed": 11,
+    "json_report": "../eval/semantic_recall_ablation.json",
+    "users_file": "../eval/holdout_users.json",
+    "max_eval_users": 8,
+    "search": 0
+  },
+  "results": [
+    {
+      "config": "全开",
+      "hr": 0.15000000000000002,
+      "ndcg": 0.1517335423070849,
+      "hr_no_series": 0.05,
+      "samples": 16,
+      "weights": null
+    },
+    {
+      "config": "全开+语义",
+      "hr": 0.15000000000000002,
+      "ndcg": 0.14927332376499652,
+      "hr_no_series": 0.05,
+      "samples": 16,
+      "weights": null
+    },
+    {
+      "config": "纯标签",
+      "hr": 0.125,
+      "ndcg": 0.14219830314388243,
+      "hr_no_series": 0.05,
+      "samples": 16,
+      "weights": null
+    },
+    {
+      "config": "+图谱",
+      "hr": 0.125,
+      "ndcg": 0.13866538433894893,
+      "hr_no_series": 0.05,
+      "samples": 16,
+      "weights": null
+    }
+  ]
+}

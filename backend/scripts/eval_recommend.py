@@ -43,8 +43,11 @@ CONFIGS: dict[str, dict[str, Any]] = {
                   use_curation=False, use_external_recall=False, use_semantic=False),
     "全开": dict(use_graph=True, use_cf=True, use_aspect_profile=True,
                  use_curation=True, use_external_recall=True, use_semantic=False),
-    "全开+语义": dict(use_graph=True, use_cf=True, use_aspect_profile=True,
-                      use_curation=True, use_external_recall=True, use_semantic=True),
+    "全开+语义重排": dict(use_graph=True, use_cf=True, use_aspect_profile=True,
+                          use_curation=True, use_external_recall=True, use_semantic=True),
+    "全开+语义召回": dict(use_graph=True, use_cf=True, use_aspect_profile=True,
+                          use_curation=True, use_external_recall=True, use_semantic=True,
+                          use_semantic_recall=True),
 }
 
 

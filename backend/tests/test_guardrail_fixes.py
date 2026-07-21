@@ -888,3 +888,27 @@ def test_episode_buzz_scan_baseline():
     assert ("爆点番", 4.0, 3.75) in names
     assert ("新开播", 1.0, None) in names
     assert all(n != "平稳番" for n, _s, _r in names)
+
+
+def test_semantic_recall_index():
+    """全站语义召回：索引存在时按口味召回相关作品；索引缺失静默返回空。"""
+    import pytest
+
+    from otomo.tools.recommend.tool import _load_semantic_index, _semantic_recall, _taste_text
+
+    idx = _load_semantic_index()
+    if idx is None:
+        pytest.skip("语义索引未构建（scripts.build_semantic_index）")
+    assert len(idx["ids"]) > 100 and idx["vecs"].shape[1] == 512
+    user_texts = [_taste_text("轻音少女", ["百合", "音乐", "日常"]),
+                  _taste_text("孤独摇滚！", ["百合", "音乐", "乐队"])]
+    hits = _semantic_recall(user_texts, seen=set(), top_k=8)
+    assert len(hits) == 8
+    assert all("_sim" in h and h["id"] for h in hits)
+    # 召回应含音乐/乐队/偶像题材（标签精确匹配的近义盲区）
+    joined = " ".join(" ".join(h.get("tags") or []) for h in hits)
+    assert any(k in joined for k in ["音乐", "乐队", "偶像"])
+    # seen 排除生效
+    first_id = int(hits[0]["id"])
+    hits2 = _semantic_recall(user_texts, seen={first_id}, top_k=8)
+    assert all(int(h["id"]) != first_id for h in hits2)
