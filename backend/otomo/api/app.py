@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 import json
+import logging
 import uuid
 from typing import Any, AsyncIterator, Literal
 from urllib.parse import urlencode
@@ -651,6 +652,8 @@ async def bangumi_start(request: Request, response: Response, discord_link: str 
     授权成功后回调里自动绑定。"""
     session = _ensure_auth_session(request, response)
     discord_user_id = app.state.auth.decode_discord_link(discord_link) if discord_link else ""
+    logging.getLogger("otomo.auth").info(
+        "bangumi_start: discord_link=%s decoded=%r", "有" if discord_link else "无", discord_user_id)
     try:
         url = build_authorization_url(app.state.auth, session.auth_session_id, discord_user_id or "")
     except RuntimeError as e:

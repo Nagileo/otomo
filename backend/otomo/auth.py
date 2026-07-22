@@ -258,9 +258,13 @@ class AuthStore:
         import json as _json
         try:
             payload = _json.loads(self.cipher.decrypt(token))
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            logging.getLogger("otomo.auth").warning(
+                "decode_discord_link 解密失败(多半 key 不一致):%s", type(e).__name__)
             return None
-        if time.time() - float(payload.get("t") or 0) > ttl:
+        age = time.time() - float(payload.get("t") or 0)
+        if age > ttl:
+            logging.getLogger("otomo.auth").warning("decode_discord_link 过期:%.0fs", age)
             return None
         return str(payload.get("d") or "") or None
 
