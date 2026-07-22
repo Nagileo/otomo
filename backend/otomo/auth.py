@@ -23,8 +23,11 @@ from .memory.consolidate import now_iso
 from .memory.store import _safe_key
 from .tools.bangumi.client import BangumiClient
 
-_ROOT = Path(__file__).resolve().parents[2]
-_DEFAULT_DIR = _ROOT / "cache" / "auth"
+# 存储路径一律按 CWD 相对解析(和 session/subscription store 一致)——
+# 容器 WORKDIR=/app,cache/ 正是挂载卷;绝不能用 parents[N]（容器里 /app/otomo 层级
+# 比本地 backend/otomo 浅一层,parents[2] 会算成文件系统根 /,落到没挂载的 /cache,
+# 导致 bot 与 backend 读写不同 sqlite + 登录态每次重建丢失）。
+_DEFAULT_DIR = Path("cache") / "auth"
 _OAUTH_BASE = "https://bgm.tv/oauth"
 _STATE_TTL_SECONDS = 600
 
@@ -123,7 +126,7 @@ class AuthStore:
         if self._explicit_base:
             return self.base / "auth.sqlite3"
         raw = Path(settings.auth_store_path or "cache/auth/auth.sqlite3")
-        return raw if raw.is_absolute() else _ROOT / raw
+        return raw  # 相对=按 CWD(容器=/app 挂载卷),绝对=原样;不再拼 _ROOT
 
     def _connect(self) -> sqlite3.Connection:
         con = sqlite3.connect(self.sqlite_path)

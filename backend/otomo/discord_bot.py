@@ -69,7 +69,9 @@ def run() -> None:
     ltm = LongTermMemory()
     moegirl = MoegirlClient()
     _sessions: dict[int, AgentState] = {}
-    _guest_client = BangumiClient(token=settings.bangumi_token, user_agent=settings.bangumi_user_agent)
+    # guest 客户端**绝不**带部署者的 BANGUMI_TOKEN(否则未绑定用户的推荐会意外基于
+    # 部署者自己的收藏画像——朋友指出的坑,Web 路径已避免,这里对齐:纯匿名 token="")。
+    _guest_client = BangumiClient(token="", user_agent=settings.bangumi_user_agent)
     _guest_runner = build_runner(_guest_client, moegirl, "adaptive", ltm)
     _user_runners: dict[str, object] = {}   # username -> runner(带该用户 token)
 
