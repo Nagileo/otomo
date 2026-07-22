@@ -120,7 +120,13 @@ def run() -> None:
     @client.event
     async def on_ready() -> None:
         try:
-            await tree.sync()
+            # 按服务器同步=命令即时生效(全局同步要等最长 1 小时才在客户端出现)
+            for guild in client.guilds:
+                tree.copy_global_to(guild=guild)
+                await tree.sync(guild=guild)
+            await tree.sync()  # 也做全局(私信里的斜杠命令用,传播较慢)
+            log.info("slash 命令已同步到 %d 个服务器", len(client.guilds))
+            print(f"slash 命令已同步到 {len(client.guilds)} 个服务器")
         except Exception:  # noqa: BLE001
             log.exception("slash command sync failed")
         log.info("Otomo Discord bot 上线:%s", client.user)
