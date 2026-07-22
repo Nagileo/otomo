@@ -10,15 +10,16 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY pyproject.toml ./
-COPY otomo ./otomo
-
-# 带 RAG/语义模型（CPU 版 torch，避免拉 2G+ 的 CUDA 版）：
-#   语义推荐重排（bge-small）+ RAG hybrid 精排（bge-reranker）。
-#   不需要模型的轻装部署可改回 `pip install -e .`（语义功能自动降级到词法）。
+# ① 先装重依赖（CPU 版 torch + bge/RAG），这一层只随依赖变化——
+#    改业务代码不会让它失效，重部署从 5 分钟降到几十秒（Docker 层缓存）。
 RUN pip install --upgrade pip \
     && pip install torch --index-url https://download.pytorch.org/whl/cpu \
-    && pip install -e ".[rag]"
+    && pip install "sentence-transformers>=3.0" "rank-bm25>=0.2"
+
+# ② 再装核心依赖 + 本地包（改代码只重跑这两步，都很快）
+COPY pyproject.toml ./
+COPY otomo ./otomo
+RUN pip install -e ".[rag]"
 
 EXPOSE 8000
 

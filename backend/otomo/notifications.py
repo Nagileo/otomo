@@ -84,7 +84,11 @@ async def _send_webhook(username: str, sub: WeeklyDigestSubscription, item: Inbo
     try:
         async with httpx.AsyncClient(timeout=settings.weekly_webhook_timeout) as client:
             if fmt == "serverchan":
-                resp = await client.post(sub.webhook_url, data={"title": item.title, "desp": text})
+                # Server酱 标题上限 32 字，超了会 400；desp 不能为空
+                resp = await client.post(
+                    sub.webhook_url,
+                    data={"title": (item.title or "Otomo 推送")[:32], "desp": text or item.title or "（无内容）"},
+                )
             elif fmt == "telegram":
                 endpoint, payload = _telegram_endpoint_and_payload(sub.webhook_url, text)
                 resp = await client.post(endpoint, json=payload)
@@ -112,7 +116,10 @@ async def _send_webhook(username: str, sub: WeeklyDigestSubscription, item: Inbo
                     "created_at": item.created_at,
                 }
                 resp = await client.post(sub.webhook_url, json=payload)
-            resp.raise_for_status()
+            # 不用 raise_for_status（它吞掉响应体）——把第三方的真实错误原因带出来，
+            # 否则只看到"400 Bad Request"排不了障（Server酱/飞书的具体原因都在 body 里）。
+            if resp.status_code >= 400:
+                raise RuntimeError(f"{fmt} {resp.status_code}: {resp.text[:300]}")
         return {
             "channel": "webhook",
             "format": fmt,
