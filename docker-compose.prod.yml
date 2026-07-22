@@ -1,0 +1,18 @@
+# 生产覆盖:用 ghcr 上 CI 构建好的镜像,服务器不再本地 build。
+# 用法(和基础 compose 叠加):
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile discord pull
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile discord up -d
+# 或直接跑 ./deploy.sh。
+services:
+  backend:
+    image: ghcr.io/nagileo/otomo-backend:latest
+    pull_policy: always
+  scheduler:
+    image: ghcr.io/nagileo/otomo-backend:latest
+    pull_policy: always
+  discord:
+    image: ghcr.io/nagileo/otomo-backend:latest
+    pull_policy: always
+  frontend:
+    image: ghcr.io/nagileo/otomo-frontend:latest
+    pull_policy: always
