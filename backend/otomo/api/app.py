@@ -646,14 +646,18 @@ async def dev_token_login(req: dict[str, str], request: Request, response: Respo
 
 
 @app.get("/auth/bangumi/start")
-async def bangumi_start(request: Request, response: Response, discord_link: str = "") -> RedirectResponse:
+async def bangumi_start(request: Request, response: Response, discord_link: str = "", discord_code: str = "") -> RedirectResponse:
     """浏览器可直接打开的登录入口:302 跳 Bangumi 授权。Discord 绑定用——
     bot 的 /link 给出带 discord_link(Fernet 签名的 discord_user_id)的链接,
     授权成功后回调里自动绑定。"""
     session = _ensure_auth_session(request, response)
-    discord_user_id = app.state.auth.decode_discord_link(discord_link) if discord_link else ""
-    logging.getLogger("otomo.auth").info(
-        "bangumi_start: discord_link=%s decoded=%r", "有" if discord_link else "无", discord_user_id)
+    discord_user_id = ""
+    if discord_code:  # 新:短码方案
+        discord_user_id = app.state.auth.resolve_discord_link_code(discord_code) or ""
+    elif discord_link:  # 旧:加密串(向后兼容)
+        discord_user_id = app.state.auth.decode_discord_link(discord_link) or ""
+    logging.getLogger("otomo.auth").warning(
+        "bangumi_start: code=%s decoded=%r", discord_code or "-", discord_user_id)
     try:
         url = build_authorization_url(app.state.auth, session.auth_session_id, discord_user_id or "")
     except RuntimeError as e:

@@ -268,6 +268,19 @@ class AuthStore:
             return None
         return str(payload.get("d") or "") or None
 
+    def create_discord_link_code(self, discord_user_id: str) -> str:
+        """生成短码(8 位 hex,URL 无特殊字符)存服务器,替代把加密串塞进 URL——
+        后者经 Discord/浏览器/Caddy 一路可能被改坏,短码方案零 URL 编码风险。"""
+        code = secrets.token_hex(4)
+        self._write("discord_link_code", code, {"discord_user_id": discord_user_id, "created_at": time.time()})
+        return code
+
+    def resolve_discord_link_code(self, code: str, ttl: float = 900) -> str | None:
+        raw = self._read("discord_link_code", code)
+        if not raw or time.time() - float(raw.get("created_at") or 0) > ttl:
+            return None
+        return str(raw.get("discord_user_id") or "") or None
+
     def set_discord_link(self, discord_user_id: str, username: str) -> None:
         self._write("discord_link", discord_user_id,
                     {"discord_user_id": discord_user_id, "username": username, "created_at": now_iso()})
@@ -431,7 +444,7 @@ async def exchange_oauth_code(auth_store: AuthStore, code: str, state_value: str
     auth_store.save_token(token)
     if state.discord_user_id and token.username:  # 这次是 Discord 绑定登录
         auth_store.set_discord_link(state.discord_user_id, token.username)
-        logging.getLogger("otomo.auth").info(
+        logging.getLogger("otomo.auth").warning(  # warning 级=确保在 uvicorn 默认日志里可见
             "discord 绑定成功: discord=%s ↔ bangumi=%s", state.discord_user_id, token.username)
     return token
 

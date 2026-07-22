@@ -112,10 +112,10 @@ def run() -> None:
     tree = app_commands.CommandTree(client)
 
     def _link_url(discord_user_id: int) -> str:
-        payload = auth.encode_discord_link(str(discord_user_id))
+        # 短码方案:URL 只带 8 位 hex 码,无特殊字符,经得起 Discord/浏览器/Caddy 任何折腾
+        code = auth.create_discord_link_code(str(discord_user_id))
         base = settings.frontend_base_url.rstrip("/")
-        from urllib.parse import quote
-        return f"{base}/auth/bangumi/start?discord_link={quote(payload)}"
+        return f"{base}/auth/bangumi/start?discord_code={code}"
 
     @client.event
     async def on_ready() -> None:
