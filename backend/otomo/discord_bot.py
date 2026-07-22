@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 import re
 
-from .agent.contracts import AgentState, ErrorEvent, FinalEvent
+from .agent.contracts import AgentState, ErrorEvent, FinalEvent, ObservationEvent
 from .auth import AuthStore
 from .config import settings
 from .factory import build_runner
@@ -35,6 +35,103 @@ _MAX_USER_RUNNERS = 32   # 绑定用户各一个带 token 的 runner,LRU 上限�
 
 def _clean(answer: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", _PANEL_RE.sub("", answer)).strip()
+
+
+# ── Discord embed 卡片(复用证据面板同一份结构化 data)────────────────────
+# 卡片构建器接收 discord 模块作参数(保持模块可在无 discord.py 环境导入)。
+_EMBED_COLOR = 0x7AA2F7
+
+
+def _first(v: object) -> str:
+    return (v[0] if isinstance(v, list) and v else "") or ""
+
+
+def _cover(item: dict) -> str | None:
+    img = item.get("image") or item.get("cover")
+    if isinstance(img, dict):
+        img = img.get("large") or img.get("common") or img.get("grid")
+    return img if isinstance(img, str) and img.startswith("http") else None
+
+
+def _rec_embeds(discord, data: dict) -> list:
+    out = []
+    for it in (data.get("items") or [])[:5]:
+        e = discord.Embed(
+            title=str(it.get("name") or "?")[:256],
+            url=f"https://bgm.tv/subject/{it.get('id')}" if it.get("id") else None,
+            description=str(_first(it.get("fit_points")) or it.get("review_consensus") or "")[:400],
+            color=_EMBED_COLOR,
+        )
+        if cover := _cover(it):
+            e.set_thumbnail(url=cover)
+        if it.get("bangumi_score"):
+            e.add_field(name="Bangumi", value=str(it["bangumi_score"]), inline=True)
+        if it.get("rank"):
+            e.add_field(name="全站排名", value=f"#{it['rank']}", inline=True)
+        if recall := _first(it.get("why_recalled")):
+            e.add_field(name="为什么给你", value=recall[:200], inline=False)
+        if risk := (_first(it.get("risks")) or _first(it.get("aspect_warnings"))):
+            e.add_field(name="⚠️ 注意", value=risk[:200], inline=False)
+        out.append(e)
+    return out
+
+
+def _review_embeds(discord, data: dict) -> list:
+    e = discord.Embed(
+        title=f"口碑速览 · {data.get('title') or '?'}"[:256],
+        url=f"https://bgm.tv/subject/{data.get('subject_id')}" if data.get("subject_id") else None,
+        description=str(data.get("consensus") or "")[:1000],
+        color=_EMBED_COLOR,
+    )
+    for r in (data.get("ratings") or [])[:4]:
+        if (score := r.get("score")) is not None:
+            e.add_field(name=str(r.get("source") or "评分"), value=str(score), inline=True)
+    conf = {"high": "样本充足", "medium": "样本一般", "low": "样本偏少，仅供参考"}.get(str(data.get("confidence")), "")
+    if conf:
+        e.set_footer(text=conf)
+    return [e]
+
+
+def _omikuji_embeds(discord, data: dict) -> list:
+    advice = "\n".join(f"· {a}" for a in (data.get("advice") or [])[:3])
+    e = discord.Embed(
+        title=f"🎴 今日番签 · {data.get('fortune') or '?'}"[:256],
+        description=f"今日之番:**{data.get('subject_name') or '?'}**\n{advice}"[:1000],
+        color=_EMBED_COLOR,
+    )
+    if cover := _cover(data):
+        e.set_thumbnail(url=cover)
+    if data.get("lucky_tag"):
+        e.add_field(name="幸运标签", value=str(data["lucky_tag"]), inline=True)
+    return [e]
+
+
+def _watch_embeds(discord, data: dict) -> list:
+    lines = []
+    for s in (data.get("official_sources") or [])[:6]:
+        label, url = str(s.get("label") or "?"), str(s.get("url") or "")
+        lines.append(f"[{label}]({url})" if url.startswith("http") else label)
+    e = discord.Embed(
+        title=f"在哪看 · {data.get('title') or '?'}"[:256],
+        description=("\n".join(lines) or "暂无已验证的正版渠道")[:1000],
+        color=_EMBED_COLOR,
+    )
+    return [e]
+
+
+def build_embeds(discord, name: str, data: dict | None) -> list:
+    """按工具名把结构化结果做成 Discord embed;不认识/出错→[](走纯文本兜底)。"""
+    if not data:
+        return []
+    try:
+        return {
+            "recommend_subjects": _rec_embeds,
+            "review_subject": _review_embeds,
+            "anime_omikuji": _omikuji_embeds,
+            "where_to_watch": _watch_embeds,
+        }.get(name, lambda *_: [])(discord, data)
+    except Exception:  # noqa: BLE001 - 卡片失败绝不能拖垮回复
+        return []
 
 
 def _split(text: str, limit: int = _DISCORD_LIMIT) -> list[str]:
@@ -90,23 +187,32 @@ def run() -> None:
             _user_runners[username] = build_runner(client, moegirl, "adaptive", ltm)
         return _user_runners[username], username
 
-    async def _answer(discord_user_id: int, question: str) -> str:
+    async def _answer(discord_user_id: int, question: str) -> tuple[str, list]:
+        """返回 (清洗后的文本回答, embed 卡片列表)。"""
         runner, _username = _runner_for(discord_user_id)
         state = _sessions.get(discord_user_id) or AgentState()
         result = ""
+        observations: list[tuple[str, dict]] = []
         try:
             async for ev in runner.stream(question, state):
                 if isinstance(ev, FinalEvent):
                     result = ev.answer
+                elif isinstance(ev, ObservationEvent) and ev.data:
+                    observations.append((ev.name, ev.data))
                 elif isinstance(ev, ErrorEvent):
                     result = result or f"⚠️ 出错了:{ev.message[:200]}"
         except Exception as e:  # noqa: BLE001
             log.exception("discord answer failed")
-            return f"抱歉,处理时出错了({type(e).__name__}),换个问法再试试?"
+            return f"抱歉,处理时出错了({type(e).__name__}),换个问法再试试?", []
         if len(state.messages) > _MAX_HISTORY:
             state.messages = state.messages[:1] + state.messages[-(_MAX_HISTORY - 1):]
         _sessions[discord_user_id] = state
-        return _clean(result) or "(这次没能整理出回答,换个问法试试?)"
+        embeds: list = []
+        for nm, dat in observations:
+            embeds.extend(build_embeds(discord, nm, dat))
+            if len(embeds) >= 10:  # Discord 单条消息最多 10 个 embed
+                break
+        return _clean(result) or "(这次没能整理出回答,换个问法试试?)", embeds[:10]
 
     intents = discord.Intents.default()
     intents.message_content = True
@@ -149,17 +255,26 @@ def run() -> None:
             await message.channel.send("在的~ 直接问我番剧推荐 / 评价 / 在哪看 / 梗出处都行,或用 `/绑定` 关联你的 Bangumi 账号。")
             return
         async with message.channel.typing():
-            reply = await _answer(message.author.id, content)
-        for chunk in _split(reply):
-            await message.channel.send(chunk)
+            reply, embeds = await _answer(message.author.id, content)
+        parts = _split(reply)
+        for i, chunk in enumerate(parts):
+            # embed 附在最后一段文本上(Discord 单条消息可带 content + 最多10个embed)
+            if embeds and i == len(parts) - 1:
+                await message.channel.send(chunk, embeds=embeds)
+            else:
+                await message.channel.send(chunk)
+        if embeds and not parts:
+            await message.channel.send(embeds=embeds)
 
     async def _slash_answer(interaction: "discord.Interaction", question: str) -> None:
         await interaction.response.defer(thinking=True)
-        reply = await _answer(interaction.user.id, question)
-        parts = _split(reply)
-        await interaction.followup.send(parts[0])
-        for chunk in parts[1:]:
-            await interaction.followup.send(chunk)
+        reply, embeds = await _answer(interaction.user.id, question)
+        parts = _split(reply) or ["(没有生成回答)"]
+        for i, chunk in enumerate(parts):
+            if embeds and i == len(parts) - 1:
+                await interaction.followup.send(chunk, embeds=embeds)
+            else:
+                await interaction.followup.send(chunk)
 
     @tree.command(name="推荐", description="按你的口味推荐番剧(绑定后更懂你)")
     @app_commands.describe(关键词="想要的题材/心情,如 治愈 / 今晚看完 / 类似孤独摇滚")

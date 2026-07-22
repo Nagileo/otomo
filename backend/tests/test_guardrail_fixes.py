@@ -982,3 +982,31 @@ def test_discord_dm_dispatch(monkeypatch, tmp_path):
     # 未绑定用户 → 优雅报错
     r2 = _a.run(nt._send_discord_dm("someone_else", item))
     assert r2["ok"] is False and "未绑定" in r2["error"]
+
+
+def test_discord_embed_builders():
+    """Discord embed 卡片:高频工具→带封面/评分/理由的卡片,未知工具→走文本。"""
+    from otomo.discord_bot import build_embeds
+
+    class FakeEmbed:
+        def __init__(self, **kw):
+            self.kw = kw
+            self.fields = []
+            self.thumb = None
+        def set_thumbnail(self, url): self.thumb = url
+        def add_field(self, name, value, inline=False): self.fields.append((name, value))
+        def set_footer(self, text): pass
+
+    class FD:
+        Embed = FakeEmbed
+
+    rec = {"items": [{"id": 1, "name": "孤独摇滚！", "image": "https://x/c.jpg",
+                      "bangumi_score": 8.4, "rank": 72, "fit_points": ["百合乐队正戳你"],
+                      "why_recalled": ["好友圈信号"], "risks": ["前几集慢"]}]}
+    es = build_embeds(FD, "recommend_subjects", rec)
+    assert len(es) == 1 and es[0].kw["title"] == "孤独摇滚！"
+    assert es[0].thumb == "https://x/c.jpg"
+    assert any(f[0] == "Bangumi" for f in es[0].fields)
+    # 未知工具 / 空 data → 走文本
+    assert build_embeds(FD, "unknown_tool", {"x": 1}) == []
+    assert build_embeds(FD, "recommend_subjects", None) == []
