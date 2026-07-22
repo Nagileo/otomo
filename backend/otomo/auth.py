@@ -31,6 +31,7 @@ _STATE_TTL_SECONDS = 600
 class OAuthState(BaseModel):
     state: str
     auth_session_id: str
+    discord_user_id: str = ""   # 非空=这是一次 Discord 绑定登录，回调成功后绑定
     created_at: float = Field(default_factory=time.time)
 
 
@@ -236,10 +237,48 @@ class AuthStore:
             self.save_token(token)
         return token
 
-    def create_oauth_state(self, auth_session_id: str) -> OAuthState:
-        state = OAuthState(state=secrets.token_urlsafe(24), auth_session_id=auth_session_id)
+    def create_oauth_state(self, auth_session_id: str, discord_user_id: str = "") -> OAuthState:
+        state = OAuthState(
+            state=secrets.token_urlsafe(24),
+            auth_session_id=auth_session_id,
+            discord_user_id=discord_user_id,
+        )
         self._write("oauth_state", state.state, state.model_dump(mode="json"))
         return state
+
+    # —— Discord 账号绑定 ——
+    # 绑定令牌用 Fernet 签名(bot 和 backend 共享 AUTH_ENCRYPTION_KEY),防止伪造 discord_id;
+    # 映射 discord_user_id ↔ Bangumi username,bot 据此取该用户 token 做个人化。
+    def encode_discord_link(self, discord_user_id: str) -> str:
+        import json as _json
+        return self.cipher.encrypt(_json.dumps({"d": discord_user_id, "t": time.time()}))
+
+    def decode_discord_link(self, token: str, ttl: float = 900) -> str | None:
+        import json as _json
+        try:
+            payload = _json.loads(self.cipher.decrypt(token))
+        except Exception:  # noqa: BLE001
+            return None
+        if time.time() - float(payload.get("t") or 0) > ttl:
+            return None
+        return str(payload.get("d") or "") or None
+
+    def set_discord_link(self, discord_user_id: str, username: str) -> None:
+        self._write("discord_link", discord_user_id,
+                    {"discord_user_id": discord_user_id, "username": username, "created_at": now_iso()})
+
+    def username_for_discord(self, discord_user_id: str) -> str | None:
+        raw = self._read("discord_link", discord_user_id)
+        return str(raw["username"]) if raw and raw.get("username") else None
+
+    def discord_for_username(self, username: str) -> str | None:
+        for raw in self._iter_namespace("discord_link"):
+            if raw.get("username") == username:
+                return str(raw.get("discord_user_id") or "") or None
+        return None
+
+    def unlink_discord(self, discord_user_id: str) -> None:
+        self._delete("discord_link", discord_user_id)
 
     def consume_oauth_state(self, state_value: str) -> OAuthState:
         raw = self._read("oauth_state", state_value)
@@ -339,10 +378,10 @@ class AuthStore:
         self.delete_token(auth_session_id)
 
 
-def build_authorization_url(auth_store: AuthStore, auth_session_id: str) -> str:
+def build_authorization_url(auth_store: AuthStore, auth_session_id: str, discord_user_id: str = "") -> str:
     if not settings.bangumi_oauth_client_id:
         raise RuntimeError("未配置 BANGUMI_OAUTH_CLIENT_ID")
-    state = auth_store.create_oauth_state(auth_session_id)
+    state = auth_store.create_oauth_state(auth_session_id, discord_user_id)
     query = {
         "client_id": settings.bangumi_oauth_client_id,
         "response_type": "code",
@@ -385,6 +424,8 @@ async def exchange_oauth_code(auth_store: AuthStore, code: str, state_value: str
     if me.get("id") is not None:
         token.user_id = int(me["id"])
     auth_store.save_token(token)
+    if state.discord_user_id and token.username:  # 这次是 Discord 绑定登录
+        auth_store.set_discord_link(state.discord_user_id, token.username)
     return token
 
 

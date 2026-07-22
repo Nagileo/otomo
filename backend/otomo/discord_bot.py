@@ -1,25 +1,25 @@
 """Discord bot 入口:把 Otomo agent 接到 Discord(python -m otomo.discord_bot)。
 
 Otomo 本质是个 ACGN agent,Discord 是它最自然的形态之一——在服务器里 @机器人、
-或私信它,就能问番/推荐/评价/查资源/识梗,复用全部 103 个工具。
+私信、或用斜杠命令,就能问番/推荐/评价/查资源/识梗,复用全部工具。
 
-设计(v1):
-- 触发:私信直接答;服务器频道里被 @ 才答(避免刷屏)。
-- 多轮:每个 Discord 用户一个持久会话(AgentState),对话上下文连续。
-- guest 模式:用公开 Bangumi API(无个人 token),知识问答/推荐冷启动/评价/导视/
-  资源/识梗都能用;"我的收藏"这类需登录的功能优雅降级(v2 再做 Discord↔Bangumi 绑定)。
-- 输出:去掉网页专用的 [[panel:x]] 锚点,按 Discord 2000 字上限分段发送。
+v2:
+- 触发:私信直接答;服务器里被 @ 才答;斜杠命令 /推荐 /评价 /在哪看 /绑定 /解绑。
+- 多轮:每个 Discord 用户一个持久会话(AgentState,软重置防膨胀)。
+- **账号绑定**:/绑定 → 一条链接 → 用自己的 Bangumi 登录 → 之后个人化(用你的收藏
+  画像推荐、查你的追番进度)。未绑定=guest 模式(公开知识问答照常)。
+- 输出:去 [[panel:x]] 锚点 + 按 2000 字上限分段。
 
 依赖:pip install -e ".[discord]"(discord.py)。需 DISCORD_BOT_TOKEN,且在开发者后台
-开启 MESSAGE CONTENT INTENT(否则读不到消息文本)。
+开启 MESSAGE CONTENT INTENT。绑定复用 AUTH_ENCRYPTION_KEY(bot 与 backend 共享)。
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 
 from .agent.contracts import AgentState, ErrorEvent, FinalEvent
+from .auth import AuthStore
 from .config import settings
 from .factory import build_runner
 from .memory import LongTermMemory
@@ -28,26 +28,22 @@ from .tools.moegirl.client import MoegirlClient
 
 log = logging.getLogger("otomo.discord")
 _PANEL_RE = re.compile(r"\[\[panel:[^\]]*\]\]")
-_DISCORD_LIMIT = 1900  # 官方 2000,留余量
-# 每个 Discord 用户一个多轮会话;超过阈值软重置,防止上下文无限膨胀。
-_sessions: dict[int, AgentState] = {}
+_DISCORD_LIMIT = 1900
 _MAX_HISTORY = 24
+_MAX_USER_RUNNERS = 32   # 绑定用户各一个带 token 的 runner,LRU 上限防膨胀
 
 
 def _clean(answer: str) -> str:
-    """去掉网页面板锚点 + 多余空行(Discord 没有证据面板)。"""
-    answer = _PANEL_RE.sub("", answer)
-    return re.sub(r"\n{3,}", "\n\n", answer).strip()
+    return re.sub(r"\n{3,}", "\n\n", _PANEL_RE.sub("", answer)).strip()
 
 
 def _split(text: str, limit: int = _DISCORD_LIMIT) -> list[str]:
-    """按行切成 <=limit 的段,尽量不从句子中间断开。"""
     if len(text) <= limit:
         return [text]
     chunks: list[str] = []
     buf = ""
     for line in text.split("\n"):
-        while len(line) > limit:  # 单行超长:硬切
+        while len(line) > limit:
             chunks.append(line[:limit])
             line = line[limit:]
         if len(buf) + len(line) + 1 > limit:
@@ -58,26 +54,43 @@ def _split(text: str, limit: int = _DISCORD_LIMIT) -> list[str]:
             buf = f"{buf}\n{line}" if buf else line
     if buf:
         chunks.append(buf)
-    return chunks[:6]  # 最多 6 段,防刷屏
+    return chunks[:6]
 
 
 def run() -> None:
     import discord
+    from discord import app_commands
 
     token = settings.discord_bot_token
     if not token:
         raise SystemExit("需要 DISCORD_BOT_TOKEN 才能启动 Discord bot")
 
-    intents = discord.Intents.default()
-    intents.message_content = True  # privileged:开发者后台需勾选 MESSAGE CONTENT INTENT
-    client = discord.Client(intents=intents)
+    auth = AuthStore()
+    ltm = LongTermMemory()
+    moegirl = MoegirlClient()
+    _sessions: dict[int, AgentState] = {}
+    _guest_client = BangumiClient(token=settings.bangumi_token, user_agent=settings.bangumi_user_agent)
+    _guest_runner = build_runner(_guest_client, moegirl, "adaptive", ltm)
+    _user_runners: dict[str, object] = {}   # username -> runner(带该用户 token)
 
-    # agent 侧一次构建、全用户复用(state 每人一份、按调用传入)。guest 模式:无个人 token。
-    bangumi = BangumiClient(token=settings.bangumi_token, user_agent=settings.bangumi_user_agent)
-    runner = build_runner(bangumi, MoegirlClient(), "adaptive", LongTermMemory())
+    def _runner_for(discord_user_id: int):
+        """绑定用户 → 用其 Bangumi token 的个人化 runner;否则 guest。"""
+        username = auth.username_for_discord(str(discord_user_id))
+        if not username:
+            return _guest_runner, None
+        tok = auth.token_for_username(username)
+        if not tok or tok.status != "active":
+            return _guest_runner, username  # 绑过但 token 失效:退回 guest,回答里可提示重绑
+        if username not in _user_runners:
+            if len(_user_runners) >= _MAX_USER_RUNNERS:
+                _user_runners.pop(next(iter(_user_runners)))
+            client = BangumiClient(token=tok.access_token, user_agent=settings.bangumi_user_agent)
+            _user_runners[username] = build_runner(client, moegirl, "adaptive", ltm)
+        return _user_runners[username], username
 
-    async def answer_for(user_id: int, question: str) -> str:
-        state = _sessions.get(user_id) or AgentState()
+    async def _answer(discord_user_id: int, question: str) -> str:
+        runner, _username = _runner_for(discord_user_id)
+        state = _sessions.get(discord_user_id) or AgentState()
         result = ""
         try:
             async for ev in runner.stream(question, state):
@@ -85,16 +98,31 @@ def run() -> None:
                     result = ev.answer
                 elif isinstance(ev, ErrorEvent):
                     result = result or f"⚠️ 出错了:{ev.message[:200]}"
-        except Exception as e:  # noqa: BLE001 - 单条消息失败不能拖垮 bot
+        except Exception as e:  # noqa: BLE001
             log.exception("discord answer failed")
             return f"抱歉,处理时出错了({type(e).__name__}),换个问法再试试?"
-        if len(state.messages) > _MAX_HISTORY:  # 软重置:保留 system + 最近若干轮
+        if len(state.messages) > _MAX_HISTORY:
             state.messages = state.messages[:1] + state.messages[-(_MAX_HISTORY - 1):]
-        _sessions[user_id] = state
+        _sessions[discord_user_id] = state
         return _clean(result) or "(这次没能整理出回答,换个问法试试?)"
+
+    intents = discord.Intents.default()
+    intents.message_content = True
+    client = discord.Client(intents=intents)
+    tree = app_commands.CommandTree(client)
+
+    def _link_url(discord_user_id: int) -> str:
+        payload = auth.encode_discord_link(str(discord_user_id))
+        base = settings.frontend_base_url.rstrip("/")
+        from urllib.parse import quote
+        return f"{base}/auth/bangumi/start?discord_link={quote(payload)}"
 
     @client.event
     async def on_ready() -> None:
+        try:
+            await tree.sync()
+        except Exception:  # noqa: BLE001
+            log.exception("slash command sync failed")
         log.info("Otomo Discord bot 上线:%s", client.user)
         print(f"Otomo Discord bot 已上线:{client.user}")
 
@@ -107,15 +135,57 @@ def run() -> None:
         if not (is_dm or mentioned or settings.discord_reply_all):
             return
         content = message.content
-        if mentioned:  # 去掉 @机器人 前缀
+        if mentioned:
             content = re.sub(rf"<@!?{client.user.id}>", "", content).strip()
         if not content:
-            await message.channel.send("在的~ 直接问我番剧推荐 / 评价 / 在哪看 / 梗出处都行。")
+            await message.channel.send("在的~ 直接问我番剧推荐 / 评价 / 在哪看 / 梗出处都行,或用 `/绑定` 关联你的 Bangumi 账号。")
             return
         async with message.channel.typing():
-            reply = await answer_for(message.author.id, content)
+            reply = await _answer(message.author.id, content)
         for chunk in _split(reply):
             await message.channel.send(chunk)
+
+    async def _slash_answer(interaction: "discord.Interaction", question: str) -> None:
+        await interaction.response.defer(thinking=True)
+        reply = await _answer(interaction.user.id, question)
+        parts = _split(reply)
+        await interaction.followup.send(parts[0])
+        for chunk in parts[1:]:
+            await interaction.followup.send(chunk)
+
+    @tree.command(name="推荐", description="按你的口味推荐番剧(绑定后更懂你)")
+    @app_commands.describe(关键词="想要的题材/心情,如 治愈 / 今晚看完 / 类似孤独摇滚")
+    async def rec(interaction: "discord.Interaction", 关键词: str = "") -> None:
+        await _slash_answer(interaction, f"推荐几部{('：' + 关键词) if 关键词 else '我可能喜欢的番'}")
+
+    @tree.command(name="评价", description="查一部作品的口碑评价")
+    @app_commands.describe(作品="作品名")
+    async def review(interaction: "discord.Interaction", 作品: str) -> None:
+        await _slash_answer(interaction, f"《{作品}》口碑怎么样,值得看吗?")
+
+    @tree.command(name="在哪看", description="查作品的正版观看/购买渠道")
+    @app_commands.describe(作品="作品名")
+    async def where(interaction: "discord.Interaction", 作品: str) -> None:
+        await _slash_answer(interaction, f"《{作品}》在哪能看?给正版渠道")
+
+    @tree.command(name="绑定", description="关联你的 Bangumi 账号,解锁个人化推荐")
+    async def link(interaction: "discord.Interaction") -> None:
+        current = auth.username_for_discord(str(interaction.user.id))
+        if current:
+            await interaction.response.send_message(
+                f"你已绑定 Bangumi 账号 **{current}**。要换号先 `/解绑`。", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            f"点这里用你的 Bangumi 账号完成绑定(仅你可见):\n{_link_url(interaction.user.id)}\n"
+            "绑定后我推荐/查进度就会用你自己的收藏画像。链接 15 分钟内有效。",
+            ephemeral=True,
+        )
+
+    @tree.command(name="解绑", description="解除 Bangumi 账号关联")
+    async def unlink(interaction: "discord.Interaction") -> None:
+        auth.unlink_discord(str(interaction.user.id))
+        _user_runners.clear()
+        await interaction.response.send_message("已解绑。之后回到 guest 模式,`/绑定` 可重新关联。", ephemeral=True)
 
     client.run(token, log_handler=None)
 

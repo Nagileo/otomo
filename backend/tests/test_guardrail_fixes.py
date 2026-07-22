@@ -912,3 +912,28 @@ def test_semantic_recall_index():
     first_id = int(hits[0]["id"])
     hits2 = _semantic_recall(user_texts, seen={first_id}, top_k=8)
     assert all(int(h["id"]) != first_id for h in hits2)
+
+
+def test_discord_link_store_and_signed_token(tmp_path):
+    """Discord 绑定:Fernet 签名令牌往返 + 映射存取 + 反查 + 篡改拒绝。"""
+    import os
+    os.environ["AUTH_ENCRYPTION_KEY"] = "Zk9wQ2h2Y3Jt0123456789ABCDEFabcdefGHIJ12345="  # 固定 Fernet key
+    from otomo.auth import AuthStore
+
+    store = AuthStore(base_dir=tmp_path)
+    # 签名令牌:bot 编码 → backend 解码
+    tok = store.encode_discord_link("discord_123")
+    assert store.decode_discord_link(tok) == "discord_123"
+    # 过期拒绝
+    assert store.decode_discord_link(tok, ttl=-1) is None
+    # 篡改拒绝
+    assert store.decode_discord_link(tok + "x") is None
+    assert store.decode_discord_link("garbage") is None
+    # 映射存取 + 双向反查
+    store.set_discord_link("discord_123", "luorily")
+    assert store.username_for_discord("discord_123") == "luorily"
+    assert store.discord_for_username("luorily") == "discord_123"
+    assert store.username_for_discord("discord_999") is None
+    # 解绑
+    store.unlink_discord("discord_123")
+    assert store.username_for_discord("discord_123") is None

@@ -644,6 +644,22 @@ async def dev_token_login(req: dict[str, str], request: Request, response: Respo
     return {"ok": True, "identity": identity}
 
 
+@app.get("/auth/bangumi/start")
+async def bangumi_start(request: Request, response: Response, discord_link: str = "") -> RedirectResponse:
+    """浏览器可直接打开的登录入口:302 跳 Bangumi 授权。Discord 绑定用——
+    bot 的 /link 给出带 discord_link(Fernet 签名的 discord_user_id)的链接,
+    授权成功后回调里自动绑定。"""
+    session = _ensure_auth_session(request, response)
+    discord_user_id = app.state.auth.decode_discord_link(discord_link) if discord_link else ""
+    try:
+        url = build_authorization_url(app.state.auth, session.auth_session_id, discord_user_id or "")
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    redirect = RedirectResponse(url)
+    _set_auth_cookies(redirect, session)
+    return redirect
+
+
 @app.get("/auth/bangumi/callback")
 async def bangumi_callback(code: str = "", state: str = "") -> RedirectResponse:
     status = "ok"
