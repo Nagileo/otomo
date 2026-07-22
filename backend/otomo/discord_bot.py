@@ -187,6 +187,44 @@ def run() -> None:
         _user_runners.clear()
         await interaction.response.send_message("已解绑。之后回到 guest 模式,`/绑定` 可重新关联。", ephemeral=True)
 
+    _HELP = (
+        "**Otomo · 番组搭子** —— ACGN 知识图谱 agent 🎴\n\n"
+        "**怎么用:**\n"
+        "• 在频道里 **@我** 提问,或**私信我**(私信不用 @)\n"
+        "• 斜杠命令:`/推荐` `/评价` `/在哪看`\n\n"
+        "**能问什么(举例):**\n"
+        "• 推荐:`推荐几部治愈番` / `类似孤独摇滚的` / `今晚能看完的短番`\n"
+        "• 评价:`药屋少女的呢喃口碑怎么样` / `会不会烂尾`\n"
+        "• 追番:`这季什么番最火` / `药屋在哪能看`\n"
+        "• 考据:`白色相簿2 冬马的声优还配过谁` / `这是什么梗`\n\n"
+        "**个人化:** `/绑定` 关联你的 Bangumi 账号后,推荐会用你自己的收藏画像,还能查你的追番进度。\n"
+        "`/我是谁` 看绑定状态,`/解绑` 解除关联。"
+    )
+
+    @tree.command(name="帮助", description="Otomo 用法说明")
+    async def help_zh(interaction: "discord.Interaction") -> None:
+        await interaction.response.send_message(_HELP, ephemeral=True)
+
+    @tree.command(name="help", description="How to use Otomo")
+    async def help_en(interaction: "discord.Interaction") -> None:
+        await interaction.response.send_message(_HELP, ephemeral=True)
+
+    @tree.command(name="我是谁", description="查看你的 Bangumi 绑定状态(排障用)")
+    async def whoami(interaction: "discord.Interaction") -> None:
+        uid = str(interaction.user.id)
+        username = auth.username_for_discord(uid)
+        if not username:
+            await interaction.response.send_message(
+                f"Discord ID `{uid}`：**未绑定**。用 `/绑定` 关联 Bangumi 账号。", ephemeral=True)
+            return
+        tok = auth.token_for_username(username)
+        status = tok.status if tok else "找不到 token"
+        await interaction.response.send_message(
+            f"Discord ID `{uid}`\n绑定账号:**{username}**\nToken 状态:`{status}`"
+            + ("\n✅ 个人化已生效" if tok and tok.status == "active" else "\n⚠️ token 异常,`/解绑` 后重新 `/绑定`"),
+            ephemeral=True,
+        )
+
     client.run(token, log_handler=None)
 
 

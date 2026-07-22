@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ...agent.contracts import Citation, Tool, ToolResult
 from ...config import settings
-from .._rag import hybrid_rank
+from .._rag import ahybrid_rank
 from ..bangumi.client import BangumiClient
 
 _BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
@@ -68,7 +68,7 @@ class GetCommentsTool(Tool):
                 all_comments.append(text)
         # 有 query → 短评纳入 hybrid 检索，捞最相关的几条；否则取最新一批
         if args.query and len(all_comments) > args.limit:
-            comments = hybrid_rank(args.query, all_comments, top_k=args.limit)
+            comments = await ahybrid_rank(args.query, all_comments, top_k=args.limit)
         else:
             comments = all_comments[: args.limit]
         return ToolResult(
@@ -155,7 +155,7 @@ class GetEpisodeCommentsTool(Tool):
             if text:
                 all_comments.append(text)
         if args.query and len(all_comments) > args.limit:
-            comments = hybrid_rank(args.query, all_comments, top_k=args.limit)
+            comments = await ahybrid_rank(args.query, all_comments, top_k=args.limit)
         else:
             comments = all_comments[: args.limit]
         return ToolResult(

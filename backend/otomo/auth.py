@@ -6,6 +6,7 @@ enough to replace with Postgres/Redis and encrypted token storage later.
 from __future__ import annotations
 
 import json
+import logging
 import secrets
 import sqlite3
 import time
@@ -426,6 +427,8 @@ async def exchange_oauth_code(auth_store: AuthStore, code: str, state_value: str
     auth_store.save_token(token)
     if state.discord_user_id and token.username:  # 这次是 Discord 绑定登录
         auth_store.set_discord_link(state.discord_user_id, token.username)
+        logging.getLogger("otomo.auth").info(
+            "discord 绑定成功: discord=%s ↔ bangumi=%s", state.discord_user_id, token.username)
     return token
 
 

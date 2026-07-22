@@ -8,7 +8,7 @@ from __future__ import annotations
 from pydantic import BaseModel, ConfigDict, Field
 
 from ...agent.contracts import Citation, Tool, ToolResult
-from .._rag import chunk_text, hybrid_rank
+from .._rag import chunk_text, ahybrid_rank
 from .client import MoegirlClient
 
 
@@ -65,7 +65,7 @@ class LoreSearchTool(Tool):
         if not page or not page.get("extract"):
             return ToolResult(ok=True, data=LoreResult(title=titles[0], found=False, snippets=[]))
 
-        snippets = hybrid_rank(args.query, chunk_text(page["extract"]))
+        snippets = await ahybrid_rank(args.query, chunk_text(page["extract"]))
         cite = Citation(
             title=f"萌娘百科 — {page['title']}",
             url=page.get("fullurl") or "",
@@ -98,7 +98,7 @@ class MemeExplainTool(Tool):
         page = await self.client.extract(titles[0], intro_only=False)
         if not page or not page.get("extract"):
             return ToolResult(ok=True, data=MemeExplainResult(title=titles[0], found=False))
-        snippets = hybrid_rank(args.query, chunk_text(page["extract"]))[:6]
+        snippets = await ahybrid_rank(args.query, chunk_text(page["extract"]))[:6]
         frame = [
             "先说明字面含义/使用场景。",
             "再说明来源或常见关联作品/角色。",

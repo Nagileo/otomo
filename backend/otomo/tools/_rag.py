@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 from functools import lru_cache
 from pathlib import Path
 
@@ -112,3 +113,9 @@ def hybrid_rank(query: str, chunks: list[str], top_k: int = 3) -> list[str]:
         return ranked[:top_k]
     except Exception:  # noqa: BLE001 — 缺模型 / 依赖 / 运行错 → 词法兜底，绝不让检索挂掉
         return rank_chunks(query, chunks, top_k)
+
+
+async def ahybrid_rank(query: str, chunks: list[str], top_k: int = 3) -> list[str]:
+    """hybrid_rank 的异步包装：bge encode/rerank 是同步 CPU 密集，直接调会阻塞
+    asyncio 事件循环（并发请求时一个卡住全部）。丢线程池执行，保持事件循环不阻塞。"""
+    return await asyncio.to_thread(hybrid_rank, query, chunks, top_k)
