@@ -54,6 +54,10 @@ pixiv = [
     # Pixiv 非官方登录 API；需 PIXIV_REFRESH_TOKEN，公网部署默认关闭。
     "PixivPy-Async>=1.2.14",
 ]
+discord = [
+    # Discord bot 入口（python -m otomo.discord_bot）；需 DISCORD_BOT_TOKEN。
+    "discord.py>=2.4",
+]
 
 [project.scripts]
 otomo = "otomo.cli:main"

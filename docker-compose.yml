@@ -42,6 +42,21 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # Discord bot：@机器人 / 私信即可用 agent。填了 DISCORD_BOT_TOKEN 才随 --profile discord 启动。
+  # 启用：docker compose --profile discord up -d
+  discord:
+    build:
+      context: ./backend
+    command: ["python", "-m", "otomo.discord_bot"]
+    env_file:
+      - ./backend/.env
+    volumes:
+      - ./cache:/app/cache
+      - ./logs:/app/logs
+      - ./models:/models
+    profiles: ["discord"]
+    restart: unless-stopped
+
   frontend:
     build:
       context: ./frontend

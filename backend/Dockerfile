@@ -19,7 +19,7 @@ RUN pip install --upgrade pip \
 # ② 再装核心依赖 + 本地包（改代码只重跑这两步，都很快）
 COPY pyproject.toml ./
 COPY otomo ./otomo
-RUN pip install -e ".[rag]"
+RUN pip install -e ".[rag,discord]"
 
 EXPOSE 8000
 

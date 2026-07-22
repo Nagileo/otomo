@@ -111,6 +111,11 @@ class Settings(BaseSettings):
     smtp_password: str = ""
     smtp_from: str = ""
 
+    # ---- Discord bot（可选；填 token 才启用 discord 服务，见 docker-compose）----
+    discord_bot_token: str = ""
+    # 服务器里只有被 @ 才回；私信直接回。设 true 则频道里所有消息都回（吵，慎用）。
+    discord_reply_all: bool = False
+
     # ---- Agent / HTTP ----
     agent_max_iters: int = 8
     # 渐进式工具披露：核心常驻 + 按查询词法选组 + load_tool_group 逃生舱。
