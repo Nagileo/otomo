@@ -22,6 +22,7 @@ const CHANNELS = [
   ["inbox", "站内"],
   ["email", "Email"],
   ["webhook", "Webhook"],
+  ["discord_dm", "Discord 私信（需 /绑定）"],
 ] as const;
 
 function list(value: any): AnyRecord[] {

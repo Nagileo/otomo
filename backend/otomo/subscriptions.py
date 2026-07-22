@@ -45,7 +45,7 @@ SubscriptionKind = Literal[
     "friends_activity",
     "episode_buzz",
 ]
-SubscriptionChannel = Literal["inbox", "email", "webhook"]
+SubscriptionChannel = Literal["inbox", "email", "webhook", "discord_dm"]
 SubscriptionTemplate = Literal["brief", "normal", "detailed"]
 DeliveryStatus = Literal["pending", "sent", "skipped", "failed"]
 WebhookFormat = Literal["generic", "serverchan", "telegram", "discord", "feishu"]
@@ -964,7 +964,7 @@ def weekly_subscription_from_rule(rule: SubscriptionRule) -> WeeklyDigestSubscri
 
 
 def _normalize_channels(channels: list[str]) -> list[SubscriptionChannel]:
-    allowed = {"inbox", "email", "webhook"}
+    allowed = {"inbox", "email", "webhook", "discord_dm"}
     out = [c for c in dict.fromkeys(channels or ["inbox"]) if c in allowed]
     return out or ["inbox"]
 

@@ -164,6 +164,40 @@ async def _send_email(username: str, sub: WeeklyDigestSubscription, item: InboxI
     return await asyncio.to_thread(_send_email_sync, username, sub, item)
 
 
+async def _send_discord_dm(username: str, item: InboxItem) -> dict[str, Any]:
+    """用 bot token 私信已绑定 Bangumi 账号的 Discord 用户(无需 webhook_url,
+    按 username 反查 discord_user_id)。Discord 是最佳推送渠道:无条数限制、排版好。"""
+    token = settings.discord_bot_token
+    if not token:
+        return {"channel": "discord_dm", "ok": False, "error": "未配置 DISCORD_BOT_TOKEN", "ts": now_iso()}
+    from .auth import AuthStore  # 延迟导入避免循环
+    discord_id = AuthStore().discord_for_username(username)
+    if not discord_id:
+        return {"channel": "discord_dm", "ok": False, "error": f"{username} 未绑定 Discord", "ts": now_iso()}
+    text = digest_text(item)
+    headers = {"Authorization": f"Bot {token}"}
+    try:
+        async with httpx.AsyncClient(timeout=settings.weekly_webhook_timeout) as client:
+            # 开私信频道
+            r = await client.post(
+                "https://discord.com/api/v10/users/@me/channels",
+                json={"recipient_id": str(discord_id)}, headers=headers,
+            )
+            if r.status_code >= 400:
+                raise RuntimeError(f"open DM {r.status_code}: {r.text[:200]}")
+            channel_id = r.json()["id"]
+            for chunk in _chunks(f"**{item.title}**\n{text}", 1900)[:5]:
+                m = await client.post(
+                    f"https://discord.com/api/v10/channels/{channel_id}/messages",
+                    json={"content": chunk}, headers=headers,
+                )
+                if m.status_code >= 400:
+                    raise RuntimeError(f"send DM {m.status_code}: {m.text[:200]}")
+        return {"channel": "discord_dm", "ok": True, "ts": now_iso()}
+    except Exception as e:  # noqa: BLE001
+        return {"channel": "discord_dm", "ok": False, "error": f"{type(e).__name__}: {str(e)[:200]}", "ts": now_iso()}
+
+
 async def dispatch_weekly_digest_notifications(
     username: str,
     sub: WeeklyDigestSubscription,
@@ -178,6 +212,8 @@ async def dispatch_weekly_digest_notifications(
         tasks.append(_send_webhook(username, sub, item))
     if "email" in channels:
         tasks.append(_send_email(username, sub, item))
+    if "discord_dm" in channels:
+        tasks.append(_send_discord_dm(username, item))
     if tasks:
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for result in results:

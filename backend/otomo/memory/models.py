@@ -14,7 +14,7 @@ WriteOperation = Literal["set_collection", "set_episode_collection", "mark_episo
 DecisionKind = Literal["accept", "reject", "defer", "write", "undo", "plan", "note"]
 PlanStatus = Literal["wishlist", "watching", "backlog", "on_hold", "revive", "completed", "rejected"]
 InboxKind = Literal["weekly_digest", "daily_airing", "system"]
-WeeklyChannel = Literal["inbox", "webhook", "email"]
+WeeklyChannel = Literal["inbox", "webhook", "email", "discord_dm"]
 WeeklyWebhookFormat = Literal["generic", "serverchan", "telegram", "discord", "feishu"]
 AspectKey = Literal[
     "story", "character", "pacing", "visual", "music",

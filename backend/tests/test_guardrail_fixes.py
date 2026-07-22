@@ -937,3 +937,48 @@ def test_discord_link_store_and_signed_token(tmp_path):
     # 解绑
     store.unlink_discord("discord_123")
     assert store.username_for_discord("discord_123") is None
+
+
+def test_discord_dm_dispatch(monkeypatch, tmp_path):
+    """discord_dm 渠道:按 username 反查 discord_id → 用 bot token 私信;未绑定/无token优雅报错。"""
+    import asyncio as _a
+    import os
+    os.environ["AUTH_ENCRYPTION_KEY"] = "Zk9wQ2h2Y3Jt0123456789ABCDEFabcdefGHIJ12345="
+    os.environ["DISCORD_BOT_TOKEN"] = "test_bot_token"
+
+    import otomo.config as cfg
+    cfg.settings.discord_bot_token = "test_bot_token"
+    from otomo import notifications as nt
+    from otomo.auth import AuthStore
+    from otomo.memory.models import InboxItem
+
+    store = AuthStore(base_dir=tmp_path)
+    store.set_discord_link("discord_42", "luorily")
+    monkeypatch.setattr("otomo.auth.AuthStore", lambda *a, **k: store)
+
+    posted = []
+
+    class FakeResp:
+        status_code = 200
+        def json(self): return {"id": "dm_channel_1"}
+        @property
+        def text(self): return ""
+
+    class FakeClient:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, url, **kw):
+            posted.append(url)
+            return FakeResp()
+
+    monkeypatch.setattr(nt.httpx, "AsyncClient", lambda *a, **k: FakeClient())
+    item = InboxItem(id="x", kind="weekly_digest", title="口碑哨兵", payload={"sections": [{"title": "异动", "items": [{"name": "某番"}]}]})
+
+    r = _a.run(nt._send_discord_dm("luorily", item))
+    assert r["ok"] is True
+    assert any("users/@me/channels" in u for u in posted)  # 开了 DM
+    assert any("/messages" in u for u in posted)           # 发了消息
+
+    # 未绑定用户 → 优雅报错
+    r2 = _a.run(nt._send_discord_dm("someone_else", item))
+    assert r2["ok"] is False and "未绑定" in r2["error"]
