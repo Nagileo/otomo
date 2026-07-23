@@ -72,9 +72,9 @@ export const PANEL_LABELS: Record<string, string> = {
   where_to_watch: "观看/购买渠道",
   get_anime_release_feeds: "离线资源",
   get_bangumi_index: "目录清单",
-  recommend_subjects: "推荐候选",
+  recommend_subjects: "为你推荐",
   season_guide_brief: "季番导视",
-  review_subject: "评价证据",
+  review_subject: "口碑速览",
   route_subject_sources: "源路由",
   compare_user_taste: "口味同步率",
   explore_voice_network: "声优网络",
@@ -89,7 +89,7 @@ export const PANEL_LABELS: Record<string, string> = {
   claim_check: "证据校验",
 };
 
-const DEV_ONLY_PANELS = new Set(["build_aspect_profile", "claim_check"]);
+const DEV_ONLY_PANELS = new Set(["build_aspect_profile", "claim_check", "route_subject_sources"]);
 
 const MEMORY_KEYS = [
   "get_user_memory", "remember_user_preference", "forget_user_memory",

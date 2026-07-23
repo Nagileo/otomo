@@ -178,7 +178,7 @@ export function VisualTextPanel({ data }: { data: AnyRecord }) {
   const tags = list<string>(data.visual_tags);
   return (
     <Panel
-      title={`图片 OCR / 结构化 · ${text(data.mode, "auto")}`}
+      title="读图取字"
       subtitle={`${data.image_count ?? 1} 张图 · 匹配度 ${Math.round(Number(data.confidence || 0) * 100)}%`}
     >
       {tags.length > 0 && (

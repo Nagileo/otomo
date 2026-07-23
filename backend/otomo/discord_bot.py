@@ -125,6 +125,100 @@ def _watch_embeds(discord, data: dict) -> list:
     return [e]
 
 
+_HOT_BADGE = {"surge": "🔥🔥 爆热", "hot": "🔥 热播", "warm": "升温中", "none": ""}
+
+
+def _season_embeds(discord, data: dict) -> list:
+    items = (data.get("items") or [])[:6]
+    if not items:
+        return []
+    e = discord.Embed(title="季番导视", color=_EMBED_COLOR)
+    first_cover = None
+    for it in items:
+        hot = _HOT_BADGE.get(str(it.get("hotness_level") or "none"), "")
+        bits = []
+        if it.get("bangumi_score"):
+            bits.append(f"⭐ {it['bangumi_score']}")
+        if hot:
+            bits.append(hot)
+        if it.get("broadcast"):
+            bits.append(str(it["broadcast"]))
+        reason = str(it.get("reason") or "")[:120]
+        sid = it.get("subject_id")
+        title_link = f"[{it.get('title') or '?'}](https://bgm.tv/subject/{sid})" if sid else str(it.get("title") or "?")
+        e.add_field(
+            name=(" · ".join(bits) or "·")[:256],
+            value=f"{title_link}\n{reason}"[:1024],
+            inline=False,
+        )
+        first_cover = first_cover or _cover(it)
+    if first_cover:
+        e.set_thumbnail(url=first_cover)
+    return [e]
+
+
+def _movers_embeds(discord, data: dict) -> list:
+    out = []
+    boards = [("📉 口碑下跌(崩)", data.get("down")), ("📈 口碑上涨", data.get("up")), ("🏁 近期完结", data.get("done"))]
+    lines_all = []
+    for label, board in boards:
+        rows = (board or [])[:6]
+        if not rows:
+            continue
+        lines = []
+        for m in rows:
+            delta = float(m.get("delta_score") or 0)
+            sign = "+" if delta > 0 else ""
+            lines.append(
+                f"[{m.get('title') or '?'}](https://bgm.tv/subject/{m.get('subject_id')}) "
+                f"`{sign}{delta}` (现 {m.get('current_score') or '?'})"
+            )
+        lines_all.append((label, "\n".join(lines)))
+    if not lines_all:
+        return []
+    e = discord.Embed(title="口碑异动 · 近 30 天", color=_EMBED_COLOR)
+    for label, value in lines_all:
+        e.add_field(name=label, value=value[:1024], inline=False)
+    e.set_footer(text="数据来自 netaba.re 快照(第三方)")
+    return [e]
+
+
+def _trend_embeds(discord, data: dict) -> list:
+    e = discord.Embed(
+        title=f"口碑走势 · {data.get('title') or '?'}"[:256],
+        url=str(data.get("netabare_url") or "") or None,
+        description=str(data.get("summary") or "")[:600],
+        color=_EMBED_COLOR,
+    )
+    if data.get("current_score") is not None:
+        e.add_field(name="当前均分", value=str(data["current_score"]), inline=True)
+    for key, label in (("score_change_30d", "30 天"), ("score_change_90d", "90 天")):
+        if data.get(key) is not None:
+            v = float(data[key])
+            e.add_field(name=label, value=f"{'+' if v > 0 else ''}{v}", inline=True)
+    if data.get("controversy"):
+        e.add_field(name="争议度", value=str(data["controversy"]), inline=True)
+    e.set_footer(text="走势为 netaba.re 每日快照(第三方)")
+    return [e]
+
+
+def _buzz_embeds(discord, data: dict) -> list:
+    hits = (data.get("hits") or [])[:8]
+    e = discord.Embed(
+        title="分集爆点雷达",
+        description=f"扫描 {data.get('checked_subjects') or 0} 部在看番" + ("" if hits else " · 最近没有讨论量突增的集"),
+        color=_EMBED_COLOR,
+    )
+    for h in hits:
+        ratio = f" · {h['ratio']}× 平常" if h.get("ratio") else " · 开播即热"
+        e.add_field(
+            name=f"🔥 {h.get('subject_name') or '?'} 第 {h.get('sort')} 集"[:256],
+            value=f"[{h.get('comments')} 条讨论{ratio}]({h.get('url') or 'https://bgm.tv'})"[:1024],
+            inline=False,
+        )
+    return [e]
+
+
 def build_embeds(discord, name: str, data: dict | None) -> list:
     """按工具名把结构化结果做成 Discord embed;不认识/出错→[](走纯文本兜底)。"""
     if not data:
@@ -135,6 +229,10 @@ def build_embeds(discord, name: str, data: dict | None) -> list:
             "review_subject": _review_embeds,
             "anime_omikuji": _omikuji_embeds,
             "where_to_watch": _watch_embeds,
+            "season_guide_brief": _season_embeds,
+            "get_rating_movers": _movers_embeds,
+            "get_subject_trend": _trend_embeds,
+            "scan_my_episode_buzz": _buzz_embeds,
         }.get(name, lambda *_: [])(discord, data)
     except Exception:  # noqa: BLE001 - 卡片失败绝不能拖垮回复
         return []

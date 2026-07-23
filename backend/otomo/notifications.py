@@ -96,6 +96,65 @@ def digest_text(item: InboxItem) -> str:
     return "\n".join(lines).strip()
 
 
+def _esc(s: object) -> str:
+    return (str(s) if s is not None else "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def digest_html(username: str, item: InboxItem) -> str:
+    """HTML 卡片版 digest(替代纯文本一坨字)。全部内联样式——邮件客户端不认 <style>。"""
+    payload = item.payload or {}
+    grade = str(payload.get("push_grading") or "normal")
+    item_limit = 3 if grade == "brief" else 8 if grade == "normal" else 12
+    card = (
+        "background:#171a21;border:1px solid #272b36;border-radius:12px;"
+        "padding:16px 18px;margin:0 0 14px;"
+    )
+    sections_html: list[str] = []
+    for section in payload.get("sections") or []:
+        rows: list[str] = []
+        for row in (section.get("items") or [])[:item_limit]:
+            name = row.get("name") or row.get("title") or row.get("subject_name") or "未命名条目"
+            reason = row.get("summary") or row.get("reason") or row.get("note") or row.get("action") or ""
+            if not reason and (why := row.get("why") or row.get("reasons")):
+                reason = "；".join(str(x) for x in why[:2])
+            url = row.get("url") or (f"https://bgm.tv/subject/{row['id']}" if row.get("id") else "")
+            name_html = (
+                f'<a href="{_esc(url)}" style="color:#7aa2f7;text-decoration:none;font-weight:600">{_esc(name)}</a>'
+                if url else f'<span style="color:#e6e8ee;font-weight:600">{_esc(name)}</span>'
+            )
+            reason_html = f'<div style="color:#8a90a2;font-size:13px;margin-top:2px">{_esc(reason)}</div>' if reason else ""
+            rows.append(
+                f'<div style="padding:9px 0;border-bottom:1px solid #23262f">{name_html}{reason_html}</div>'
+            )
+        if not rows:
+            continue
+        sections_html.append(
+            f'<div style="{card}">'
+            f'<div style="color:#7aa2f7;font-size:12px;font-weight:700;letter-spacing:.06em;'
+            f'text-transform:uppercase;margin-bottom:6px">{_esc(section.get("title") or "Section")}</div>'
+            + "".join(rows) + "</div>"
+        )
+    next_actions = payload.get("next_actions") or []
+    if next_actions:
+        items_li = "".join(
+            f'<li style="margin:4px 0;color:#cbd0dc">{_esc(x)}</li>' for x in next_actions[:6]
+        )
+        sections_html.append(
+            f'<div style="{card}"><div style="color:#9ece6a;font-size:12px;font-weight:700;'
+            f'margin-bottom:6px">NEXT</div><ul style="margin:0;padding-left:18px">{items_li}</ul></div>'
+        )
+    return (
+        '<div style="background:#0f1116;padding:28px 16px;font-family:ui-sans-serif,system-ui,'
+        "'Segoe UI','Microsoft YaHei',sans-serif\">"
+        '<div style="max-width:560px;margin:0 auto">'
+        f'<div style="font-size:19px;font-weight:800;color:#e6e8ee;margin-bottom:2px">{_esc(item.title)}</div>'
+        f'<div style="color:#8a90a2;font-size:12px;margin-bottom:16px">Hi {_esc(username)}，这是 Otomo 为你整理的更新</div>'
+        + "".join(sections_html)
+        + '<div style="color:#5a5f6e;font-size:11px;margin-top:18px">来自 Otomo · 番组搭子 — 可在订阅中心调整推送</div>'
+        "</div></div>"
+    )
+
+
 def _telegram_endpoint_and_payload(url: str, text: str) -> tuple[str, dict[str, Any]]:
     parsed = urlparse(url)
     query = parse_qs(parsed.query)
@@ -206,7 +265,9 @@ def _send_email_sync(username: str, sub: NotificationTarget, item: InboxItem) ->
     msg["Subject"] = item.title
     msg["From"] = settings.smtp_from
     msg["To"] = sub.email
+    # multipart: 纯文本兜底 + HTML 卡片(邮件客户端只认内联样式)
     msg.set_content(f"Hi {username},\n\n{digest_text(item)}\n\n-- Otomo")
+    msg.add_alternative(digest_html(username, item), subtype="html")
     try:
         with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=12) as smtp:
             smtp.starttls()

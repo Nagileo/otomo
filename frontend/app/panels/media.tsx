@@ -14,7 +14,7 @@ export function TrendingPanel({ data }: { data: AnyRecord }) {
   return (
     <Panel
       title="Bangumi 全站热门"
-      subtitle={`${text(data.subject_type, "anime")} · ${text(data.count, "0")} 部 · 网页版同源数据`}
+      subtitle={`${text(data.subject_type, "anime")} · ${text(data.count, "0")} 部 · 实时热度`}
     >
       {items.length === 0 && <div className="empty-hint">热门数据暂不可用（非正式端点可能变动）。</div>}
       <div className="trending-list">
@@ -50,7 +50,7 @@ export function BirthdayPanel({ data }: { data: AnyRecord }) {
   const characters = list(data.characters);
   const moegirl = list(data.moegirl_entries);
   return (
-    <Panel title={`今日生日 · ${text(data.date, "")}`} subtitle={`${data.count ?? characters.length} 位 · AniList 人气卡 + 萌娘完整名单`}>
+    <Panel title={`今日生日 · ${text(data.date, "")}`} subtitle={`${data.count ?? characters.length} 位角色今天过生日`}>
       {characters.length === 0 && moegirl.length === 0 && (
         <div className="empty-hint">今天没有收录到过生日的角色。</div>
       )}
@@ -105,7 +105,7 @@ export function PilgrimagePanel({ data }: { data: AnyRecord }) {
       subtitle={`${text(data.city, "多地")} · 共 ${data.count ?? points.length} 个取景点`}
     >
       <div className="evidence-row">
-        <Badge tone="dim">source: anitabi 社区共建</Badge>
+        <Badge tone="dim">数据来自巡礼社区 anitabi</Badge>
         {data.map_url && (
           <a className="inline-link" href={data.map_url} target="_blank" rel="noreferrer">打开完整地图 →</a>
         )}
@@ -458,7 +458,7 @@ export function TasteAffinityPanel({ data }: { data: AnyRecord }) {
   // friends_matrix 模式：全好友收缩排名表
   if (matrix.length) {
     return (
-      <Panel title={`好友口味排名 · @${text(data.username)}`} subtitle={`${text(data.subject_type)} · 贝叶斯收缩分（防小样本虚高）`}>
+      <Panel title={`好友口味排名 · @${text(data.username)}`} subtitle={`${text(data.subject_type)} · 综合排名（共同评分少的自动降权）`}>
         <div className="compact-list" style={{ display: "grid", gap: 6 }}>
           {matrix.map((e, i) => (
             <div key={`${e.username}-${i}`} style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
@@ -677,7 +677,7 @@ export function ReleaseFeedsPanel({ data, onPrepareDownloaderPush }: { data: Any
   return (
     <Panel
       title={`离线资源/RSS · ${text(data.title)}`}
-      subtitle={`Mikan ${list(data.mikan_ids).length} 映射 · ${groups.length} 组 · 兜底 ${fallback.length} 条`}
+      subtitle={`${groups.length} 个字幕组 · ${fallback.length} 条兜底订阅源`}
     >
       <div className="evidence-row">
         <Badge tone={data.mapping_confidence >= 0.8 ? "good" : "warn"}>{data.mapping_confidence >= 0.8 ? "外站对齐可靠" : "外站对齐存疑"}</Badge>
@@ -759,7 +759,7 @@ export function BangumiIndexPanel({ data, onPrepareWrite }: { data: AnyRecord; o
   return (
     <Panel
       title={`Bangumi 目录 · ${text(data.title)}`}
-      subtitle={`${text(data.creator, "unknown")} · ${items.length} 条 · index ${text(data.index_id)}`}
+      subtitle={`${text(data.creator, "站友")} 整理 · ${items.length} 部`}
     >
       {data.description && <p className="evidence-copy">{text(data.description)}</p>}
       <div className="season-grid">
@@ -856,7 +856,7 @@ export function SeasonGuidePanel({
   return (
     <Panel
       title={single ? `季番导视 · ${text(anchoredItem?.title)}` : `季番导视 · ${text(data.season)}`}
-      subtitle={`${data.personalized ? "已按用户画像分诊" : "非个性化导视"} · ${single ? "单部锚定" : `${items.length} 部`} · mode: ${text(data.mode, "guide")}`}
+      subtitle={`${data.personalized ? "按你的口味排序" : "通用视角"} · ${single ? "单部详情" : `${items.length} 部`}`}
     >
       {!single && <div className="panel-actions">
         <ShareSnapshotButton
@@ -1133,7 +1133,7 @@ export function EpisodeRadarPanel({ data }: { data: AnyRecord }) {
   const peaks = list(data.peaks);
   const maxC = Math.max(...curve.map((p: AnyRecord) => Number(p.comments) || 0), 1);
   return (
-    <Panel title={`分集口碑雷达 · subject ${text(data.subject_id)}`} subtitle={`共 ${data.total ?? curve.length} 集 · 讨论热度曲线`}>
+    <Panel title="分集口碑雷达" subtitle={`共 ${data.total ?? curve.length} 集 · 每集讨论热度`}>
       <div style={{ display: "flex", alignItems: "flex-end", gap: 2, height: 92, marginBottom: 10, overflowX: "auto" }}>
         {curve.map((p: AnyRecord, i: number) => (
           <div key={i} title={`第 ${p.sort} 集 ${text(p.name)} · ${p.comments} 讨论`}
