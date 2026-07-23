@@ -17,11 +17,14 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import re
 
-from .agent.contracts import AgentState, ErrorEvent, FinalEvent, ObservationEvent
+from .agent.contracts import AgentState, ErrorEvent, FinalEvent, ObservationEvent, ProgressEvent
 from .auth import AuthStore, refreshed_token_for_username
+from .factory import build_registry
+from .uploads import upload_store
 from .config import settings
 from .factory import build_runner
 from .memory import LongTermMemory
@@ -218,6 +221,154 @@ def _buzz_embeds(discord, data: dict) -> list:
     return [e]
 
 
+def _quiz_embeds(discord, data: dict) -> list:
+    """答案用 Discord 剧透语法 ||…|| 藏起来,点击揭晓——聊天框里最自然的判分方式。"""
+    qs = (data.get("questions") or [])[:8]
+    if not qs:
+        return []
+    e = discord.Embed(title="🎯 ACGN 小测验", description="想好了再点开 ||答案|| 揭晓", color=_EMBED_COLOR)
+    letters = "ABCD"
+    for i, q in enumerate(qs, 1):
+        opts = q.get("options") or []
+        lines = [f"{letters[j]}. {opt}" for j, opt in enumerate(opts[:4])]
+        ans_idx = int(q.get("answer_index") or 0)
+        ans = f"||{letters[ans_idx]}. {opts[ans_idx] if ans_idx < len(opts) else '?'}"
+        if q.get("explain"):
+            ans += f" — {q['explain']}"
+        ans += "||"
+        e.add_field(name=f"{i}. {q.get('q') or '?'}"[:256], value=("\n".join(lines) + f"\n{ans}")[:1024], inline=False)
+    return [e]
+
+
+def _calendar_embeds(discord, data: dict) -> list:
+    items = (data.get("items") or [])[:12]
+    if not items:
+        return []
+    e = discord.Embed(title=f"放送日历 · {data.get('today') or ''}"[:256], color=_EMBED_COLOR)
+    lines = []
+    for it in items:
+        mark = "📌 " if it.get("mine") else ""
+        broadcast = f" · {it['broadcast']}" if it.get("broadcast") else ""
+        lines.append(f"{mark}[{it.get('name') or it.get('title') or '?'}](https://bgm.tv/subject/{it.get('subject_id') or it.get('id')}){broadcast}")
+    e.description = "\n".join(lines)[:3500]
+    return [e]
+
+
+def _ep_progress_embeds(discord, data: dict) -> list:
+    eps = data.get("episodes") or []
+    total = int(data.get("total_main") or len(eps) or 0)
+    watched = int(data.get("watched") or 0)
+    cells = "".join("🟩" if e.get("status") == "看过" else "🟥" if e.get("status") == "抛弃" else "⬜" for e in eps[:40])
+    e = discord.Embed(
+        title=f"追番进度 · {data.get('subject_name') or '?'}"[:256],
+        description=f"看到第 **{data.get('watched_up_to') or 0}** 集 · {watched}/{total}\n{cells}",
+        color=_EMBED_COLOR,
+    )
+    if data.get("next_episode") is not None:
+        e.add_field(name="下一集", value=f"第 {data['next_episode']:g} 集", inline=True)
+    return [e]
+
+
+def _compare_embeds(discord, data: dict) -> list:
+    cols = (data.get("columns") or data.get("subjects") or [])[:4]
+    if not cols:
+        return []
+    e = discord.Embed(title="作品对比", color=_EMBED_COLOR)
+    for c in cols:
+        bits = []
+        if c.get("score"):
+            bits.append(f"⭐ {c['score']}")
+        if c.get("rank"):
+            bits.append(f"#{c['rank']}")
+        if c.get("drop_rate") is not None:
+            bits.append(f"弃番率 {c['drop_rate']}%")
+        e.add_field(name=str(c.get("name_cn") or c.get("name") or "?")[:256], value=(" · ".join(bits) or "-")[:1024], inline=True)
+    for h in (data.get("highlights") or [])[:3]:
+        e.add_field(name="💡", value=str(h)[:1024], inline=False)
+    return [e]
+
+
+def _birthday_embeds(discord, data: dict) -> list:
+    chars = (data.get("characters") or [])[:6]
+    if not chars:
+        return []
+    e = discord.Embed(title=f"🎂 今日生日 · {data.get('date') or ''}"[:256], color=_EMBED_COLOR)
+    for c in chars:
+        e.add_field(
+            name=str(c.get("name_native") or c.get("name") or "?")[:256],
+            value=f"{c.get('from_media') or ''} · ♥ {c.get('favourites') or 0}"[:1024],
+            inline=True,
+        )
+    if cover := _cover(chars[0]):
+        e.set_thumbnail(url=cover)
+    return [e]
+
+
+def _pilgrimage_embeds(discord, data: dict) -> list:
+    points = (data.get("points") or [])[:8]
+    e = discord.Embed(
+        title=f"⛩️ 圣地巡礼 · {data.get('title') or '?'}"[:256],
+        description=f"{data.get('city') or '多地'} · 共 {data.get('count') or len(points)} 个取景点",
+        color=_EMBED_COLOR,
+        url=str(data.get("map_url") or "") or None,
+    )
+    for pt in points:
+        ep = f"ep{pt['episode']} · " if pt.get("episode") is not None else ""
+        e.add_field(
+            name=str(pt.get("name") or "?")[:256],
+            value=f"[{ep}地图]({pt.get('google_maps_url') or data.get('map_url') or 'https://anitabi.cn'})"[:1024],
+            inline=True,
+        )
+    return [e]
+
+
+def _taste_embeds(discord, data: dict) -> list:
+    # friends_pulse 三榜优先;否则 pair 同步率
+    pulse = data.get("pulse") or {}
+    if pulse.get("watching_hot") or pulse.get("wishlist_hot"):
+        e = discord.Embed(title=f"好友圈动态 · @{data.get('username') or ''}"[:256], color=_EMBED_COLOR)
+        for key, label in (("watching_hot", "🔥 都在追"), ("wishlist_hot", "🌟 都想看"), ("top_rated", "🏆 圈内高分")):
+            rows = (pulse.get(key) or [])[:5]
+            if not rows:
+                continue
+            lines = [
+                f"[{r.get('name') or '?'}](https://bgm.tv/subject/{r.get('subject_id')}) · {r.get('count')} 人"
+                + (f" · 均分 {r.get('avg_rate')}" if r.get("avg_rate") else "")
+                for r in rows
+            ]
+            e.add_field(name=label, value="\n".join(lines)[:1024], inline=False)
+        return [e]
+    aff = data.get("affinity") or {}
+    if not aff and data.get("sync_score") is None:
+        return []
+    sync = data.get("sync_score") or aff.get("sync_score")
+    level = data.get("sync_level") or aff.get("level")
+    e = discord.Embed(
+        title=f"口味同步率 · {data.get('username') or ''} × {data.get('peer_username') or ''}"[:256],
+        description=(f"**{sync}** 分" + (f" · Lv{level}" if level else "")) if sync is not None else "",
+        color=_EMBED_COLOR,
+    )
+    return [e]
+
+
+def _sections_embeds(discord, data: dict) -> list:
+    """驾驶舱/档案/IP图谱/报告 这类分区型交付物 → 摘要卡(细节看网页)。"""
+    sections = (data.get("sections") or [])[:6]
+    if not sections:
+        return []
+    title = str(data.get("title") or data.get("subject", {}).get("name") or "报告")
+    e = discord.Embed(title=title[:256], color=_EMBED_COLOR)
+    for s in sections:
+        rows = (s.get("items") or [])[:4]
+        lines = []
+        for r in rows:
+            nm = r.get("name") or r.get("title") or r.get("subject_name") or "?"
+            note = r.get("summary") or r.get("reason") or r.get("note") or ""
+            lines.append(f"**{nm}**" + (f" — {str(note)[:60]}" if note else ""))
+        e.add_field(name=str(s.get("title") or "·")[:256], value=("\n".join(lines) or "-")[:1024], inline=False)
+    return [e]
+
+
 def build_embeds(discord, name: str, data: dict | None) -> list:
     """按工具名把结构化结果做成 Discord embed;不认识/出错→[](走纯文本兜底)。"""
     if not data:
@@ -232,6 +383,17 @@ def build_embeds(discord, name: str, data: dict | None) -> list:
             "get_rating_movers": _movers_embeds,
             "get_subject_trend": _trend_embeds,
             "scan_my_episode_buzz": _buzz_embeds,
+            "generate_acgn_quiz": _quiz_embeds,
+            "get_broadcast_calendar": _calendar_embeds,
+            "get_my_episode_progress": _ep_progress_embeds,
+            "compare_subjects": _compare_embeds,
+            "get_character_birthdays": _birthday_embeds,
+            "get_pilgrimage_map": _pilgrimage_embeds,
+            "compare_user_taste": _taste_embeds,
+            "watch_cockpit": _sections_embeds,
+            "subject_dossier": _sections_embeds,
+            "franchise_map": _sections_embeds,
+            "monthly_watch_report": _sections_embeds,
         }.get(name, lambda *_: [])(discord, data)
     except Exception:  # noqa: BLE001 - 卡片失败绝不能拖垮回复
         return []
@@ -295,14 +457,17 @@ def run() -> None:
         channel_id: int,
         guild_id: int | None,
         question: str,
-    ) -> tuple[str, list]:
-        """返回 (清洗后的文本回答, embed 卡片列表)。"""
+        attachments: list[dict] | None = None,
+        progress_cb=None,
+    ) -> tuple[str, list, list[dict]]:
+        """返回 (清洗后的文本回答, embed 卡片列表, 待确认写回动作列表)。"""
         runner, username, owned_client = await _runner_for(discord_user_id)
         session_id, owner = _conversation(discord_user_id, channel_id, guild_id)
         lock = _locks.setdefault(session_id, asyncio.Lock())
         result = ""
         observations: list[tuple[str, dict]] = []
         tools_called: list[str] = []
+        pending_actions: list[dict] = []
         state = AgentState()
         turn_id = ""
         begin_usage_ledger()
@@ -310,6 +475,8 @@ def run() -> None:
             async with lock:
                 session_store.ensure_session(session_id, owner, title="Discord 对话")
                 state = session_store.load_state(session_id, owner) or AgentState()
+                if attachments:  # 与 Web /chat 同构:识图工具从 short_term 读 upload:// 附件
+                    state.short_term["attachments"] = attachments[:4]
                 turn_id = hashlib.sha256(
                     f"{session_id}:{question}:{len(state.messages)}".encode()
                 ).hexdigest()[:32]
@@ -328,10 +495,23 @@ def run() -> None:
                         ):
                             if isinstance(ev, FinalEvent):
                                 result = ev.answer
+                            elif isinstance(ev, ProgressEvent) and progress_cb:
+                                try:
+                                    await progress_cb(ev.summary)
+                                except Exception:  # noqa: BLE001 - 进度提示失败不影响回答
+                                    pass
                             elif isinstance(ev, ObservationEvent):
                                 tools_called.append(ev.name)
                                 if ev.data:
                                     observations.append((ev.name, ev.data))
+                                    if ev.name == "prepare_bangumi_write_action" and ev.ok:
+                                        action = (ev.data or {}).get("action") or {}
+                                        if action.get("id") and username:
+                                            pending_actions.append({
+                                                "id": str(action["id"]),
+                                                "summary": str(action.get("summary") or "写回动作"),
+                                                "username": username,
+                                            })
                             elif isinstance(ev, ErrorEvent):
                                 result = result or f"⚠️ 出错了:{ev.message[:200]}"
                 finally:
@@ -340,7 +520,7 @@ def run() -> None:
                     session_store.save_state(session_id, owner, state)
         except Exception as e:  # noqa: BLE001
             log.exception("discord answer failed")
-            return f"抱歉,处理时出错了({type(e).__name__}),换个问法再试试?", []
+            return f"抱歉,处理时出错了({type(e).__name__}),换个问法再试试?", [], []
         finally:
             usage = collected_usage() or estimate_tokens(question, result)
             trajectory.log_turn(
@@ -361,7 +541,50 @@ def run() -> None:
             embeds.extend(build_embeds(discord, nm, dat))
             if len(embeds) >= 10:  # Discord 单条消息最多 10 个 embed
                 break
-        return _clean(result) or "(这次没能整理出回答,换个问法试试?)", embeds[:10]
+        return _clean(result) or "(这次没能整理出回答,换个问法试试?)", embeds[:10], pending_actions
+
+    async def _execute_write(username: str, action_id: str, kind: str) -> str:
+        """按钮回调:确认/取消写回。按 username 取 token 建 registry,tenant_scope 内执行。"""
+        tok = await refreshed_token_for_username(auth, username)
+        if not tok or tok.status != "active":
+            return "⚠️ Bangumi 授权已失效,请 `/解绑` 后重新 `/绑定`。"
+        client_ = BangumiClient(token=tok.access_token, user_agent=settings.bangumi_user_agent)
+        try:
+            registry = build_registry(client_, moegirl, ltm)
+            tool = "execute_bangumi_write_action" if kind == "confirm" else "cancel_bangumi_write_action"
+            payload = {"action_id": action_id, "confirmed": True} if kind == "confirm" else {"action_id": action_id}
+            with tenant_scope(username, authenticated=True):
+                result = await registry.dispatch(tool, json.dumps(payload, ensure_ascii=False), allow_write=True)
+            if result.ok:
+                return "✅ 已写回 Bangumi(可说'撤销'回滚)。" if kind == "confirm" else "已取消,未写入。"
+            return f"⚠️ 执行失败:{(result.error or '未知错误')[:180]}"
+        except Exception as e:  # noqa: BLE001
+            log.exception("discord write action failed")
+            return f"⚠️ 执行出错:{type(e).__name__}"
+        finally:
+            await client_.aclose()
+
+    async def _fetch_discord_images(message) -> list[dict]:
+        """下载 Discord 图片附件 → UploadStore(与 Web 上传同构,识图工具零改动)。"""
+        out: list[dict] = []
+        for att in (message.attachments or [])[:4]:
+            ctype = str(att.content_type or "")
+            if not ctype.startswith("image/") or att.size > settings.upload_max_image_bytes:
+                continue
+            try:
+                data = await att.read()
+                import base64 as _b64
+                data_url = f"data:{ctype.split(';')[0]};base64,{_b64.b64encode(data).decode('ascii')}"
+                saved = upload_store.save_data_url(data_url, filename=att.filename or "")
+                out.append({
+                    "uri": saved.uri,
+                    "filename": saved.filename,
+                    "mime_type": saved.mime_type,
+                    "size": saved.size,
+                })
+            except Exception:  # noqa: BLE001 - 单张失败跳过
+                log.exception("discord attachment save failed")
+        return out
 
     intents = discord.Intents.default()
     intents.message_content = True
@@ -389,6 +612,39 @@ def run() -> None:
         log.info("Otomo Discord bot 上线:%s", client.user)
         print(f"Otomo Discord bot 已上线:{client.user}")
 
+    class WriteConfirmView(discord.ui.View):
+        """写回确认按钮(比口头确认更 Discord 原生)。只有发起者能点,3 分钟超时。"""
+
+        def __init__(self, requester_id: int, username: str, action_id: str) -> None:
+            super().__init__(timeout=180)
+            self.requester_id = requester_id
+            self.username = username
+            self.action_id = action_id
+
+        async def interaction_check(self, interaction: "discord.Interaction") -> bool:
+            if interaction.user.id != self.requester_id:
+                await interaction.response.send_message("这个确认按钮只有提问的人能点哦。", ephemeral=True)
+                return False
+            return True
+
+        async def _finish(self, interaction: "discord.Interaction", note: str) -> None:
+            for child in self.children:
+                child.disabled = True
+            await interaction.response.edit_message(
+                content=(interaction.message.content or "") + f"\n{note}", view=self,
+            )
+            self.stop()
+
+        @discord.ui.button(label="✅ 确认写回", style=discord.ButtonStyle.success)
+        async def confirm(self, interaction: "discord.Interaction", _button) -> None:
+            note = await _execute_write(self.username, self.action_id, "confirm")
+            await self._finish(interaction, note)
+
+        @discord.ui.button(label="✖ 取消", style=discord.ButtonStyle.secondary)
+        async def cancel(self, interaction: "discord.Interaction", _button) -> None:
+            note = await _execute_write(self.username, self.action_id, "cancel")
+            await self._finish(interaction, note)
+
     @client.event
     async def on_message(message: "discord.Message") -> None:
         if message.author.bot:
@@ -400,19 +656,41 @@ def run() -> None:
         content = message.content
         if mentioned:
             content = re.sub(rf"<@!?{client.user.id}>", "", content).strip()
-        if not content:
+        attachments = await _fetch_discord_images(message)
+        if not content and not attachments:
             await message.channel.send(
-                "在的~ 直接问我番剧推荐 / 评价 / 在哪看 / 梗出处都行,或用 `/绑定` 关联你的 Bangumi 账号。",
+                "在的~ 直接问我番剧推荐 / 评价 / 在哪看 / 梗出处都行,发图能识番,或用 `/绑定` 关联你的 Bangumi 账号。",
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             return
+        if attachments and not content:
+            content = "这张图出自哪部作品?帮我识别一下。"
+
+        # 进度状态消息:发一条"思考中"随 ProgressEvent 节流编辑(网页"看它思考"的 Discord 版)
+        status_msg = await message.channel.send("🤔 正在思考…")
+        last_edit = 0.0
+
+        async def progress_cb(summary: str) -> None:
+            nonlocal last_edit
+            now = asyncio.get_running_loop().time()
+            if now - last_edit < 2.5:  # 节流:Discord 编辑有速率限制
+                return
+            last_edit = now
+            await status_msg.edit(content=f"🤔 {str(summary)[:150]}")
+
         async with message.channel.typing():
-            reply, embeds = await _answer(
+            reply, embeds, pending = await _answer(
                 message.author.id,
                 message.channel.id,
                 message.guild.id if message.guild else None,
                 content,
+                attachments=attachments,
+                progress_cb=progress_cb,
             )
+        try:
+            await status_msg.delete()
+        except Exception:  # noqa: BLE001
+            pass
         parts = _split(reply)
         for i, chunk in enumerate(parts):
             # embed 附在最后一段文本上(Discord 单条消息可带 content + 最多10个embed)
@@ -422,10 +700,16 @@ def run() -> None:
                 await message.channel.send(chunk, allowed_mentions=discord.AllowedMentions.none())
         if embeds and not parts:
             await message.channel.send(embeds=embeds, allowed_mentions=discord.AllowedMentions.none())
+        for act in pending[:3]:  # 写回确认按钮(每个待确认动作一条)
+            await message.channel.send(
+                f"📝 待确认:{act['summary']}",
+                view=WriteConfirmView(message.author.id, act["username"], act["id"]),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
 
     async def _slash_answer(interaction: "discord.Interaction", question: str) -> None:
         await interaction.response.defer(thinking=True)
-        reply, embeds = await _answer(
+        reply, embeds, pending = await _answer(
             interaction.user.id,
             int(interaction.channel_id or interaction.user.id),
             interaction.guild_id,
@@ -437,6 +721,24 @@ def run() -> None:
                 await interaction.followup.send(chunk, embeds=embeds, allowed_mentions=discord.AllowedMentions.none())
             else:
                 await interaction.followup.send(chunk, allowed_mentions=discord.AllowedMentions.none())
+        for act in pending[:3]:
+            await interaction.followup.send(
+                f"📝 待确认:{act['summary']}",
+                view=WriteConfirmView(interaction.user.id, act["username"], act["id"]),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+
+    @tree.command(name="新对话", description="清空当前频道的对话上下文,重新开始")
+    async def new_chat(interaction: "discord.Interaction") -> None:
+        session_id, owner = _conversation(
+            interaction.user.id, int(interaction.channel_id or interaction.user.id), interaction.guild_id
+        )
+        try:
+            session_store.delete_session(session_id, owner)
+        except Exception:  # noqa: BLE001
+            pass
+        _locks.pop(session_id, None)
+        await interaction.response.send_message("✨ 已开新对话,之前的上下文清空了。", ephemeral=True)
 
     @tree.command(name="推荐", description="按你的口味推荐番剧(绑定后更懂你)")
     @app_commands.describe(关键词="想要的题材/心情,如 治愈 / 今晚看完 / 类似孤独摇滚")
@@ -475,14 +777,16 @@ def run() -> None:
         "**Otomo · 番组搭子** —— ACGN 知识图谱 agent 🎴\n\n"
         "**怎么用:**\n"
         "• 在频道里 **@我** 提问,或**私信我**(私信不用 @)\n"
-        "• 斜杠命令:`/推荐` `/评价` `/在哪看`\n\n"
+        "• **发图给我**能识番(截图/CG/封面都行)\n"
+        "• 斜杠命令:`/推荐` `/评价` `/在哪看` `/新对话`\n\n"
         "**能问什么(举例):**\n"
         "• 推荐:`推荐几部治愈番` / `类似孤独摇滚的` / `今晚能看完的短番`\n"
-        "• 评价:`药屋少女的呢喃口碑怎么样` / `会不会烂尾`\n"
-        "• 追番:`这季什么番最火` / `药屋在哪能看`\n"
-        "• 考据:`白色相簿2 冬马的声优还配过谁` / `这是什么梗`\n\n"
-        "**个人化:** `/绑定` 关联你的 Bangumi 账号后,推荐会用你自己的收藏画像,还能查你的追番进度。\n"
-        "`/我是谁` 看绑定状态,`/解绑` 解除关联。"
+        "• 评价:`药屋少女的呢喃口碑怎么样` / `最近什么番崩了`\n"
+        "• 追番:`这季什么番最火` / `药屋在哪能看` / `我看完孤独摇滚第8集了`(带确认按钮写回)\n"
+        "• 考据:`白色相簿2 冬马的声优还配过谁` / `这是什么梗`\n"
+        "• 玩:`抽个今日番签` / `考考我`(答案点开剧透条揭晓)\n\n"
+        "**个人化:** `/绑定` 关联你的 Bangumi 账号后,推荐用你自己的收藏画像,进度打卡/写回也解锁。\n"
+        "`/我是谁` 看绑定状态,`/解绑` 解除,`/新对话` 清空上下文。"
     )
 
     @tree.command(name="帮助", description="Otomo 用法说明")
