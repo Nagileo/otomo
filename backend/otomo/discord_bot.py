@@ -158,7 +158,6 @@ def _season_embeds(discord, data: dict) -> list:
 
 
 def _movers_embeds(discord, data: dict) -> list:
-    out = []
     boards = [("📉 口碑下跌(崩)", data.get("down")), ("📈 口碑上涨", data.get("up")), ("🏁 近期完结", data.get("done"))]
     lines_all = []
     for label, board in boards:
