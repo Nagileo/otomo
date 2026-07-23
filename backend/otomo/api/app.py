@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 import json
+import logging
 import uuid
 from typing import Any, AsyncIterator, Literal
 from urllib.parse import urlencode
@@ -18,12 +19,14 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from ..agent.adaptive import AdaptiveRunner
+from ..agent.compaction import compact_agent_state, restore_state
 from ..agent.contracts import AgentState
 from ..auth import AuthStore, BangumiToken, build_authorization_url, exchange_oauth_code, token_for_session
 from ..config import settings
 from ..memory import LongTermMemory
 from ..memory.consolidate import now_iso
 from ..memory.models import VisualFeedbackItem, VisualFeedbackSignal, memory_summary
+from ..memory.runtime import attach_memory_state
 from ..notifications import validate_webhook_url
 from ..obs import append_visual_feedback, traced_stream
 from ..factory import build_registry
@@ -50,6 +53,8 @@ from ..agent.plan_execute import PlanExecuteRunner
 from ..agent.react import ReActRunner
 from ..tools.bangumi.client import SUBJECT_TYPE, BangumiClient
 from ..tools.moegirl.client import MoegirlClient
+
+log = logging.getLogger("otomo.api")
 
 
 @asynccontextmanager
@@ -921,24 +926,6 @@ async def visual_feedback_search_subjects(
         await client.aclose()
 
 
-async def _attach_memory_state(app: FastAPI, state: AgentState | None, client: BangumiClient) -> None:
-    if state is None:
-        return
-    try:
-        me = await client.get_me()
-    except Exception:  # noqa: BLE001
-        return
-    username = me.get("username") or str(me.get("id"))
-    if not username:
-        return
-    mem = app.state.ltm.load_user(username)
-    state.short_term["memory"] = memory_summary(mem).model_dump(mode="json", exclude_none=True)
-    if mem.spoiler_default and "spoiler" not in state.short_term:
-        # Long-term spoiler preference is a hint, not permission to reveal spoilers.
-        # A turn enters mild/full only through explicit natural language or req.spoiler_mode.
-        state.short_term["spoiler"] = {"mode": "none", "memory_default": mem.spoiler_default}
-
-
 @app.post("/chat")
 async def chat(req: ChatRequest, request: Request):
     session = app.state.auth.get_or_create_session(_auth_session_id(request) or None)
@@ -994,12 +981,15 @@ async def chat(req: ChatRequest, request: Request):
         sources: list[dict[str, Any]] = []
         tools_called: list[str] = []
         state: AgentState | None = None
+        baseline: AgentState | None = None
+        cancelled = False
         try:
             async with lock:
                 # The complete read-modify-stream-save transaction is under
                 # one per-conversation lock. Loading state before acquiring it
                 # loses turns when two browser requests overlap.
                 state = _session_state(app, chat_session_id, session_owner)
+                baseline = state.model_copy(deep=True)
                 if req.spoiler_mode or req.progress_episode is not None:
                     current = dict(state.short_term.get("spoiler") or {})
                     if req.spoiler_mode:
@@ -1026,7 +1016,12 @@ async def chat(req: ChatRequest, request: Request):
                     if cleaned:
                         state.short_term["attachments"] = cleaned
                 with tenant_scope(identity.username, authenticated=authenticated):
-                    await _attach_memory_state(app, state, client)
+                    await attach_memory_state(
+                        state,
+                        client,
+                        app.state.ltm,
+                        username=identity.username if authenticated else None,
+                    )
                 app.state.session_store.append_message(
                     chat_session_id,
                     session_owner,
@@ -1048,6 +1043,19 @@ async def chat(req: ChatRequest, request: Request):
                                 final_answer = ev.answer
                                 sources = [s.model_dump(mode="json", exclude_none=True) for s in ev.sources]
                             yield {"event": ev.type, "data": ev.model_dump_json()}
+                except asyncio.CancelledError:
+                    cancelled = True
+                    if baseline is not None and not final_answer:
+                        restore_state(state, baseline)
+                        final_answer = "本轮生成已由用户停止。"
+                        state.messages.extend(
+                            [
+                                {"role": "user", "content": req.message},
+                                {"role": "assistant", "content": final_answer},
+                            ]
+                        )
+                        state.status = "done"
+                    raise
                 finally:
                     if turn_has_attachments:
                         state.short_term.pop("attachments", None)
@@ -1060,6 +1068,15 @@ async def chat(req: ChatRequest, request: Request):
                             evidence=evidence,
                             sources=sources,
                         )
+                    if final_answer and not cancelled:
+                        try:
+                            await compact_agent_state(
+                                state,
+                                getattr(runner, "llm", None),
+                                getattr(runner, "model", None),
+                            )
+                        except Exception:  # noqa: BLE001 - compaction must not lose a completed turn
+                            log.exception("conversation compaction failed")
                     tokens = 0
                     try:
                         tokens = collected_usage() or estimate_tokens(req.message, final_answer)

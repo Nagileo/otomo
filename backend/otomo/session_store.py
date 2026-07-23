@@ -148,6 +148,14 @@ class SessionStore:
         with self._connect() as conn:
             conn.execute("DELETE FROM sessions WHERE id=? AND auth_session_id=?", (session_id, auth_session_id))
 
+    def delete_owner_sessions(self, auth_session_id: str) -> int:
+        """Delete every short-term conversation owned by one surface identity."""
+        if not auth_session_id:
+            return 0
+        with self._connect() as conn:
+            cur = conn.execute("DELETE FROM sessions WHERE auth_session_id=?", (auth_session_id,))
+        return int(cur.rowcount or 0)
+
     def save_state(self, session_id: str, auth_session_id: str, state: AgentState | None) -> None:
         if state is None:
             return

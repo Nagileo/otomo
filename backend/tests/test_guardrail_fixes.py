@@ -1007,6 +1007,31 @@ def test_discord_embed_builders():
     assert len(es) == 1 and es[0].kw["title"] == "孤独摇滚！"
     assert es[0].thumb == "https://x/c.jpg"
     assert any(f[0] == "Bangumi" for f in es[0].fields)
+    calendar = build_embeds(
+        FD,
+        "get_broadcast_calendar",
+        {
+            "today": "2026-07-23",
+            "days": [
+                {
+                    "date": "2026-07-23",
+                    "items": [{"subject_id": 2, "title": "测试新番", "mine": True}],
+                }
+            ],
+        },
+    )
+    assert len(calendar) == 1 and "测试新番" in calendar[0].description
+    memory = build_embeds(
+        FD,
+        "get_user_memory",
+        {
+            "username": "tester",
+            "likes": [{"value": "治愈"}],
+            "dislikes": ["强行反转"],
+            "spoiler_default": "none",
+        },
+    )
+    assert len(memory) == 1 and any(field[0] == "喜欢" for field in memory[0].fields)
     # 未知工具 / 空 data → 走文本
     assert build_embeds(FD, "unknown_tool", {"x": 1}) == []
     assert build_embeds(FD, "recommend_subjects", None) == []

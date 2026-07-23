@@ -62,6 +62,7 @@ class AdaptiveRunner(AgentRunner):
         if not state.messages:
             state.messages.append({"role": "system", "content": SYSTEM_PROMPT})
         C.update_spoiler_state_from_input(state, user_input)
+        C.begin_presentation_turn(state)
         C.inject_runtime_state(state.messages, state)
         state.messages.append({"role": "user", "content": user_input})
 
@@ -135,7 +136,7 @@ class AdaptiveRunner(AgentRunner):
                     )
 
             # ---- 流式最终答案 ---- #
-            compose = C.trim_messages(state.messages) + [{"role": "system", "content": compose_prompt}]
+            compose = C.compose_messages(state.messages, state, compose_prompt)
             parts: list[str] = []
             leaked: list[bool] = []
             async for ev in C.stream_answer(self.llm, self.model, compose, None, leaked):
@@ -146,7 +147,7 @@ class AdaptiveRunner(AgentRunner):
             if C.should_fallback_answer(answer, leaked):
                 answer = await C.compose_fallback(self.llm, self.model, compose) or \
                     "抱歉，这次没能整理出回答，请再问一次或换个问法。"
-            answer = C.append_missing_anchors(answer, state.messages)
+            answer = C.append_missing_anchors(answer, state)
             state.messages.append({"role": "assistant", "content": answer})
             state.status = "done"
             yield FinalEvent(answer=answer, sources=sources, steps=steps)

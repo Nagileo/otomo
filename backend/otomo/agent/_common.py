@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import json
+import re
 from typing import Any, AsyncIterator
 
 from openai import AsyncOpenAI
@@ -34,6 +35,7 @@ CORRECT_FC = (
     "若信息已足够，请直接给出最终自然语言答案。"
 )
 _RUNTIME_STATE_MARKER = "[[OTOMO_RUNTIME_STATE]]"
+_PRESENTATION_STATE_KEY = "presentation"
 _TOOL_PROGRESS_QUEUE: contextvars.ContextVar[asyncio.Queue[ProgressEvent] | None] = contextvars.ContextVar(
     "otomo_tool_progress_queue",
     default=None,
@@ -331,6 +333,91 @@ def runtime_state_events(state: Any | None) -> list[StateEvent]:
     if memory:
         events.append(StateEvent(scope="memory", snapshot=memory))
     return events
+
+
+def begin_presentation_turn(state: Any | None) -> None:
+    """Reset the canonical UI contract before one user turn starts."""
+    if state is None:
+        return
+    st = getattr(state, "short_term", None)
+    if st is not None:
+        st[_PRESENTATION_STATE_KEY] = {"panels": []}
+
+
+def record_presentation_panel(state: Any | None, name: str, data: dict[str, Any] | None) -> None:
+    """Record exactly the payload emitted to clients as an ObservationEvent."""
+    if state is None or not data:
+        return
+    st = getattr(state, "short_term", None)
+    if st is None:
+        return
+    presentation = st.setdefault(_PRESENTATION_STATE_KEY, {"panels": []})
+    panels = presentation.setdefault("panels", [])
+    panels.append({"name": name, "data": data})
+
+
+def presentation_panels(state: Any | None) -> list[dict[str, Any]]:
+    if state is None:
+        return []
+    st = getattr(state, "short_term", {}) or {}
+    presentation = st.get(_PRESENTATION_STATE_KEY) or {}
+    return [x for x in (presentation.get("panels") or []) if isinstance(x, dict) and x.get("name")]
+
+
+_PRESENTATION_VERBOSE_FIELDS = {
+    "aspect_opinions",
+    "caveats",
+    "comments",
+    "evidence",
+    "guide_comment_digests",
+    "hotness_evidence",
+    "notes",
+    "samples",
+    "source_routing_notes",
+    "suggested_summary_points",
+}
+
+
+def presentation_contract_prompt(state: Any | None, limit: int = 48000) -> str:
+    """Serialize the same panel payload consumed by Web/Discord for compose."""
+    panels = presentation_panels(state)
+    if not panels:
+        return ""
+    payload = json.dumps(panels, ensure_ascii=False, separators=(",", ":"))
+    if len(payload) > limit:
+        # Keep JSON valid. Remove verbose discourse fields before ever dropping
+        # canonical card values such as ids, titles, dates, ratings, staff, and
+        # links. The compact form remains the same payload schema.
+        compact = []
+        for panel in panels:
+            data = panel.get("data") or {}
+            compact.append(
+                {
+                    "name": panel.get("name"),
+                    "data": {
+                        key: value
+                        for key, value in data.items()
+                        if key not in _PRESENTATION_VERBOSE_FIELDS
+                    },
+                }
+            )
+        payload = json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
+    return (
+        "本轮展示契约（正文与卡片的唯一共享事实层）：\n"
+        f"{payload}\n"
+        "规则：凡契约中已有的标题、评分、日期、staff、OP/ED、集数、链接、排序和推荐理由，"
+        "正文必须使用完全相同的值；早先工具原始 observation 与契约冲突时，以契约为准。"
+        "正文负责结论和取舍，不再另造一套结构化数据。聚合面板与专门面板同时存在时，"
+        "专门面板字段优先，聚合面板只作导航。"
+    )
+
+
+def compose_messages(messages: list[dict], state: Any | None, prompt: str) -> list[dict]:
+    out = trim_messages(messages)
+    if contract := presentation_contract_prompt(state):
+        out.append({"role": "system", "content": contract})
+    out.append({"role": "system", "content": prompt})
+    return out
 
 
 def has_leak(text: str | None) -> bool:
@@ -1370,26 +1457,132 @@ def extract_entities(result: ToolResult) -> list[EntityRef]:
     return out
 
 
-def trim_messages(messages: list[dict], max_messages: int = 40) -> list[dict]:
-    """滑动窗口：超过阈值时丢弃最旧的轮次，但保留所有 system + 第一条 user，
-    且避免让窗口以孤立的 tool 消息开头（否则 OpenAI/DeepSeek 会报错）。"""
-    if len(messages) <= max_messages:
+def _turn_atoms(turn: list[dict]) -> list[list[dict]]:
+    """Split one user turn into indivisible, API-valid message groups."""
+    if not turn:
+        return []
+    atoms: list[list[dict]] = [[turn[0]]]
+    index = 1
+    while index < len(turn):
+        message = turn[index]
+        tool_calls = message.get("tool_calls") or []
+        if message.get("role") == "assistant" and tool_calls:
+            expected = {
+                str(call.get("id") or "")
+                for call in tool_calls
+                if isinstance(call, dict) and call.get("id")
+            }
+            group = [message]
+            found: set[str] = set()
+            cursor = index + 1
+            while cursor < len(turn) and turn[cursor].get("role") == "tool":
+                tool_message = turn[cursor]
+                group.append(tool_message)
+                tool_call_id = str(tool_message.get("tool_call_id") or "")
+                if tool_call_id:
+                    found.add(tool_call_id)
+                cursor += 1
+            # OpenAI-compatible APIs require one tool result for every call.
+            # An in-flight or already-corrupt group is safer to omit entirely.
+            if expected and expected.issubset(found):
+                atoms.append(group)
+            index = cursor
+            continue
+        if message.get("role") != "tool":
+            atoms.append([message])
+        index += 1
+    return atoms
+
+
+def _message_chars(message: dict) -> int:
+    return len(str(message.get("content") or "")) + len(
+        json.dumps(message.get("tool_calls") or [], ensure_ascii=False)
+    )
+
+
+def _messages_chars(messages: list[dict]) -> int:
+    return sum(_message_chars(message) for message in messages)
+
+
+def _trim_oversized_turn(turn: list[dict], budget: int, char_budget: int) -> list[dict]:
+    """Keep the user prompt plus the newest complete message groups."""
+    if not turn or budget <= 0:
+        return []
+    atoms = _turn_atoms(turn)
+    if not atoms:
+        return []
+    user_atom = atoms[0]
+    if budget <= len(user_atom):
+        return user_atom[:budget]
+
+    available = budget - len(user_atom)
+    available_chars = max(0, char_budget - _messages_chars(user_atom))
+    kept: list[list[dict]] = []
+    used = 0
+    used_chars = 0
+    for atom in reversed(atoms[1:]):
+        atom_chars = _messages_chars(atom)
+        if used + len(atom) > available or used_chars + atom_chars > available_chars:
+            continue
+        kept.append(atom)
+        used += len(atom)
+        used_chars += atom_chars
+    kept.reverse()
+    return [*user_atom, *(message for atom in kept for message in atom)]
+
+
+def trim_messages(
+    messages: list[dict],
+    max_messages: int = 40,
+    max_chars: int = 90000,
+) -> list[dict]:
+    """Keep recent complete user turns and complete assistant/tool transactions."""
+    if len(messages) <= max_messages and _messages_chars(messages) <= max_chars:
         return messages
     head: list[dict] = []
-    body: list[dict] = []
+    turns: list[list[dict]] = []
+    current: list[dict] = []
     seen_user = False
     for m in messages:
-        if m.get("role") == "system" or (m.get("role") == "user" and not seen_user):
+        content = str(m.get("content") or "")
+        managed = m.get("role") == "system" and (
+            content.startswith(_RUNTIME_STATE_MARKER)
+            or content.startswith("[[OTOMO_CONVERSATION_SUMMARY]]")
+        )
+        if managed:
             head.append(m)
-            if m.get("role") == "user":
-                seen_user = True
+            continue
+        if m.get("role") == "user":
+            if current:
+                turns.append(current)
+            current = [m]
+            seen_user = True
+        elif not seen_user:
+            head.append(m)
         else:
-            body.append(m)
-    keep = max(max_messages - len(head), 0)
-    tail = body[-keep:] if keep else []
-    while tail and tail[0].get("role") == "tool":  # 别用孤立 tool 消息开头
-        tail = tail[1:]
-    return head + tail
+            current.append(m)
+    if current:
+        turns.append(current)
+
+    budget = max(max_messages - len(head), 1)
+    char_budget = max(max_chars - _messages_chars(head), 1000)
+    kept: list[list[dict]] = []
+    used = 0
+    used_chars = 0
+    for turn in reversed(turns):
+        turn_chars = _messages_chars(turn)
+        if kept and (used + len(turn) > budget or used_chars + turn_chars > char_budget):
+            break
+        if not kept and (len(turn) > budget or turn_chars > char_budget):
+            kept.append(_trim_oversized_turn(turn, budget, char_budget))
+            used = len(kept[0])
+            used_chars = _messages_chars(kept[0])
+            break
+        kept.append(turn)
+        used += len(turn)
+        used_chars += turn_chars
+    kept.reverse()
+    return [*head, *(m for turn in kept for m in turn)]
 
 
 def assistant_toolcalls_msg(msg: Any) -> dict:
@@ -1480,16 +1673,26 @@ async def step_tools(
             result = await task
             while not progress_queue.empty():
                 yield progress_queue.get_nowait()
+        except asyncio.CancelledError:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            raise
         finally:
             _TOOL_PROGRESS_QUEUE.reset(token)
         for c in result.sources:
             if c.url not in seen_urls:
                 seen_urls.add(c.url)
                 sources.append(c)
+        ui_data = panel_data(tc.function.name, result)
+        record_presentation_panel(state, tc.function.name, ui_data)
         yield ObservationEvent(
             name=tc.function.name, ok=result.ok, summary=summarize(result),
             sources=result.sources, entities=extract_entities(result),
-            data=panel_data(tc.function.name, result),
+            data=ui_data,
         )
         yield ProgressEvent(
             stage="tool_done" if result.ok else "tool_error",
@@ -1577,30 +1780,77 @@ async def stream_answer(
 
 # 交付物面板（与前端 AUTO_EXPAND 对齐）+ 推荐结果：正文缺锚时后端兜底补注，
 # 不再依赖模型自觉插 [[panel:x]]——用户报过"年度报告卡片没显示"（锚忘插→掉成底部灰 chip）。
-_ANCHOR_FALLBACK_TOOLS = (
-    "monthly_watch_report", "watch_cockpit", "subject_dossier", "franchise_map",
-    "build_taste_report", "build_collection_dashboard", "compare_subjects", "plan_pilgrimage_trip",
-    "anime_omikuji", "generate_acgn_quiz", "recommend_subjects",
-)
+_ANCHOR_PANEL_TOOLS = {
+    "route_image_source", "extract_visual_text", "recommend_by_visual_style", "search_image_source",
+    "summarize_bilibili_video_content", "analyze_video_frames", "get_pixiv_ranking",
+    "search_pixiv_illusts", "get_pixiv_artist_portfolio", "get_trending_subjects",
+    "get_character_birthdays", "compare_subjects", "get_pilgrimage_map", "plan_pilgrimage_trip",
+    "list_weekly_digest_inbox", "get_broadcast_calendar", "get_airing_progress", "watch_cockpit",
+    "subject_dossier", "franchise_map", "monthly_watch_report", "get_subject_trend",
+    "get_rating_movers", "anime_omikuji", "generate_acgn_quiz", "get_my_episode_progress",
+    "export_my_collections_csv", "scan_my_episode_buzz", "anime_music_themes", "where_to_watch",
+    "get_anime_release_feeds", "get_bangumi_index", "recommend_subjects", "season_guide_brief",
+    "review_subject", "route_subject_sources", "compare_user_taste", "explore_voice_network",
+    "episode_buzz_radar", "search_anime_themes", "plan_watch_order", "plan_watch_copilot",
+    "build_weekly_digest", "build_collection_dashboard", "build_taste_report",
+    "build_aspect_profile",
+}
 
 
-def append_missing_anchors(answer: str, messages: list[dict]) -> str:
-    """本轮调过交付物工具、但正文没有对应 [[panel:x]] 锚 → 末尾补锚。
-
-    前端对无面板数据的锚静默忽略（工具失败无 payload 时补锚无害），
-    有数据时面板会全宽渲染在正文尾部而非折叠 chip。"""
-    called: list[str] = []
-    for m in messages:
-        if m.get("role") != "assistant":
+def _insert_season_anchors(answer: str, data: dict[str, Any]) -> str:
+    """Place per-title season cards beside prose when a title is mentioned."""
+    paragraphs = re.split(r"(\n\s*\n)", answer)
+    used: set[str] = set()
+    for item in data.get("items") or []:
+        if not isinstance(item, dict):
             continue
-        for tc in m.get("tool_calls") or []:
-            name = (tc.get("function") or {}).get("name")
-            if name and name not in called:
-                called.append(name)
-    missing = [t for t in called if t in _ANCHOR_FALLBACK_TOOLS and f"[[panel:{t}" not in answer]
-    if not missing:
-        return answer
-    return answer.rstrip() + "\n\n" + "\n".join(f"[[panel:{t}]]" for t in missing)
+        sid = str(item.get("subject_id") or item.get("id") or "").strip()
+        title = str(item.get("title") or item.get("name") or "").strip()
+        if not sid or not title or f"[[panel:season_guide_brief:{sid}]]" in answer:
+            continue
+        for idx, paragraph in enumerate(paragraphs):
+            if idx in used or title not in paragraph or "[[panel:" in paragraph:
+                continue
+            paragraphs[idx] = paragraph.rstrip() + f"\n\n[[panel:season_guide_brief:{sid}]]"
+            used.add(idx)
+            break
+    return "".join(paragraphs)
+
+
+def append_missing_anchors(answer: str, context: Any) -> str:
+    """Deterministically anchor only panels produced in the current turn.
+
+    ``list[message]`` remains accepted for older tests/callers, but production
+    runners pass AgentState so historical tool calls cannot leak old cards.
+    """
+    panels: list[dict[str, Any]] = []
+    if hasattr(context, "short_term"):
+        panels = presentation_panels(context)
+    elif isinstance(context, list):
+        called: list[str] = []
+        for message in context:
+            if message.get("role") != "assistant":
+                continue
+            for tool_call in message.get("tool_calls") or []:
+                name = (tool_call.get("function") or {}).get("name")
+                if name and name not in called:
+                    called.append(name)
+        panels = [{"name": name, "data": {}} for name in called]
+
+    out = answer
+    for panel in panels:
+        name = str(panel.get("name") or "")
+        if name == "season_guide_brief":
+            out = _insert_season_anchors(out, panel.get("data") or {})
+    missing: list[str] = []
+    for panel in panels:
+        name = str(panel.get("name") or "")
+        if name not in _ANCHOR_PANEL_TOOLS or f"[[panel:{name}" in out or name in missing:
+            continue
+        missing.append(name)
+    if missing:
+        out = out.rstrip() + "\n\n" + "\n".join(f"[[panel:{name}]]" for name in missing)
+    return out
 
 
 _FORCE_TEXT = (

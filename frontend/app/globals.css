@@ -72,6 +72,10 @@ button {
   padding: 0 16px; font-weight: 600; cursor: pointer;
 }
 button:disabled { opacity: .5; cursor: default; }
+.stop-button {
+  background: transparent; color: var(--red); border: 1px solid rgba(247, 118, 142, .55);
+}
+.stop-button:hover { background: rgba(247, 118, 142, .08); }
 .icon-button {
   width: 42px; min-width: 42px; padding: 0; background: #0c0e13; color: var(--accent);
   border: 1px solid rgba(122, 162, 247, .35);

@@ -121,6 +121,13 @@ class Settings(BaseSettings):
 
     # ---- Agent / HTTP ----
     agent_max_iters: int = 8
+    # Conversation state is compacted by complete user-led turns. Recent tool
+    # call/result pairs stay intact; older visible dialogue becomes one summary.
+    conversation_compaction_threshold: int = 80
+    conversation_compaction_threshold_chars: int = 120000
+    conversation_compaction_keep_turns: int = 8
+    conversation_compaction_input_chars: int = 16000
+    conversation_compaction_summary_chars: int = 5000
     # 渐进式工具披露：核心常驻 + 按查询词法选组 + load_tool_group 逃生舱。
     # 关掉则回到全量 96 工具塞给模型（对拍/排障用）。
     tool_progressive_disclosure_enabled: bool = True

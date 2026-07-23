@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
 
 import pytest
 
@@ -75,7 +74,7 @@ def test_runtime_state_is_updated_from_natural_language():
 
 
 def test_memory_spoiler_default_does_not_auto_escalate_turn():
-    from otomo.api.app import _attach_memory_state
+    from otomo.memory.runtime import attach_memory_state
 
     class FakeClient:
         async def get_me(self):
@@ -86,8 +85,7 @@ def test_memory_spoiler_default_does_not_auto_escalate_turn():
             return UserMemory(username=username, spoiler_default="full")
 
     state = AgentState()
-    app = SimpleNamespace(state=SimpleNamespace(ltm=FakeLtm()))
-    asyncio.run(_attach_memory_state(app, state, FakeClient()))
+    asyncio.run(attach_memory_state(state, FakeClient(), FakeLtm()))
     assert state.short_term["spoiler"]["mode"] == "none"
     assert state.short_term["spoiler"]["memory_default"] == "full"
 

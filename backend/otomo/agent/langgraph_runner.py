@@ -22,6 +22,7 @@ from .contracts import (
     ObservationEvent,
     ToolCallEvent,
 )
+from .prompts import COMPOSE_PROMPT, SYSTEM_PROMPT
 from .registry import ToolRegistry
 
 
@@ -51,6 +52,7 @@ class LangGraphRunner(AgentRunner):
             temperature=0,
         )
         tools = [_to_lc_tool(t, registry) for t in registry._tools.values()]
+        self.llm = llm
         self.agent = create_react_agent(llm, tools)
 
     async def stream(
@@ -66,6 +68,7 @@ class LangGraphRunner(AgentRunner):
         try:
             state = state or AgentState()
             C.update_spoiler_state_from_input(state, user_input)
+            C.begin_presentation_turn(state)
             for ev in C.runtime_state_events(state):
                 yield ev
 
@@ -86,16 +89,35 @@ class LangGraphRunner(AgentRunner):
                     name = getattr(m, "name", "tool")
                     payload = C.safe_json(str(m.content))
                     ok = payload.get("ok", True) if isinstance(payload, dict) else True
+                    ui_data = C.panel_data_from_payload(name, payload) if ok else None
+                    C.record_presentation_panel(state, name, ui_data)
                     yield ObservationEvent(
                         name=name,
                         ok=ok,
                         summary=str(m.content)[:200],
-                        data=C.panel_data_from_payload(name, payload) if ok else None,
+                        data=ui_data,
                     )
                 elif isinstance(m, AIMessage) and not m.tool_calls and m.content:
                     answer = C.strip_leak(m.content if isinstance(m.content, str) else str(m.content))
+            if contract := C.presentation_contract_prompt(state):
+                rewritten = await self.llm.ainvoke(
+                    [
+                        ("system", SYSTEM_PROMPT),
+                        ("system", contract),
+                        ("system", COMPOSE_PROMPT),
+                        (
+                            "user",
+                            f"用户问题：{user_input}\n\nLangGraph 执行草稿：\n{answer}\n\n"
+                            "请基于展示契约重写最终回答，不新增契约外的具体事实。",
+                        ),
+                    ]
+                )
+                answer = C.strip_leak(
+                    rewritten.content if isinstance(rewritten.content, str) else str(rewritten.content)
+                )
             if C.should_fallback_answer(answer):
                 answer = "抱歉，这次没能整理出回答，请再问一次或换个问法。"
+            answer = C.append_missing_anchors(answer, state)
             if answer:
                 yield AnswerDeltaEvent(text=answer)
             yield FinalEvent(answer=answer or "（无回答）", sources=[], steps=steps)

@@ -417,6 +417,8 @@ export default function Home() {
   const sessionId = useRef("");  // 多轮会话 id（首次发送时生成；"新对话"会重置）
   const lastQ = useRef("");      // 最近一次用户问题（剧透 followup chips 重发用）
   const turnIdRef = useRef("");  // 本轮 turn_id（meta 事件下发，👍👎 反馈按它关联轨迹）
+  const abortRef = useRef<AbortController | null>(null);
+  const receivedFinalRef = useRef(false);
 
   // 新问题锚顶：发出消息后把该条用户消息滚到视口顶部，流式回答在其下方展开——
   // 否则长对话里视口停在旧位置，正在生成的内容整个在屏幕外（用户实测痛点）。
@@ -627,7 +629,7 @@ export default function Home() {
     setUploadNotice(null);
   }
 
-  async function uploadPendingImages(): Promise<ImageAttachment[]> {
+  async function uploadPendingImages(signal?: AbortSignal): Promise<ImageAttachment[]> {
     if (!pendingImages.length) return [];
     const uploaded: ImageAttachment[] = [];
     for (const image of pendingImages) {
@@ -637,6 +639,7 @@ export default function Home() {
         credentials: "include",
         headers: csrfHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({ data_url: dataUrl, filename: image.file.name }),
+        signal,
       });
       if (!res.ok) throw new Error(await res.text());
       const payload = await res.json();
@@ -688,10 +691,14 @@ export default function Home() {
     setFollowups([]);
     setAnswer("");
     answerRef.current = "";
+    receivedFinalRef.current = false;
     liveStepsRef.current = [];
     setLiveSteps([]);
     turnStartRef.current = Date.now();
     setBusy(true);
+    const controller = new AbortController();
+    abortRef.current = controller;
+    let userMessageAdded = false;
     if (!sessionId.current) {
       sessionId.current = crypto.randomUUID();  // 客户端 lazy 生成，避免 SSR mismatch
       setActiveSessionId(sessionId.current);
@@ -699,9 +706,10 @@ export default function Home() {
     }
 
     try {
-      const attachments = shouldUseImage ? await uploadPendingImages() : [];
+      const attachments = shouldUseImage ? await uploadPendingImages(controller.signal) : [];
       if (shouldUseImage) clearPendingImages();
       setMessages((m) => [...m, { role: "user", content: q, attachments }]);
+      userMessageAdded = true;
       const res = await fetch(`${BACKEND}/chat`, {
         method: "POST",
         credentials: "include",
@@ -712,6 +720,7 @@ export default function Home() {
           attachments,
           ...(spoilerMode ? { spoiler_mode: spoilerMode } : {}),
         }),
+        signal: controller.signal,
       });
       if (!res.ok) throw new Error(await httpErrorMessage(res));
       if (!res.body) throw new Error("no response body");
@@ -738,9 +747,21 @@ export default function Home() {
         }
       }
     } catch (e) {
+      const aborted = e instanceof DOMException && e.name === "AbortError";
+      if (aborted && !receivedFinalRef.current) {
+        if (!userMessageAdded) {
+          setMessages((m) => [...m, { role: "user", content: q }]);
+        }
+        answerRef.current = "本轮生成已由用户停止。";
+        setAnswer(answerRef.current);
+        evidenceRef.current = {};
+        setEvidence({});
+        setTrace((t) => [...t, { kind: "note", text: "已停止本轮生成" }]);
+      } else if (!aborted) {
       const message = e instanceof Error ? e.message : String(e);
       setTrace((t) => [...t, { kind: "obs", name: "error", ok: false, summary: message }]);
       setUploadNotice({ tone: "bad", text: message });
+      }
     } finally {
       const final = answerRef.current;
       if (final) {
@@ -755,8 +776,13 @@ export default function Home() {
       setLiveSteps([]);
       setAnswer("");
       setBusy(false);
+      if (abortRef.current === controller) abortRef.current = null;
       void loadSessions();
     }
+  }
+
+  function stopGeneration() {
+    abortRef.current?.abort();
   }
 
   async function postAction(kind: "confirm" | "cancel" | "undo", actionId: string) {
@@ -995,6 +1021,7 @@ export default function Home() {
       case "final":
         setSources(ev.sources ?? []);
         if (ev.answer) {
+          receivedFinalRef.current = true;
           answerRef.current = ev.answer; // 以最终完整答案为准，覆盖流式残留（如泄漏被截断的片段）
           setAnswer(ev.answer);
         }
@@ -1350,9 +1377,11 @@ export default function Home() {
               onKeyDown={(e) => e.key === "Enter" && send()}
               disabled={busy}
             />
-            <button onClick={() => send()} disabled={busy}>
-              {busy ? "…" : "发送"}
-            </button>
+            {busy ? (
+              <button className="stop-button" onClick={stopGeneration} title="停止本轮生成">停止</button>
+            ) : (
+              <button onClick={() => send()}>发送</button>
+            )}
           </div>
           {uploadNotice && (
             <div className={`upload-notice ${uploadNotice.tone}`}>{uploadNotice.text}</div>
