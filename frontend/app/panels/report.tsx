@@ -281,7 +281,7 @@ export function YearSparkline({ items }: { items: AnyRecord[] }) {
 export function CollectionDashboardPanel({ data }: { data: AnyRecord }) {
   const totals = data.totals || {};
   const media = list(data.media);
-  const weekly = data.weekly_subscription || {};
+  const subscriptions = data.subscriptions || {};
   const enrichment = data.enrichment || {};
   const [selectedType, setSelectedType] = useState("all");
   const visibleMedia = selectedType === "all" ? media : media.filter((m) => m.subject_type === selectedType);
@@ -358,11 +358,17 @@ export function CollectionDashboardPanel({ data }: { data: AnyRecord }) {
           <DistributionBadges data={data.plan_summary || {}} />
         </div>
         <div className="rating-card">
-          <div className="rating-source">主动周报</div>
+          <div className="rating-source">主动订阅</div>
           <div className="evidence-row tight">
-            <Badge tone={weekly.enabled ? "good" : "dim"}>{weekly.enabled ? "已开启" : "未开启"}</Badge>
-            <Badge tone="dim">weekday {weekly.weekday ?? "-"}</Badge>
-            <Badge tone="dim">hour {weekly.hour ?? "-"}</Badge>
+            <Badge tone={subscriptions.enabled_count ? "good" : "dim"}>
+              已启用 {subscriptions.enabled_count ?? 0}
+            </Badge>
+            <Badge tone="dim">共 {subscriptions.total_count ?? 0} 条规则</Badge>
+            {list(subscriptions.rules).slice(0, 3).map((rule) => (
+              <Badge key={text(rule.id)} tone={rule.enabled ? "good" : "dim"}>
+                {text(rule.title || rule.kind)}
+              </Badge>
+            ))}
           </div>
         </div>
       </div>

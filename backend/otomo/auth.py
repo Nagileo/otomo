@@ -1,10 +1,7 @@
-"""Bangumi OAuth session store.
-
-This is a local-file implementation for development. The interface is narrow
-enough to replace with Postgres/Redis and encrypted token storage later.
-"""
+"""Bangumi OAuth/session store with encrypted tokens and SQLite WAL storage."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import secrets
@@ -81,12 +78,20 @@ class _TokenCipher:
     def __init__(self, base_dir: Path) -> None:
         key = settings.auth_encryption_key.strip()
         if not key:
+            if settings.cookie_secure:
+                raise RuntimeError(
+                    "COOKIE_SECURE=true 时必须显式配置固定 AUTH_ENCRYPTION_KEY"
+                )
             key_path = base_dir / ".fernet_key"
-            if key_path.exists():
+            generated = Fernet.generate_key().decode("ascii")
+            try:
+                # API / scheduler / Discord may start together. Exclusive
+                # creation guarantees every process reads the same dev key.
+                with key_path.open("x", encoding="utf-8") as handle:
+                    handle.write(generated)
+                key = generated
+            except FileExistsError:
                 key = key_path.read_text(encoding="utf-8").strip()
-            else:
-                key = Fernet.generate_key().decode("ascii")
-                key_path.write_text(key, encoding="utf-8")
         self.fernet = Fernet(key.encode("ascii"))
 
     def encrypt(self, value: str) -> str:
@@ -221,6 +226,40 @@ class AuthStore:
                 continue
         return rows
 
+    def try_acquire_refresh_lock(self, auth_session_id: str, ttl: float = 60.0) -> bool:
+        """Acquire a cross-process OAuth refresh lease in the shared store."""
+        if self.backend != "sqlite":
+            return True
+        now = time.time()
+        with self._connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute(
+                "SELECT payload FROM auth_kv WHERE namespace='oauth_refresh_lock' AND key=?",
+                (auth_session_id,),
+            ).fetchone()
+            if row:
+                try:
+                    acquired_at = float(json.loads(str(row[0])).get("acquired_at") or 0)
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    acquired_at = 0
+                if now - acquired_at < ttl:
+                    return False
+            payload = json.dumps({"acquired_at": now})
+            con.execute(
+                """
+                INSERT INTO auth_kv(namespace,key,payload,updated_at)
+                VALUES('oauth_refresh_lock',?,?,?)
+                ON CONFLICT(namespace,key) DO UPDATE SET
+                    payload=excluded.payload, updated_at=excluded.updated_at
+                """,
+                (auth_session_id, payload, now),
+            )
+        return True
+
+    def release_refresh_lock(self, auth_session_id: str) -> None:
+        if self.backend == "sqlite":
+            self._delete("oauth_refresh_lock", auth_session_id)
+
     def _dump_token(self, token: BangumiToken) -> dict[str, Any]:
         raw = token.model_dump(mode="json")
         raw["access_token_enc"] = self.cipher.encrypt(raw.pop("access_token", ""))
@@ -250,27 +289,6 @@ class AuthStore:
         self._write("oauth_state", state.state, state.model_dump(mode="json"))
         return state
 
-    # —— Discord 账号绑定 ——
-    # 绑定令牌用 Fernet 签名(bot 和 backend 共享 AUTH_ENCRYPTION_KEY),防止伪造 discord_id;
-    # 映射 discord_user_id ↔ Bangumi username,bot 据此取该用户 token 做个人化。
-    def encode_discord_link(self, discord_user_id: str) -> str:
-        import json as _json
-        return self.cipher.encrypt(_json.dumps({"d": discord_user_id, "t": time.time()}))
-
-    def decode_discord_link(self, token: str, ttl: float = 900) -> str | None:
-        import json as _json
-        try:
-            payload = _json.loads(self.cipher.decrypt(token))
-        except Exception as e:  # noqa: BLE001
-            logging.getLogger("otomo.auth").warning(
-                "decode_discord_link 解密失败(多半 key 不一致):%s", type(e).__name__)
-            return None
-        age = time.time() - float(payload.get("t") or 0)
-        if age > ttl:
-            logging.getLogger("otomo.auth").warning("decode_discord_link 过期:%.0fs", age)
-            return None
-        return str(payload.get("d") or "") or None
-
     def create_discord_link_code(self, discord_user_id: str) -> str:
         """生成短码(8 位 hex,URL 无特殊字符)存服务器,替代把加密串塞进 URL——
         后者经 Discord/浏览器/Caddy 一路可能被改坏,短码方案零 URL 编码风险。"""
@@ -278,13 +296,19 @@ class AuthStore:
         self._write("discord_link_code", code, {"discord_user_id": discord_user_id, "created_at": time.time()})
         return code
 
-    def resolve_discord_link_code(self, code: str, ttl: float = 900) -> str | None:
+    def consume_discord_link_code(self, code: str, ttl: float = 900) -> str | None:
         raw = self._read("discord_link_code", code)
+        self._delete("discord_link_code", code)
         if not raw or time.time() - float(raw.get("created_at") or 0) > ttl:
             return None
         return str(raw.get("discord_user_id") or "") or None
 
     def set_discord_link(self, discord_user_id: str, username: str) -> None:
+        # 严格一对一：换号或在另一 Discord 账号重新绑定时，清掉旧映射。
+        for raw in self._iter_namespace("discord_link"):
+            old_discord = str(raw.get("discord_user_id") or "")
+            if old_discord and (old_discord == discord_user_id or raw.get("username") == username):
+                self._delete("discord_link", old_discord)
         self._write("discord_link", discord_user_id,
                     {"discord_user_id": discord_user_id, "username": username, "created_at": now_iso()})
 
@@ -471,7 +495,11 @@ async def refresh_oauth_token(auth_store: AuthStore, token: BangumiToken) -> Ban
             resp.raise_for_status()
             payload = resp.json()
     except Exception as e:  # noqa: BLE001
-        token.status = "refresh_failed"
+        # invalid_grant/authorization failures require a new login. Network
+        # and 5xx failures are retryable and must not permanently log out all
+        # API/scheduler/Discord processes.
+        status_code = e.response.status_code if isinstance(e, httpx.HTTPStatusError) else 0
+        token.status = "reauth_required" if status_code in {400, 401, 403} else "active"
         token.last_error = f"{type(e).__name__}: {str(e)[:180]}"
         auth_store.save_token(token)
         raise
@@ -484,15 +512,46 @@ async def refresh_oauth_token(auth_store: AuthStore, token: BangumiToken) -> Ban
     return token
 
 
+async def _refresh_if_needed(auth_store: AuthStore, token: BangumiToken) -> BangumiToken | None:
+    if not token.expired or not settings.bangumi_oauth_client_id or not settings.bangumi_oauth_client_secret:
+        return token
+    if auth_store.try_acquire_refresh_lock(token.auth_session_id):
+        try:
+            # Another process may have refreshed between our first read and
+            # acquiring the lease, so always re-read under the lease.
+            latest = auth_store.load_token(token.auth_session_id) or token
+            if not latest.expired:
+                return latest if latest.status == "active" else None
+            try:
+                return await refresh_oauth_token(auth_store, latest)
+            except Exception:  # noqa: BLE001
+                return None
+        finally:
+            auth_store.release_refresh_lock(token.auth_session_id)
+    # A scheduler/API/Discord peer owns the refresh lease. Wait briefly for
+    # the shared token row instead of submitting the same refresh token twice.
+    for _ in range(20):
+        await asyncio.sleep(0.15)
+        latest = auth_store.load_token(token.auth_session_id)
+        if latest and latest.status == "active" and not latest.expired:
+            return latest
+        if latest and latest.status != "active":
+            return None
+    return None
+
+
 async def token_for_session(auth_store: AuthStore, auth_session_id: str | None) -> BangumiToken | None:
     if not auth_session_id:
         return None
     token = auth_store.load_token(auth_session_id)
     if token and token.status != "active":
         return None
-    if token and token.expired and settings.bangumi_oauth_client_id and settings.bangumi_oauth_client_secret:
-        try:
-            token = await refresh_oauth_token(auth_store, token)
-        except Exception:  # noqa: BLE001
-            return None
-    return token
+    return await _refresh_if_needed(auth_store, token) if token else None
+
+
+async def refreshed_token_for_username(auth_store: AuthStore, username: str) -> BangumiToken | None:
+    """Background/Discord lookup with the same refresh semantics as web sessions."""
+    token = auth_store.token_for_username(username)
+    if token and token.status != "active":
+        return None
+    return await _refresh_if_needed(auth_store, token) if token else None

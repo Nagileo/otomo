@@ -27,7 +27,6 @@ export type MemoryState = {
   recent_decisions?: AnyRecord[];
   watch_plan?: AnyRecord[];
   recommendation_lists?: AnyRecord[];
-  weekly_digest_subscription?: AnyRecord;
   inbox?: AnyRecord[];
   recent_visual_feedback?: AnyRecord[];
   updated_at?: string;
@@ -83,7 +82,6 @@ export function hasActionableMemory(data: AnyRecord) {
   return (
     list(data.pending_write_actions).length > 0
     || list(data.inbox).some((item) => item?.unread)
-    || Boolean(data.weekly_digest_subscription?.pending)
   );
 }
 

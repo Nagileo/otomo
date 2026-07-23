@@ -8,16 +8,67 @@ The channel layer is deliberately small and dependency-light:
 from __future__ import annotations
 
 import asyncio
+import ipaddress
+import json
+import socket
 import smtplib
 from email.message import EmailMessage
 from typing import Any
 from urllib.parse import parse_qs, urlparse, urlunparse
 
 import httpx
+from pydantic import BaseModel, Field
 
 from .config import settings
 from .memory.consolidate import now_iso
-from .memory.models import InboxItem, WeeklyDigestSubscription
+from .memory.models import InboxItem
+
+
+class NotificationTarget(BaseModel):
+    """Delivery-only projection; scheduling state lives in SubscriptionRule."""
+
+    channels: list[str] = Field(default_factory=lambda: ["inbox"])
+    template: str = "normal"
+    email: str = ""
+    webhook_url: str = ""
+    webhook_format: str = "generic"
+
+
+_WEBHOOK_HOSTS = {
+    "serverchan": {"sctapi.ftqq.com", "sc.ftqq.com"},
+    "telegram": {"api.telegram.org"},
+    "discord": {"discord.com", "discordapp.com"},
+    "feishu": {"open.feishu.cn", "open.larksuite.com"},
+}
+_MAX_WEBHOOK_URL_LENGTH = 2048
+_MAX_GENERIC_PAYLOAD_BYTES = 128 * 1024
+
+
+async def validate_webhook_url(url: str, fmt: str = "generic") -> str:
+    """Reject local/private destinations before an outbound webhook request."""
+    raw = (url or "").strip()
+    if len(raw) > _MAX_WEBHOOK_URL_LENGTH:
+        raise ValueError(f"Webhook URL 不能超过 {_MAX_WEBHOOK_URL_LENGTH} 个字符")
+    parsed = urlparse(raw)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+        raise ValueError("Webhook 仅允许无账号信息的公网 HTTPS URL")
+    host = parsed.hostname.rstrip(".").lower()
+    allowed = _WEBHOOK_HOSTS.get(fmt)
+    if allowed and host not in allowed:
+        raise ValueError(f"{fmt} webhook 域名必须是：{', '.join(sorted(allowed))}")
+    try:
+        literal = ipaddress.ip_address(host)
+        addresses = [literal]
+    except ValueError:
+        loop = asyncio.get_running_loop()
+        infos = await loop.run_in_executor(
+            None,
+            lambda: socket.getaddrinfo(host, parsed.port or 443, type=socket.SOCK_STREAM),
+        )
+        addresses = list({ipaddress.ip_address(info[4][0]) for info in infos})
+    if not addresses or any(not address.is_global for address in addresses):
+        raise ValueError("Webhook 不能指向 localhost、内网、链路本地或保留地址")
+    return parsed.geturl()
 
 
 def digest_text(item: InboxItem) -> str:
@@ -76,33 +127,37 @@ def _chunks(text: str, limit: int) -> list[str]:
     return chunks
 
 
-async def _send_webhook(username: str, sub: WeeklyDigestSubscription, item: InboxItem) -> dict[str, Any]:
+async def _send_webhook(username: str, sub: NotificationTarget, item: InboxItem) -> dict[str, Any]:
     if not sub.webhook_url:
         return {"channel": "webhook", "ok": False, "error": "webhook_url empty", "ts": now_iso()}
     text = digest_text(item)
     fmt = sub.webhook_format or "generic"
     try:
-        async with httpx.AsyncClient(timeout=settings.weekly_webhook_timeout) as client:
+        webhook_url = await validate_webhook_url(sub.webhook_url, fmt)
+        async with httpx.AsyncClient(
+            timeout=settings.weekly_webhook_timeout,
+            follow_redirects=False,
+        ) as client:
             if fmt == "serverchan":
                 # Server酱 标题上限 32 字，超了会 400；desp 不能为空
                 resp = await client.post(
-                    sub.webhook_url,
+                    webhook_url,
                     data={"title": (item.title or "Otomo 推送")[:32], "desp": text or item.title or "（无内容）"},
                 )
             elif fmt == "telegram":
-                endpoint, payload = _telegram_endpoint_and_payload(sub.webhook_url, text)
+                endpoint, payload = _telegram_endpoint_and_payload(webhook_url, text)
                 resp = await client.post(endpoint, json=payload)
             elif fmt == "discord":
                 # Discord webhook content limit is 2000 chars; split instead of silently truncating.
                 responses = []
                 for chunk in _chunks(text, 1900)[:5]:
-                    responses.append(await client.post(sub.webhook_url, json={"content": chunk}))
+                    responses.append(await client.post(webhook_url, json={"content": chunk}))
                 for r in responses:
                     r.raise_for_status()
                 resp = responses[-1]
             elif fmt == "feishu":
                 resp = await client.post(
-                    sub.webhook_url,
+                    webhook_url,
                     json={"msg_type": "text", "content": {"text": text[:16000]}},
                 )
             else:
@@ -115,7 +170,10 @@ async def _send_webhook(username: str, sub: WeeklyDigestSubscription, item: Inbo
                     "payload": item.payload,
                     "created_at": item.created_at,
                 }
-                resp = await client.post(sub.webhook_url, json=payload)
+                encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                if len(encoded) > _MAX_GENERIC_PAYLOAD_BYTES:
+                    raise ValueError("Webhook 载荷超过 128 KiB，请缩小订阅过滤范围或模板")
+                resp = await client.post(webhook_url, json=payload)
             # 不用 raise_for_status（它吞掉响应体）——把第三方的真实错误原因带出来，
             # 否则只看到"400 Bad Request"排不了障（Server酱/飞书的具体原因都在 body 里）。
             if resp.status_code >= 400:
@@ -137,7 +195,7 @@ async def _send_webhook(username: str, sub: WeeklyDigestSubscription, item: Inbo
         }
 
 
-def _send_email_sync(username: str, sub: WeeklyDigestSubscription, item: InboxItem) -> dict[str, Any]:
+def _send_email_sync(username: str, sub: NotificationTarget, item: InboxItem) -> dict[str, Any]:
     if not settings.notification_email_enabled:
         return {"channel": "email", "ok": False, "error": "email disabled", "ts": now_iso()}
     if not sub.email:
@@ -160,7 +218,7 @@ def _send_email_sync(username: str, sub: WeeklyDigestSubscription, item: InboxIt
         return {"channel": "email", "ok": False, "error": f"{type(e).__name__}: {str(e)[:180]}", "ts": now_iso()}
 
 
-async def _send_email(username: str, sub: WeeklyDigestSubscription, item: InboxItem) -> dict[str, Any]:
+async def _send_email(username: str, sub: NotificationTarget, item: InboxItem) -> dict[str, Any]:
     return await asyncio.to_thread(_send_email_sync, username, sub, item)
 
 
@@ -198,15 +256,13 @@ async def _send_discord_dm(username: str, item: InboxItem) -> dict[str, Any]:
         return {"channel": "discord_dm", "ok": False, "error": f"{type(e).__name__}: {str(e)[:200]}", "ts": now_iso()}
 
 
-async def dispatch_weekly_digest_notifications(
+async def dispatch_notifications(
     username: str,
-    sub: WeeklyDigestSubscription,
+    sub: NotificationTarget,
     item: InboxItem,
 ) -> list[dict[str, Any]]:
     deliveries: list[dict[str, Any]] = []
     channels = list(dict.fromkeys(sub.channels or ["inbox"]))
-    if "inbox" in channels:
-        deliveries.append({"channel": "inbox", "ok": True, "ts": now_iso()})
     tasks = []
     if "webhook" in channels:
         tasks.append(_send_webhook(username, sub, item))

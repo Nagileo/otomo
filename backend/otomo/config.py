@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     session_store_path: str = "cache/sessions.sqlite3"
     share_store_path: str = "cache/share_snapshots.sqlite3"
     subscription_store_path: str = "cache/subscriptions.sqlite3"
+    ltm_store_path: str = "cache/ltm/ltm.sqlite3"
+    upload_store_path: str = "cache/uploads"
+    observation_dir: str = "cache/observations"
     cookie_secure: bool = False          # 生产 HTTPS 必须设 true
     csrf_protection_enabled: bool = True
     session_ttl_seconds: int = 60 * 60 * 24 * 30
@@ -86,8 +89,6 @@ class Settings(BaseSettings):
     trajectory_capture_enabled: bool = True
     trajectory_store_observations: bool = True
     claim_auto_revision_enabled: bool = True
-    weekly_scheduler_enabled: bool = False
-    weekly_scheduler_interval_seconds: int = 900
     weekly_webhook_timeout: float = 8.0
     subscription_scheduler_enabled: bool = False
     subscription_scheduler_interval_seconds: int = 900
@@ -97,6 +98,8 @@ class Settings(BaseSettings):
     rate_limit_uploads_per_minute: int = 5
     rate_limit_share_ip_per_hour: int = 60
     rate_limit_share_user_per_hour: int = 20
+    rate_limit_subscription_mutations_per_hour: int = 40
+    rate_limit_subscription_tests_per_hour: int = 10
     anonymous_session_turn_limit: int = 8
     # 真实 usage 计量（llm.py 代理逐次累加，DeepSeek cache hit 按 1/10 折算）。
     # 参考量级：一次复杂查询（推荐/资源聚合）约 1~4 万折算 token。

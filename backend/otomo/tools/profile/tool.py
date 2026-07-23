@@ -15,8 +15,10 @@ from pydantic import BaseModel, Field
 from ...agent.contracts import Citation, Tool, ToolResult
 from ...memory import LongTermMemory
 from ...memory.consolidate import now_iso
-from ...memory.models import memory_summary
+from ...memory.models import UserMemory, memory_summary
 from ...profile import TasteProfile, compute_taste_profile
+from ...security_context import can_access_private_user
+from ...subscription_read import public_subscription_summary
 from ..bangumi.client import SUBJECT_TYPE, BangumiClient
 
 _MAX_ITEMS = 1000  # 重度用户常 >300，尽量拉全（分页每页 50）；再大就分批/采样
@@ -109,7 +111,7 @@ class CollectionDashboardResult(BaseModel):
     global_top_tags: list[dict] = Field(default_factory=list)
     rating_strictness: str = ""
     plan_summary: dict[str, int] = Field(default_factory=dict)
-    weekly_subscription: dict = Field(default_factory=dict)
+    subscriptions: dict = Field(default_factory=dict)
     memory_signals: dict[str, list[dict]] = Field(default_factory=dict)
     enrichment: dict = Field(default_factory=dict)
     recommendations_for_next_step: list[str] = Field(default_factory=list)
@@ -545,16 +547,17 @@ class TasteProfileTool(Tool):
             username, SUBJECT_TYPE[args.subject_type], collection_type=2, max_items=_MAX_ITEMS
         )
         profile = compute_taste_profile(username, items)
-        mem = self.ltm.load_user(username)
-        mem.profile_snapshot[args.subject_type] = {
-            "watched": profile.watched,
-            "rated": profile.rated,
-            "avg_rating": profile.avg_rating,
-            "top_tags": profile.top_tags[:12],
-            "favorites": profile.favorites[:8],
-            "updated_at": now_iso(),
-        }
-        self.ltm.save_user(mem)
+        if can_access_private_user(username):
+            mem = self.ltm.load_user(username)
+            mem.profile_snapshot[args.subject_type] = {
+                "watched": profile.watched,
+                "rated": profile.rated,
+                "avg_rating": profile.avg_rating,
+                "top_tags": profile.top_tags[:12],
+                "favorites": profile.favorites[:8],
+                "updated_at": now_iso(),
+            }
+            self.ltm.save_user(mem)
         return ToolResult(
             ok=True,
             data=profile,
@@ -583,7 +586,8 @@ class TasteReportTool(Tool):
 
     async def run(self, args: TasteReportArgs) -> ToolResult[TasteReportResult]:
         username = await self._username(args.username)
-        mem = self.ltm.load_user(username)
+        private_memory = can_access_private_user(username)
+        mem = self.ltm.load_user(username) if private_memory else UserMemory(username=username)
         sections: list[TasteReportSection] = []
         report_tags: list[str] = []
         seen_types = list(dict.fromkeys(args.subject_types))
@@ -617,7 +621,8 @@ class TasteReportTool(Tool):
                     next_actions=_next_actions(subject_type, profile, aspect is not None),
                 )
             )
-        self.ltm.save_user(mem)
+        if private_memory:
+            self.ltm.save_user(mem)
         top_report_tags = list(dict.fromkeys(report_tags))[:10]
         share_summary = (
             f"@{username} 的 Otomo 口味画像："
@@ -631,14 +636,16 @@ class TasteReportTool(Tool):
                 sections=sections,
                 global_likes=[x.model_dump(mode="json") for x in mem.likes[:10]] if args.include_memory else [],
                 global_dislikes=[x.model_dump(mode="json") for x in mem.dislikes[:10]] if args.include_memory else [],
-                recent_feedback=[x.model_dump(mode="json") for x in mem.recent_feedback[:10]] if args.include_memory else [],
+                recent_feedback=[x.model_dump(mode="json") for x in mem.feedback[-10:]]
+                if args.include_memory and private_memory else [],
                 share_summary=share_summary,
                 report_tags=top_report_tags,
                 caveats=[
                     "口味报告只使用 Bangumi 公开/授权收藏和 Otomo 长期记忆；私有不可见数据不会被纳入。",
                     "aspect 好球区/雷区是 derived_from_feedback 弱信号，显式偏好优先。",
                 ],
-                memory=memory_summary(mem).model_dump(mode="json", exclude_none=True),
+                memory=memory_summary(mem).model_dump(mode="json", exclude_none=True)
+                if private_memory else {},
             ),
             sources=[Citation(title=f"Bangumi @{username}", url=f"https://bgm.tv/user/{username}", source="bangumi")],
         )
@@ -665,7 +672,8 @@ class CollectionDashboardTool(Tool):
 
     async def run(self, args: CollectionDashboardArgs) -> ToolResult[CollectionDashboardResult]:
         username = await self._username(args.username)
-        mem = self.ltm.load_user(username)
+        private_memory = can_access_private_user(username)
+        mem = self.ltm.load_user(username) if private_memory else UserMemory(username=username)
         media: list[DashboardMediaStats] = []
         global_tags: Counter[str] = Counter()
         enrichment_by_type: dict[str, dict] = {}
@@ -697,7 +705,8 @@ class CollectionDashboardTool(Tool):
                 "cv_affinity": stats.cv_affinity[:5],
                 "updated_at": now_iso(),
             }
-        self.ltm.save_user(mem)
+        if private_memory:
+            self.ltm.save_user(mem)
         total_items = sum(x.total for x in media)
         total_rated = sum(x.rated for x in media)
         weighted_score = sum((x.avg_rating or 0) * x.rated for x in media)
@@ -718,7 +727,7 @@ class CollectionDashboardTool(Tool):
             global_top_tags=[{"tag": k, "weight": v} for k, v in global_tags.most_common(18)],
             rating_strictness=_rating_strictness(avg, total_rated),
             plan_summary=dict(plan_status.most_common()),
-            weekly_subscription=mem.weekly_digest_subscription.model_dump(mode="json"),
+            subscriptions=public_subscription_summary(username) if private_memory else {},
             enrichment={
                 "enabled": bool(args.enrich_people and args.enrich_limit > 0),
                 "limit_per_type": args.enrich_limit,

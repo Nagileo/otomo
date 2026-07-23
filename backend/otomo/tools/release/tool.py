@@ -6,7 +6,6 @@ download, host, seed, or play any release content.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
 from difflib import SequenceMatcher
 from email.utils import parsedate_to_datetime
 import html as html_lib

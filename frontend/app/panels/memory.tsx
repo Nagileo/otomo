@@ -80,7 +80,6 @@ export function MemoryBadge({ memory }: { memory: MemoryState | null }) {
   const pendingCount = list(memory.pending_write_actions).length;
   const planCount = list(memory.watch_plan).length;
   const inboxCount = list(memory.inbox).filter((x) => x.unread).length;
-  const weeklyEnabled = Boolean(memory.weekly_digest_subscription?.enabled);
   const likePreview = list(memory.likes).slice(0, 3).map((x) => text(x.value, "")).filter(Boolean).join(" / ");
   const dislikePreview = list(memory.dislikes).slice(0, 3).map((x) => text(x.value, "")).filter(Boolean).join(" / ");
   return (
@@ -92,7 +91,6 @@ export function MemoryBadge({ memory }: { memory: MemoryState | null }) {
       {visualFeedbackCount > 0 && <Badge tone="dim">视觉纠错 {visualFeedbackCount}</Badge>}
       {pendingCount > 0 && <Badge tone="warn">待确认 {pendingCount}</Badge>}
       {planCount > 0 && <Badge tone="good">计划 {planCount}</Badge>}
-      {weeklyEnabled && <Badge tone="good">周报已订阅</Badge>}
       {inboxCount > 0 && <Badge tone="warn">未读周报 {inboxCount}</Badge>}
       {memory.spoiler_default && memory.spoiler_default !== "none" && (
         <Badge tone={memory.spoiler_default === "full" ? "bad" : "warn"}>默认剧透 {memory.spoiler_default}</Badge>
@@ -121,7 +119,6 @@ export function MemoryPanel({
   const watchPlan = list(data.watch_plan);
   const recLists = list(data.recommendation_lists);
   const inbox = list(data.inbox);
-  const weeklySub = data.weekly_digest_subscription || {};
   const progress = data.progress || {};
   const progressEntries = Object.entries(progress).slice(0, 12);
   const profiles = Object.entries(data.profile_snapshot || {}).slice(0, 3);
@@ -136,7 +133,6 @@ export function MemoryPanel({
         {data.updated_at && <Badge tone="dim">updated {data.updated_at}</Badge>}
         {pendingActions.length > 0 && <Badge tone="warn">待确认写回 {pendingActions.length}</Badge>}
         {watchPlan.length > 0 && <Badge tone="good">计划板 {watchPlan.length}</Badge>}
-        {weeklySub.enabled && <Badge tone="good">周报 {weeklySub.weekday ?? "-"} / {weeklySub.hour ?? "-"} 点</Badge>}
         {inbox.filter((x) => x.unread).length > 0 && <Badge tone="warn">未读 inbox {inbox.filter((x) => x.unread).length}</Badge>}
       </div>
 
@@ -311,30 +307,10 @@ export function MemoryPanel({
         </>
       )}
 
-      {(weeklySub.enabled || inbox.length > 0) && (
+      {inbox.length > 0 && (
         <>
-          <div className="section-title">周报订阅 / Inbox</div>
+          <div className="section-title">订阅 Inbox</div>
           <div className="rating-grid">
-            <div className="rating-card">
-              <div className="rating-source">订阅状态</div>
-              <div className="card-title">{weeklySub.enabled ? "已开启" : "未开启"}</div>
-              <p className="card-note">
-                weekday {weeklySub.weekday ?? "-"} · hour {weeklySub.hour ?? "-"} · {text(weeklySub.timezone, "Asia/Shanghai")}
-              </p>
-              <div className="evidence-row tight">
-                {list<string>(weeklySub.channels).map((ch) => <Badge key={ch} tone="dim">{ch}</Badge>)}
-                {weeklySub.email && <Badge tone="dim">email</Badge>}
-                {weeklySub.webhook_url && <Badge tone="dim">webhook</Badge>}
-              </div>
-              {weeklySub.last_run_key && <Badge tone="dim">last {weeklySub.last_run_key}</Badge>}
-              {list(weeklySub.last_delivery).length > 0 && (
-                <div className="compact-list">
-                  {list(weeklySub.last_delivery).slice(-4).map((d, j) => (
-                    <span key={j}>{text(d.channel)} · {d.ok ? "ok" : text(d.error, "failed")}</span>
-                  ))}
-                </div>
-              )}
-            </div>
             {inbox.slice().reverse().slice(0, 5).map((item, i) => {
               const payload = item.payload || {};
               return (

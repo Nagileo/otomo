@@ -1,6 +1,6 @@
 """轻量可观测：每次 agent run 的结构化 trace 落地 JSONL（可回放 / 分析延迟与工具用量）。
 
-- **本地 trace**（本模块）：always-on、零外部依赖，写 `backend/trajectories/traces.jsonl`（已 gitignore）。
+- **本地 trace**（本模块）：always-on、零外部依赖，写 `cache/observations/traces.jsonl`（已 gitignore）。
 - **Langfuse**（可选，见 llm.py）：配 `LANGFUSE_*` 则 LLM 调用自动进 Langfuse 平台（prompt/token/延迟）。
 
 可观测绝不能拖垮主流程：落盘失败一律吞掉。
@@ -17,7 +17,7 @@ from .agent.contracts import AgentState, ClaimCheckEvent, FinalEvent
 from .claim_verifier import verify_answer_claims
 from .config import settings
 
-_TRACE_DIR = Path(__file__).resolve().parents[1] / "trajectories"  # backend/trajectories（gitignored）
+_TRACE_DIR = Path(settings.observation_dir)
 _SENSITIVE_KEY = re.compile(r"(token|authorization|api[_-]?key|password|secret|cookie)", re.I)
 
 
@@ -295,7 +295,7 @@ async def traced_stream(runner, message: str, state, meta: dict) -> AsyncIterato
         rec["n_tools"] = len(rec["tools"])
         rec["answer"] = final_answer[:200]
         rec["status"] = status
-        _append(rec)
+        _append(_redact(rec))
         rl_rec["duration_ms"] = rec["duration_ms"]
         rl_rec["status"] = status
         _store_evidence_pool(state, rl_rec["observations"], turn=turn)

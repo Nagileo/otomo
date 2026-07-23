@@ -1,8 +1,8 @@
-"""Standalone weekly digest worker.
+"""Standalone unified subscription worker.
 
-The API process should stay focused on request handling. Production runs this
-module as a separate service so scheduled weekly digests are not duplicated by
-API workers or interrupted by frontend/API restarts.
+The API process stays focused on request handling. Production runs this module
+as a single service so notifications are not duplicated by API workers or
+interrupted by frontend/API restarts.
 """
 from __future__ import annotations
 
@@ -12,9 +12,7 @@ import signal
 
 from .auth import AuthStore
 from .memory import LongTermMemory
-from .config import settings
 from .subscriptions import SubscriptionService, SubscriptionStore
-from .weekly import WeeklyDigestService
 
 
 async def main() -> None:
@@ -26,15 +24,7 @@ async def main() -> None:
 
     ltm = LongTermMemory()
     auth = AuthStore()
-    services = []
-    if settings.weekly_scheduler_enabled:
-        services.append(WeeklyDigestService(ltm, auth))
-    if settings.subscription_scheduler_enabled:
-        services.append(SubscriptionService(SubscriptionStore(), ltm, auth))
-    if not services:
-        # Standalone worker is usually run with at least one scheduler enabled,
-        # but keeping weekly as a default makes local smoke testing explicit.
-        services.append(WeeklyDigestService(ltm, auth))
+    services = [SubscriptionService(SubscriptionStore(), ltm, auth)]
     tasks = [asyncio.create_task(service.run_forever()) for service in services]
     try:
         await stop.wait()

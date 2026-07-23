@@ -50,6 +50,8 @@ export default function SubscriptionSettingsPage() {
     webhook_format: "generic",
     webhook_url: "",
     email: "",
+    quiet_start: "23:00",
+    quiet_end: "08:00",
     filters_json: "{}",
   });
 
@@ -134,7 +136,7 @@ export default function SubscriptionSettingsPage() {
           webhook_format: draft.webhook_format,
           webhook_url: draft.webhook_url,
           email: draft.email,
-          quiet_hours: { start: "23:00", end: "08:00" },
+          quiet_hours: { start: draft.quiet_start, end: draft.quiet_end },
         }),
       });
       const payload = await res.json().catch(() => ({}));
@@ -294,6 +296,14 @@ export default function SubscriptionSettingsPage() {
               <label className="setting-field wide">
                 <span>Email</span>
                 <input value={draft.email} onChange={(e) => setDraft((p) => ({ ...p, email: e.target.value }))} placeholder="you@example.com" />
+              </label>
+              <label className="setting-field">
+                <span>静默开始</span>
+                <input type="time" value={draft.quiet_start} onChange={(e) => setDraft((p) => ({ ...p, quiet_start: e.target.value }))} />
+              </label>
+              <label className="setting-field">
+                <span>静默结束</span>
+                <input type="time" value={draft.quiet_end} onChange={(e) => setDraft((p) => ({ ...p, quiet_end: e.target.value }))} />
               </label>
               <label className="setting-field wide">
                 <span>filters JSON</span>

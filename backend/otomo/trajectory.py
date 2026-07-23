@@ -25,8 +25,6 @@ _MAX_CONTENT_CHARS = 6000  # 单条 message 内容截断（工具观察可能巨
 
 def _dir() -> Path:
     p = Path(settings.trajectory_dir)
-    if not p.is_absolute():
-        p = Path(__file__).resolve().parents[2] / p
     p.mkdir(parents=True, exist_ok=True)
     return p
 
@@ -98,7 +96,7 @@ def log_turn(
 def record_feedback(
     *, turn_id: str, session_id: str, owner: str, rating: str, note: str = ""
 ) -> dict[str, Any]:
-    """答案级 👍👎。返回写入的记录（API 回显用）。"""
+    """答案级 👍/👎/clear 事件；导出按 turn_id 采用最后一条。"""
     record = {
         "turn_id": turn_id,
         "ts": _now_iso(),

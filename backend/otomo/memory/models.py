@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 MemSource = Literal["explicit_user", "bangumi_profile", "derived_from_feedback"]
 SpoilerDefault = Literal["none", "mild", "full"]
@@ -14,8 +14,6 @@ WriteOperation = Literal["set_collection", "set_episode_collection", "mark_episo
 DecisionKind = Literal["accept", "reject", "defer", "write", "undo", "plan", "note"]
 PlanStatus = Literal["wishlist", "watching", "backlog", "on_hold", "revive", "completed", "rejected"]
 InboxKind = Literal["weekly_digest", "daily_airing", "system"]
-WeeklyChannel = Literal["inbox", "webhook", "email", "discord_dm"]
-WeeklyWebhookFormat = Literal["generic", "serverchan", "telegram", "discord", "feishu"]
 AspectKey = Literal[
     "story", "character", "pacing", "visual", "music",
     "direction", "text", "system", "voice", "general",
@@ -124,26 +122,6 @@ class RecommendationListItem(BaseModel):
     updated_at: str = ""
 
 
-class WeeklyDigestSubscription(BaseModel):
-    enabled: bool = False
-    weekday: int = Field(0, ge=0, le=6, description="0=Monday")
-    hour: int = Field(9, ge=0, le=23)
-    timezone: str = "Asia/Shanghai"
-    push_grading: Literal["brief", "normal", "detailed"] = "normal"
-    limit: int = Field(8, ge=3, le=20)
-    include_on_hold: bool = True
-    channels: list[WeeklyChannel] = Field(default_factory=lambda: ["inbox"])
-    email: str = ""
-    webhook_url: str = ""
-    webhook_format: WeeklyWebhookFormat = "generic"
-    web_push_endpoint: str = ""
-    web_push_p256dh: str = ""
-    web_push_auth: str = ""
-    last_delivery: list[dict] = Field(default_factory=list)
-    last_run_key: str = ""
-    updated_at: str = ""
-
-
 class InboxItem(BaseModel):
     id: str
     kind: InboxKind = "weekly_digest"
@@ -175,6 +153,8 @@ class UserAspectProfile(BaseModel):
 
 
 class UserMemory(BaseModel):
+    _store_revision: int = PrivateAttr(default=0)
+    _store_baseline: dict[str, Any] = PrivateAttr(default_factory=dict)
     username: str
     likes: list[MemoryItem] = Field(default_factory=list)
     dislikes: list[MemoryItem] = Field(default_factory=list)
@@ -188,7 +168,6 @@ class UserMemory(BaseModel):
     decision_log: list[DecisionLogItem] = Field(default_factory=list)
     watch_plan: list[WatchPlanItem] = Field(default_factory=list)
     recommendation_lists: list[RecommendationListItem] = Field(default_factory=list)
-    weekly_digest_subscription: WeeklyDigestSubscription = Field(default_factory=WeeklyDigestSubscription)
     inbox: list[InboxItem] = Field(default_factory=list)
     visual_feedback: list[VisualFeedbackItem] = Field(default_factory=list)
     updated_at: str = ""
@@ -207,7 +186,6 @@ class MemorySummary(BaseModel):
     recent_decisions: list[DecisionLogItem] = Field(default_factory=list)
     watch_plan: list[WatchPlanItem] = Field(default_factory=list)
     recommendation_lists: list[RecommendationListItem] = Field(default_factory=list)
-    weekly_digest_subscription: WeeklyDigestSubscription = Field(default_factory=WeeklyDigestSubscription)
     inbox: list[InboxItem] = Field(default_factory=list)
     recent_visual_feedback: list[VisualFeedbackItem] = Field(default_factory=list)
     updated_at: str = ""
@@ -230,7 +208,6 @@ def memory_summary(mem: UserMemory, feedback_limit: int = 8) -> MemorySummary:
         recent_decisions=mem.decision_log[-10:],
         watch_plan=mem.watch_plan[-20:],
         recommendation_lists=mem.recommendation_lists[-6:],
-        weekly_digest_subscription=mem.weekly_digest_subscription,
         inbox=mem.inbox[-8:],
         recent_visual_feedback=recent_visual_feedback,
         updated_at=mem.updated_at,

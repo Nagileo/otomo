@@ -20,6 +20,7 @@ ClaimKind = Literal[
     "unknown",
 ]
 ClaimSeverity = Literal["info", "warn", "block"]
+EvidenceRole = Literal["canonical", "discourse", "preference", "web", "unknown"]
 
 
 class ClaimEvidence(BaseModel):
@@ -55,9 +56,10 @@ class ClaimCheckResult(BaseModel):
 
 class EvidenceDoc(BaseModel):
     source: str
-    role: Literal["canonical", "discourse", "preference", "web", "unknown"] = "unknown"
+    role: EvidenceRole = "unknown"
     text: str
     facts: dict[str, Any] = Field(default_factory=dict)
+    entities: list[str] = Field(default_factory=list)
     turn: int | None = None
 
 
@@ -88,7 +90,7 @@ def _flatten(value: Any, limit: int = 14000) -> str:
     return text[:limit]
 
 
-def _source_role(name: str) -> EvidenceDoc.model_fields["role"].annotation:
+def _source_role(name: str) -> EvidenceRole:
     if name.startswith(("get_subject", "search_subject", "check_subject", "list_season", "search_visual_novels", "search_erogamescape", "rank_erogamescape", "search_musicbrainz")):
         return "canonical"
     if any(k in name for k in ("comment", "review", "bilibili", "community", "browser_fetch", "fetch_url", "web_search")):
@@ -115,15 +117,48 @@ def _collect_facts(value: Any, prefix: str = "", out: dict[str, Any] | None = No
     return out
 
 
+def _entity_names(value: Any, limit: int = 40) -> list[str]:
+    names: list[str] = []
+    if isinstance(value, dict):
+        for key in ("title", "name", "name_cn", "subject_name", "original_name"):
+            item = value.get(key)
+            if isinstance(item, str) and 1 < len(item.strip()) <= 100 and item.strip() not in names:
+                names.append(item.strip())
+        for child in value.values():
+            if len(names) >= limit:
+                break
+            if isinstance(child, (dict, list)):
+                for item in _entity_names(child, limit - len(names)):
+                    if item not in names:
+                        names.append(item)
+    elif isinstance(value, list):
+        for child in value[:30]:
+            for item in _entity_names(child, limit - len(names)):
+                if item not in names:
+                    names.append(item)
+    return names[:limit]
+
+
 def observation_documents(observations: list[dict[str, Any]]) -> list[EvidenceDoc]:
     docs: list[EvidenceDoc] = []
     for obs in observations:
         name = str(obs.get("name") or "observation")
-        chunks = [str(obs.get("summary") or "")]
+        summary = str(obs.get("summary") or "")
+        chunks = [summary]
         facts: dict[str, Any] = {}
-        if obs.get("data") is not None:
-            chunks.append(_flatten(obs.get("data")))
-            facts.update(_collect_facts(obs.get("data")))
+        data = obs.get("data")
+        scalar_data: Any = data
+        item_docs: list[tuple[str, dict[str, Any]]] = []
+        if isinstance(data, dict):
+            scalar_data = {}
+            for key, value in data.items():
+                if isinstance(value, list) and value and all(isinstance(x, dict) for x in value[:20]):
+                    item_docs.extend((f"{key}[{idx}]", item) for idx, item in enumerate(value[:30]))
+                else:
+                    scalar_data[key] = value
+        if scalar_data is not None:
+            chunks.append(_flatten(scalar_data))
+            facts.update(_collect_facts(scalar_data))
         for source in obs.get("sources") or []:
             if isinstance(source, dict):
                 chunks.append(" ".join(str(source.get(k) or "") for k in ("source", "title", "url")))
@@ -138,21 +173,34 @@ def observation_documents(observations: list[dict[str, Any]]) -> list[EvidenceDo
             turn_value = int(turn) if turn is not None else None
         except (TypeError, ValueError):
             turn_value = None
+        parent_entities = _entity_names(scalar_data)
         docs.append(
             EvidenceDoc(
                 source=name,
                 role=_source_role(name),
                 text="\n".join(chunks),
                 facts=facts,
+                entities=parent_entities,
                 turn=turn_value,
             )
         )
+        for label, item in item_docs:
+            docs.append(
+                EvidenceDoc(
+                    source=f"{name}:{label}",
+                    role=_source_role(name),
+                    text=" ".join(parent_entities[:4]) + "\n" + _flatten(item),
+                    facts=_collect_facts(item),
+                    entities=list(dict.fromkeys([*parent_entities, *_entity_names(item)])),
+                    turn=turn_value,
+                )
+            )
     return docs
 
 
 def split_claims(answer: str, limit: int = 18) -> list[str]:
     lines = []
-    for raw in re.split(r"[\n。！？!?；;]+", answer):
+    for raw in re.split(r"[\n。！？!?；;，,]+", answer):
         # 去句首列表序号（1. / 2) / - / •），但保留句尾数字——评分/排名/年份是最该校验的事实
         cleaned = re.sub(r"^\s*(?:[-*•·]+|\d{1,2}[.、)）])\s+", "", raw)
         text = cleaned.strip(" \t\r-*•、：:.")
@@ -245,10 +293,37 @@ def _staff_target(text: str) -> str:
     return ""
 
 
+def _subject_anchors(text: str) -> list[str]:
+    return [x.strip() for x in re.findall(r"《([^》]{2,80})》", text) if x.strip()]
+
+
+def _entity_key(value: str) -> str:
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff]", "", value.casefold())
+
+
+def _docs_for_claim(claim: str, docs: list[EvidenceDoc]) -> list[EvidenceDoc]:
+    subjects = _subject_anchors(claim)
+    if not subjects:
+        return docs
+    matched = [
+        doc for doc in docs
+        if any(
+            _entity_key(subject) == _entity_key(entity)
+            for subject in subjects
+            for entity in doc.entities
+            if len(_entity_key(entity)) >= 2
+        )
+    ]
+    # No entity-bound evidence means "unverified", never a contradiction.
+    return matched
+
+
 def _canonical_contradiction(claim: str, docs: list[EvidenceDoc]) -> str:
     # 矛盾（→ block → auto revision）只看当轮证据（turn is None）：
     # 历史池的旧评分/旧数值只作支持性弱证据，不能反过来"纠正"本轮刚查到的新数据。
-    docs = [d for d in docs if d.turn is None]
+    docs = _docs_for_claim(claim, [d for d in docs if d.turn is None])
+    if _subject_anchors(claim) and not docs:
+        return ""
     target = _staff_target(claim)
     if target:
         staff_docs = [d for d in docs if d.role == "canonical" and "制作" in d.text]
@@ -263,7 +338,34 @@ def _canonical_contradiction(claim: str, docs: list[EvidenceDoc]) -> str:
     return ""
 
 
+def _canonical_value_match(claim: str, docs: list[EvidenceDoc]) -> bool | None:
+    """Check entity-bound predicate values instead of title co-occurrence."""
+    canonical = [doc for doc in _docs_for_claim(claim, docs) if doc.role == "canonical"]
+    if not canonical:
+        return False
+    target = _staff_target(claim)
+    if target:
+        target_key = _norm(target)
+        return any(
+            target_key in _norm(doc.text)
+            and any(term in doc.text for term in ("制作", "动画制作", "出品", "负责动画"))
+            for doc in canonical
+        )
+    numeric_terms = re.findall(r"\d+(?:\.\d+)?", claim)
+    predicate_terms = [
+        term for term in ("评分", "rank", "排名", "播出", "发售", "年份") if term in claim
+    ]
+    if numeric_terms and predicate_terms:
+        return any(
+            all(number in doc.text for number in numeric_terms)
+            and any(term in doc.text or term == "评分" and "score" in doc.text for term in predicate_terms)
+            for doc in canonical
+        )
+    return None
+
+
 def _evidence_for(claim: str, kind: ClaimKind, docs: list[EvidenceDoc]) -> list[ClaimEvidence]:
+    docs = _docs_for_claim(claim, docs)
     anchors = _anchors(claim)
     if not anchors:
         return []
@@ -300,6 +402,7 @@ def verify_answer_claims(answer: str, observations: list[dict[str, Any]]) -> Cla
         evidence = _evidence_for(text, kind, docs)
         contradiction = _canonical_contradiction(text, docs) if kind == "canonical_fact" else ""
         hard_canonical = kind == "canonical_fact" and _is_hard_canonical_claim(text)
+        value_match = _canonical_value_match(text, docs) if hard_canonical else None
         if kind in {"discourse_summary", "spoiler_sensitive"}:
             supported = any(ev.role in {"discourse", "web", "canonical"} and ev.confidence >= 0.45 for ev in evidence)
             note = (
@@ -317,12 +420,24 @@ def verify_answer_claims(answer: str, observations: list[dict[str, Any]]) -> Cla
             supported = False
             note = contradiction
             evidence = []
+        elif hard_canonical and value_match is not None:
+            supported = value_match
+            note = (
+                "已在同一作品的 canonical 证据中匹配到谓词和值。"
+                if supported else
+                "同一作品的 canonical 证据没有同时匹配该谓词和值。"
+            )
         elif kind == "unknown":
             supported = bool(evidence)
             note = "一般陈述；证据命中较弱。" if evidence else "一般陈述，不进入强事实校验。"
         else:
             required = _claim_required_roles(kind)
-            supported = any(ev.role in required and ev.confidence >= 0.45 for ev in evidence)
+            supported = any(
+                ev.role in required
+                and ev.confidence >= 0.45
+                and (not hard_canonical or any(term in ev.snippet for term in _HARD_CANONICAL_TERMS))
+                for ev in evidence
+            )
             if supported:
                 note = "已命中本轮同类型 evidence graph。"
             elif evidence:

@@ -1,7 +1,7 @@
 """Long-term memory tools.
 
 Memory stores only ACGN recommendation/evaluation preferences and explicit
-feedback. It never writes to Bangumi; it only persists local JSON under cache/ltm.
+feedback. It never writes to Bangumi; it persists transactional SQLite state under cache/ltm.
 """
 from __future__ import annotations
 

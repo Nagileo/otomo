@@ -51,7 +51,7 @@ def _scrub_messages(messages: list[dict], include_system: bool) -> list[dict]:
 
 def _traj_dir() -> Path:
     p = Path(settings.trajectory_dir)
-    return p if p.is_absolute() else Path(__file__).resolve().parents[2] / p
+    return p
 
 
 def load_all() -> tuple[list[dict], dict[str, dict]]:
@@ -92,7 +92,8 @@ def main() -> None:
     print(f"轨迹 {len(turns)} 轮（含工具 {with_tools}）· 反馈 {len(rated)}（👍{ups} 👎{downs}）· 目录 {_traj_dir()}")
 
     if args.sft:
-        out = Path(args.sft); out.parent.mkdir(parents=True, exist_ok=True)
+        out = Path(args.sft)
+        out.parent.mkdir(parents=True, exist_ok=True)
         n = 0
         with out.open("w", encoding="utf-8") as f:
             for t in turns:
@@ -123,7 +124,8 @@ def main() -> None:
             key = (t.get("session_id", ""), (t.get("user_message") or "").strip())
             if key[1]:
                 by_q[key].append(t)
-        out = Path(args.dpo); out.parent.mkdir(parents=True, exist_ok=True)
+        out = Path(args.dpo)
+        out.parent.mkdir(parents=True, exist_ok=True)
         n = 0
         with out.open("w", encoding="utf-8") as f:
             for (_sid, q), group in by_q.items():

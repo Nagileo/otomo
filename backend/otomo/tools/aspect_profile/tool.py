@@ -23,7 +23,6 @@ from ..bangumi.client import SUBJECT_TYPE, BangumiClient
 from ..review.tool import (
     CommentEvidence,
     _ASPECT_LABELS,
-    _build_aspect_summary,
     _extract_aspect_opinions,
 )
 

@@ -10,7 +10,7 @@
 	# 裸前缀只留"被外部/浏览器直接命中"的：OAuth 回调 /auth/*、上传预览、健康检查等。
 	# 注意：绝不要把裸 /share/* 放进来——那是前端分享【页面】/share/[type]/[id] 的路由，
 	# 放进来会把公开分享页误导给 backend 而 404。
-	@api path /api/* /auth/* /uploads/* /sessions* /weekly/* /actions/* /feedback/* /health
+	@api path /api/* /auth/* /uploads/* /sessions* /actions/* /feedback/* /health
 	handle @api {
 		uri strip_prefix /api
 		reverse_proxy backend:8000 {

@@ -1,7 +1,6 @@
 """Unified active subscription rules.
 
-This complements the older weekly-digest settings kept in long-term memory.
-Rules here are product-level subscriptions: kind + filters + schedule +
+Rules here are the only scheduled-notification system: kind + filters + schedule +
 channels + delivery records.  They are intentionally independent from chat
 sessions so they can be moved to a server worker later.
 """
@@ -17,14 +16,15 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
-from .auth import AuthStore
+from .auth import AuthStore, refreshed_token_for_username
 from .config import settings
 from .memory import LongTermMemory
 from .memory.consolidate import now_iso
-from .memory.models import InboxItem, WeeklyDigestSubscription
-from .notifications import dispatch_weekly_digest_notifications
+from .memory.models import InboxItem
+from .notifications import NotificationTarget, dispatch_notifications
+from .security_context import tenant_scope
 from .tools._concurrency import gather_limited
 from .tools.bangumi.client import BangumiClient
 from .tools.calendar.tool import AiringProgressArgs, AiringProgressTool
@@ -52,7 +52,7 @@ WebhookFormat = Literal["generic", "serverchan", "telegram", "discord", "feishu"
 
 
 class SubscriptionSchedule(BaseModel):
-    timezone: str = "Asia/Shanghai"
+    timezone: str = Field("Asia/Shanghai", min_length=1, max_length=64)
     hour: int = Field(9, ge=0, le=23)
     minute: int = Field(0, ge=0, le=59)
     weekday: int | None = Field(None, ge=0, le=6, description="0=Monday; None means daily/monthly depending kind")
@@ -88,29 +88,41 @@ class SubscriptionRule(BaseModel):
 
 class CreateSubscriptionRuleRequest(BaseModel):
     kind: SubscriptionKind
-    title: str = ""
+    title: str = Field("", max_length=160)
     enabled: bool = True
     filters: dict[str, Any] = Field(default_factory=dict)
     schedule: SubscriptionSchedule = Field(default_factory=SubscriptionSchedule)
-    channels: list[SubscriptionChannel] = Field(default_factory=lambda: ["inbox"])
+    channels: list[SubscriptionChannel] = Field(default_factory=lambda: ["inbox"], max_length=4)
     template: SubscriptionTemplate = "normal"
     webhook_format: WebhookFormat = "generic"
-    webhook_url: str = ""
-    email: str = ""
+    webhook_url: str = Field("", max_length=2048)
+    email: str = Field("", max_length=320)
     quiet_hours: QuietHours = Field(default_factory=QuietHours)
+
+    @model_validator(mode="after")
+    def validate_filter_size(self):
+        if len(_dump(self.filters).encode("utf-8")) > 32 * 1024:
+            raise ValueError("订阅 filters 不能超过 32 KiB")
+        return self
 
 
 class UpdateSubscriptionRuleRequest(BaseModel):
     enabled: bool | None = None
-    title: str | None = None
+    title: str | None = Field(None, max_length=160)
     filters: dict[str, Any] | None = None
     schedule: SubscriptionSchedule | None = None
-    channels: list[SubscriptionChannel] | None = None
+    channels: list[SubscriptionChannel] | None = Field(None, max_length=4)
     template: SubscriptionTemplate | None = None
     webhook_format: WebhookFormat | None = None
-    webhook_url: str | None = None
-    email: str | None = None
+    webhook_url: str | None = Field(None, max_length=2048)
+    email: str | None = Field(None, max_length=320)
     quiet_hours: QuietHours | None = None
+
+    @model_validator(mode="after")
+    def validate_filter_size(self):
+        if self.filters is not None and len(_dump(self.filters).encode("utf-8")) > 32 * 1024:
+            raise ValueError("订阅 filters 不能超过 32 KiB")
+        return self
 
 
 class DeliveryRecord(BaseModel):
@@ -360,13 +372,25 @@ class SubscriptionService:
         for rule in self.store.list_enabled_rules():
             if not is_rule_due(rule, now=now):
                 continue
-            record = await self.run_rule(rule, test=False)
+            record = await self.run_rule(rule, test=False, now=now)
             if record.status == "sent":
                 count += 1
         return count
 
-    async def run_rule(self, rule: SubscriptionRule, *, test: bool = False) -> DeliveryRecord:
-        hit_key = due_hit_key(rule) if not test else f"test-{now_iso()}"
+    async def run_rule(
+        self,
+        rule: SubscriptionRule,
+        *,
+        test: bool = False,
+        now: datetime | None = None,
+    ) -> DeliveryRecord:
+        if not test:
+            rule = self.store.get(rule.id, rule.owner_key) or rule
+        if test:
+            hit_key = f"test-{now_iso()}"
+        else:
+            local_now = _localize(now, rule.schedule.timezone)
+            hit_key = due_hit_key(rule, now=local_now) or f"manual-{rule.kind}-{local_now.date().isoformat()}"
         if not test and hit_key and rule.last_hit_key == hit_key:
             return self._record(rule, hit_key, "skipped", title=rule.title, payload={"reason": "duplicate hit_key"})
         try:
@@ -383,24 +407,50 @@ class SubscriptionService:
                 unread=("inbox" in rule.channels) and not test,
                 created_at=now_iso(),
             )
-            sub = weekly_subscription_from_rule(rule)
+            target = notification_target_from_rule(rule)
             if test:
-                sub.channels = [c for c in sub.channels if c != "inbox"]
-            deliveries = (
-                await dispatch_weekly_digest_notifications(rule.username or rule.owner_key, sub, item)
-                if sub.channels else [{"channel": "test", "ok": True, "note": "no external channels configured", "ts": now_iso()}]
-            )
+                target.channels = [c for c in target.channels if c != "inbox"]
+            external_channels = [c for c in target.channels if c != "inbox"]
+            target.channels = external_channels
+            deliveries = await dispatch_notifications(rule.username or rule.owner_key, target, item) if external_channels else []
             if "inbox" in rule.channels and rule.username and not test:
-                mem = self.ltm.load_user(rule.username)
-                mem.inbox.append(item)
-                mem.inbox = mem.inbox[-60:]
-                self.ltm.save_user(mem)
+                try:
+                    with tenant_scope(rule.username, authenticated=True):
+                        mem = self.ltm.load_user(rule.username)
+                        mem.inbox.append(item)
+                        mem.inbox = mem.inbox[-60:]
+                        self.ltm.save_user(mem)
+                    deliveries.append({"channel": "inbox", "ok": True, "ts": now_iso()})
+                except Exception as e:  # noqa: BLE001 - other channels may still succeed
+                    deliveries.append({
+                        "channel": "inbox",
+                        "ok": False,
+                        "error": f"{type(e).__name__}: {str(e)[:180]}",
+                        "ts": now_iso(),
+                    })
+            if test and not deliveries:
+                deliveries.append({
+                    "channel": "test",
+                    "ok": True,
+                    "note": "no external channels configured",
+                    "ts": now_iso(),
+                })
+            succeeded = [row for row in deliveries if row.get("ok")]
+            failed = [row for row in deliveries if not row.get("ok")]
+            if not succeeded:
+                detail = "; ".join(str(row.get("error") or row.get("channel")) for row in failed[:4])
+                return self._record(
+                    rule, hit_key, "failed", title=item.title, payload=item.payload,
+                    deliveries=deliveries, error=detail or "所有推送渠道均失败",
+                )
             if not test:
                 self.store.touch_run(rule, hit_key)
-            return self._record(rule, hit_key, "sent", title=item.title, payload=item.payload, deliveries=deliveries)
+            return self._record(
+                rule, hit_key, "sent", title=item.title, payload=item.payload,
+                deliveries=deliveries,
+                error=("部分渠道失败：" + "; ".join(str(x.get("channel")) for x in failed)) if failed else "",
+            )
         except Exception as e:  # noqa: BLE001
-            if not test:
-                self.store.touch_run(rule, hit_key)
             return self._record(rule, hit_key, "failed", title=rule.title, error=f"{type(e).__name__}: {str(e)[:240]}")
 
     async def run_forever(self) -> None:
@@ -432,7 +482,7 @@ class SubscriptionService:
                     }
                 ],
             }
-        token = self.auth.token_for_username(rule.username) if rule.username else None
+        token = await refreshed_token_for_username(self.auth, rule.username) if rule.username else None
         client = self.client_factory(rule.username, token.access_token if token else None) if self.client_factory else BangumiClient(token=token.access_token if token else None)
         try:
             if rule.kind == "monthly_report":
@@ -875,11 +925,8 @@ def due_hit_key(rule: SubscriptionRule, now: datetime | None = None) -> str:
         interval = max(5, int(rule.schedule.interval_minutes))
         bucket = int(local_now.timestamp()) // (interval * 60)
         return f"interval-{interval}-{bucket}"
-    if rule.kind == "monthly_report":
-        return f"{local_now:%Y-%m}-{_scheduled_month_day(rule, local_now):02d}-{rule.schedule.hour:02d}{rule.schedule.minute:02d}"
-    if rule.schedule.weekday is not None:
-        return f"{local_now:%G-W%V}-{rule.schedule.weekday}-{rule.schedule.hour:02d}{rule.schedule.minute:02d}"
-    return f"{local_now:%Y-%m-%d}-{rule.schedule.hour:02d}{rule.schedule.minute:02d}"
+    scheduled = _current_scheduled_at(rule, local_now)
+    return f"scheduled-{scheduled.isoformat()}" if scheduled is not None else ""
 
 
 def is_rule_due(rule: SubscriptionRule, now: datetime | None = None) -> bool:
@@ -898,17 +945,42 @@ def is_rule_due(rule: SubscriptionRule, now: datetime | None = None) -> bool:
             if local_now - last_local < timedelta(minutes=interval):
                 return False
         return True
-    if rule.schedule.weekday is not None and local_now.weekday() != rule.schedule.weekday:
-        return False
-    if rule.kind == "monthly_report" and local_now.day != _scheduled_month_day(rule, local_now):
-        return False
-    if local_now.hour != rule.schedule.hour:
-        return False
-    if local_now.minute < rule.schedule.minute:
+    scheduled = _current_scheduled_at(rule, local_now)
+    if scheduled is None:
         return False
     if rule.last_hit_key == due_hit_key(rule, local_now):
         return False
+    last_run = _parse_datetime(rule.last_run_at)
+    if last_run is not None:
+        last_local = last_run.astimezone(local_now.tzinfo) if last_run.tzinfo else last_run.replace(tzinfo=local_now.tzinfo)
+        if last_local >= scheduled:
+            return False
     return True
+
+
+def _current_scheduled_at(rule: SubscriptionRule, local_now: datetime) -> datetime | None:
+    """Return this period's scheduled instant, allowing delayed worker wakeups."""
+    scheduled = local_now.replace(
+        hour=rule.schedule.hour,
+        minute=rule.schedule.minute,
+        second=0,
+        microsecond=0,
+    )
+    if rule.kind == "monthly_report":
+        scheduled = scheduled.replace(day=_scheduled_month_day(rule, local_now))
+    elif rule.schedule.weekday is not None:
+        # Only the current ISO week's occurrence belongs to this scheduling
+        # period. Before the configured weekday we must not backfill last
+        # week's occurrence, otherwise a brand-new Friday rule would fire on
+        # Monday immediately.
+        week_start = local_now - timedelta(days=local_now.weekday())
+        scheduled = week_start.replace(
+            hour=rule.schedule.hour,
+            minute=rule.schedule.minute,
+            second=0,
+            microsecond=0,
+        ) + timedelta(days=rule.schedule.weekday)
+    return scheduled if scheduled <= local_now else None
 
 
 def _scheduled_month_day(rule: SubscriptionRule, local_now: datetime) -> int:
@@ -949,14 +1021,10 @@ def _inbox_kind(kind: str) -> Literal["weekly_digest", "daily_airing", "system"]
     return "system"
 
 
-def weekly_subscription_from_rule(rule: SubscriptionRule) -> WeeklyDigestSubscription:
-    return WeeklyDigestSubscription(
-        enabled=rule.enabled,
-        weekday=rule.schedule.weekday if rule.schedule.weekday is not None else 0,
-        hour=rule.schedule.hour,
-        timezone=rule.schedule.timezone,
-        push_grading=rule.template,
-        channels=rule.channels,
+def notification_target_from_rule(rule: SubscriptionRule) -> NotificationTarget:
+    return NotificationTarget(
+        channels=list(rule.channels),
+        template=rule.template,
         email=rule.email,
         webhook_url=rule.webhook_url,
         webhook_format=rule.webhook_format,

@@ -71,7 +71,6 @@ async def _wait_health(base_url: str, timeout: float = 20.0) -> None:
 
 def _start_server(port: int) -> subprocess.Popen:
     env = os.environ.copy()
-    env.setdefault("WEEKLY_SCHEDULER_ENABLED", "false")
     return subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "otomo.api.app:app", "--host", "127.0.0.1", "--port", str(port)],
         cwd=str(ROOT),

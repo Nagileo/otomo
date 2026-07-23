@@ -520,8 +520,6 @@ _PANEL_TOOLS = {
     "build_taste_report",
     "build_collection_dashboard",
     "build_weekly_digest",
-    "configure_weekly_digest",
-    "generate_weekly_digest_now",
     "list_weekly_digest_inbox",
     "get_user_memory",
     "remember_user_preference",
@@ -547,8 +545,6 @@ _MEMORY_TOOLS = {
     "list_watch_plan",
     "record_decision_log",
     "save_recommendation_list",
-    "configure_weekly_digest",
-    "generate_weekly_digest_now",
     "list_weekly_digest_inbox",
 }
 _MEMORY_STATE_TOOLS = _MEMORY_TOOLS | {"build_aspect_profile", "build_taste_report", "build_collection_dashboard"}
@@ -900,7 +896,7 @@ def _safe_collection_dashboard_payload(data: dict[str, Any]) -> dict[str, Any]:
         "global_top_tags": _trim_dicts(data.get("global_top_tags"), limit=18),
         "rating_strictness": _trim_text(data.get("rating_strictness"), 240),
         "plan_summary": data.get("plan_summary") or {},
-        "weekly_subscription": data.get("weekly_subscription") or {},
+        "subscriptions": data.get("subscriptions") or {},
         "enrichment": data.get("enrichment") if isinstance(data.get("enrichment"), dict) else {},
         "memory_signals": data.get("memory_signals") or {},
         "recommendations_for_next_step": _trim_strings(data.get("recommendations_for_next_step"), limit=6, text_limit=180),
@@ -927,8 +923,6 @@ def _safe_memory_payload(data: dict[str, Any]) -> dict[str, Any]:
         "recent_decisions": _trim_dicts(memory.get("recent_decisions"), limit=10),
         "watch_plan": _trim_dicts(memory.get("watch_plan"), limit=20),
         "recommendation_lists": _trim_dicts(memory.get("recommendation_lists"), limit=6),
-        "weekly_digest_subscription": memory.get("weekly_digest_subscription")
-        if isinstance(memory.get("weekly_digest_subscription"), dict) else {},
         "inbox": _trim_dicts(memory.get("inbox"), limit=8),
         "updated_at": memory.get("updated_at"),
     }
@@ -1260,7 +1254,7 @@ def panel_data_from_payload(name: str, payload: dict[str, Any] | None) -> dict[s
         return _safe_release_feed_payload(data)
     if name == "get_bangumi_index":
         return _safe_bangumi_index_payload(data)
-    if name in {"configure_weekly_digest", "generate_weekly_digest_now", "list_weekly_digest_inbox"}:
+    if name == "list_weekly_digest_inbox":
         return _safe_weekly_inbox_payload(data)
     if name == "build_taste_report":
         return _safe_taste_report_payload(data)
@@ -1448,6 +1442,7 @@ async def step_tools(
     sources: list[Citation],
     seen_urls: set[str],
     state: Any | None = None,
+    allowed_write_tools: set[str] | None = None,
 ) -> AsyncIterator[Any]:
     """执行一轮（一个 assistant 回合里的全部 tool_calls），产出 ToolCall/Observation 事件。
     side effect：把 assistant 与 tool 结果消息追加进 messages、新来源并入 sources。"""
@@ -1469,9 +1464,11 @@ async def step_tools(
         progress_queue: asyncio.Queue[ProgressEvent] = asyncio.Queue()
         token = _TOOL_PROGRESS_QUEUE.set(progress_queue)
         task = asyncio.create_task(
-            # allow_write=True：执行/撤销写回工具已对模型暴露（用户口头确认即执行的产品要求）。
-            # 三重护栏在工具层：confirmed=true 参数、动作必须已 prepare、prompt 明确确认规则。
-            registry.dispatch(tc.function.name, tc.function.arguments, allow_write=True)
+            registry.dispatch(
+                tc.function.name,
+                tc.function.arguments,
+                allow_write=tc.function.name in (allowed_write_tools or set()),
+            )
         )
         try:
             while not task.done():
@@ -1533,7 +1530,9 @@ async def run_tool_round(
                 continue
             return
         selector.note_meta_calls(msg)  # 逃生舱：激活模型请求的工具组，供下一轮暴露
-        async for ev in step_tools(registry, msg, messages, sources, seen_urls, state):
+        async for ev in step_tools(
+            registry, msg, messages, sources, seen_urls, state, selector.allowed_write_tools
+        ):
             yield ev
 
 

@@ -6,9 +6,7 @@ services:
       - ./backend/.env
     environment:
       # API 进程不跑调度器（避免多进程重复推送）；调度交给 scheduler 服务
-      WEEKLY_SCHEDULER_ENABLED: "false"
       SUBSCRIPTION_SCHEDULER_ENABLED: "false"
-      COOKIE_SECURE: "${COOKIE_SECURE:-false}"
     volumes:
       - ./cache:/app/cache
       - ./logs:/app/logs
@@ -23,7 +21,7 @@ services:
       start_period: 20s
     restart: unless-stopped
 
-  # 常驻调度器：周报 + 主动订阅（每日追番/RSS/生日/月报…）。单实例，避免重复推送。
+  # 常驻统一订阅调度器（周报/每日追番/RSS/生日/月报…）。单实例，避免重复推送。
   scheduler:
     build:
       context: ./backend
@@ -31,7 +29,6 @@ services:
     env_file:
       - ./backend/.env
     environment:
-      WEEKLY_SCHEDULER_ENABLED: "true"
       SUBSCRIPTION_SCHEDULER_ENABLED: "true"
     volumes:
       - ./cache:/app/cache
@@ -54,6 +51,9 @@ services:
       - ./cache:/app/cache
       - ./logs:/app/logs
       - ./models:/models
+    depends_on:
+      backend:
+        condition: service_healthy
     profiles: ["discord"]
     restart: unless-stopped
 

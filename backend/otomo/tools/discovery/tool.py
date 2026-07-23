@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
 import httpx
@@ -481,10 +482,8 @@ async def _fetch_birthdays(limit: int) -> list[dict[str, Any]]:
 # 萌娘「Category:M月D日」是生日分类（2026-07-05 实测：成员含游戏角色/声优/画师，
 # 覆盖比 AniList 广）。API 的 categorymembers 被站方禁用（action-notallowed），
 # 走 HTML 分类页；只取成员标题+链接（导航性元数据），不抓正文——ai-train 红线不碰。
-import re as _re
-
 _MOEGIRL_CAT_URL = "https://zh.moegirl.org.cn/Category:{mon}月{day}日"
-_MOEGIRL_MEMBER_RE = _re.compile(r'<a href="/([^"?#]+)" title="([^"]+)">')
+_MOEGIRL_MEMBER_RE = re.compile(r'<a href="/([^"?#]+)" title="([^"]+)">')
 
 
 @acached(ttl=3600.0)

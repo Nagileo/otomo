@@ -15,8 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ...agent.contracts import Citation, Tool, ToolResult
 from ...memory import LongTermMemory
 from ...memory.consolidate import now_iso
-from ...memory.models import InboxItem, MemorySummary, WeeklyChannel, WeeklyDigestSubscription, WeeklyWebhookFormat, memory_summary
-from ...notifications import dispatch_weekly_digest_notifications
+from ...memory.models import InboxItem, MemorySummary, memory_summary
 from ...profile import compute_taste_profile
 from ..bangumi.client import SUBJECT_TYPE, BangumiClient
 from ..calendar.tool import AiringProgressArgs, AiringProgressItem, AiringProgressTool
@@ -105,45 +104,6 @@ class WeeklyDigestResult(BaseModel):
     sections: list[WeeklyDigestSection] = Field(default_factory=list)
     next_actions: list[str] = Field(default_factory=list)
     caveats: list[str] = Field(default_factory=list)
-
-
-class ConfigureWeeklyDigestArgs(BaseModel):
-    username: str | None = Field(None, description="Bangumi 用户名；不传则用当前账号")
-    enabled: bool = True
-    weekday: int = Field(0, ge=0, le=6, description="0=Monday")
-    hour: int = Field(9, ge=0, le=23)
-    timezone: str = "Asia/Shanghai"
-    push_grading: Literal["brief", "normal", "detailed"] = Field("normal", description="推送内容粒度")
-    limit: int = Field(8, ge=3, le=20)
-    include_on_hold: bool = True
-    channels: list[WeeklyChannel] = Field(
-        default_factory=lambda: ["inbox"],
-        description="通知渠道：inbox/webhook/email；webhook/email 需要对应地址和服务端配置",
-    )
-    email: str = Field("", description="email 渠道收件地址")
-    webhook_url: str = Field("", description="webhook 渠道 URL")
-    webhook_format: WeeklyWebhookFormat = Field(
-        "generic",
-        description="webhook 格式：generic/serverchan/telegram/discord/feishu",
-    )
-    web_push_endpoint: str = Field("", description="Web Push endpoint；HTTPS 部署后由浏览器订阅写入")
-    web_push_p256dh: str = Field("", description="Web Push p256dh key")
-    web_push_auth: str = Field("", description="Web Push auth secret")
-
-
-class WeeklyDigestMemoryResult(BaseModel):
-    username: str
-    subscription: WeeklyDigestSubscription
-    memory: MemorySummary
-    message: str = ""
-
-
-class GenerateWeeklyDigestNowArgs(BaseModel):
-    username: str | None = Field(None, description="Bangumi 用户名；不传则用当前账号")
-    limit: int = Field(8, ge=3, le=20)
-    include_on_hold: bool = True
-    mark_unread: bool = True
-    dispatch: bool = Field(False, description="是否按当前订阅渠道真实发送，用于测试 webhook/email")
 
 
 class WeeklyDigestInboxArgs(BaseModel):
@@ -608,90 +568,6 @@ class WeeklyDigestTool(Tool):
         )
 
 
-class ConfigureWeeklyDigestTool(Tool):
-    name = "configure_weekly_digest"
-    description = (
-        "配置 Otomo 主动周报订阅：星期几/几点生成、是否包含搁置盘活、候选数量。"
-        "这是本地 Otomo 状态，不会写回 Bangumi。"
-    )
-    args_model = ConfigureWeeklyDigestArgs
-    result_model = WeeklyDigestMemoryResult
-
-    def __init__(self, client: BangumiClient, ltm: LongTermMemory) -> None:
-        self.client = client
-        self.ltm = ltm
-
-    async def run(self, args: ConfigureWeeklyDigestArgs) -> ToolResult[WeeklyDigestMemoryResult]:
-        username = await _resolve_username(self.client, args.username)
-        mem = self.ltm.load_user(username)
-        old = mem.weekly_digest_subscription
-        mem.weekly_digest_subscription = WeeklyDigestSubscription(
-            enabled=args.enabled,
-            weekday=args.weekday,
-            hour=args.hour,
-            timezone=args.timezone,
-            push_grading=args.push_grading or old.push_grading,
-            limit=args.limit,
-            include_on_hold=args.include_on_hold,
-            channels=list(dict.fromkeys(args.channels or ["inbox"])),
-            email=args.email.strip() or old.email,
-            webhook_url=args.webhook_url.strip() or old.webhook_url,
-            webhook_format=args.webhook_format or old.webhook_format,
-            web_push_endpoint=args.web_push_endpoint.strip() or old.web_push_endpoint,
-            web_push_p256dh=args.web_push_p256dh.strip() or old.web_push_p256dh,
-            web_push_auth=args.web_push_auth.strip() or old.web_push_auth,
-            last_delivery=old.last_delivery,
-            last_run_key=old.last_run_key,
-            updated_at=now_iso(),
-        )
-        self.ltm.save_user(mem)
-        message = ("已开启周报订阅。" if args.enabled else "已关闭周报订阅。") + " 每日追番/RSS/生日提醒请在主动订阅中心配置。"
-        return ToolResult(
-            ok=True,
-            data=WeeklyDigestMemoryResult(
-                username=username,
-                subscription=mem.weekly_digest_subscription,
-                memory=memory_summary(mem),
-                message=message,
-            ),
-        )
-
-
-class GenerateWeeklyDigestNowTool(Tool):
-    name = "generate_weekly_digest_now"
-    description = "立即生成一份周报并写入 Otomo inbox，用于测试订阅效果或手动补生成。"
-    args_model = GenerateWeeklyDigestNowArgs
-    result_model = WeeklyDigestInboxResult
-
-    def __init__(self, client: BangumiClient, ltm: LongTermMemory) -> None:
-        self.client = client
-        self.ltm = ltm
-        self.digest = WeeklyDigestTool(client)
-
-    async def run(self, args: GenerateWeeklyDigestNowArgs) -> ToolResult[WeeklyDigestInboxResult]:
-        username = await _resolve_username(self.client, args.username)
-        res = await self.digest.run(
-            WeeklyDigestArgs(username=username, limit=args.limit, include_on_hold=args.include_on_hold)
-        )
-        if not res.ok or res.data is None:
-            return ToolResult(ok=False, error=res.error or "周报生成失败")
-        mem = self.ltm.load_user(username)
-        item = _digest_inbox_item(res.data, unread=args.mark_unread)
-        if args.dispatch:
-            deliveries = await dispatch_weekly_digest_notifications(username, mem.weekly_digest_subscription, item)
-            item.payload["deliveries"] = deliveries
-            mem.weekly_digest_subscription.last_delivery = deliveries[-8:]
-            mem.weekly_digest_subscription.updated_at = now_iso()
-        mem.inbox.append(item)
-        mem.inbox = mem.inbox[-30:]
-        self.ltm.save_user(mem)
-        return ToolResult(
-            ok=True,
-            data=WeeklyDigestInboxResult(username=username, items=mem.inbox[-8:], memory=memory_summary(mem)),
-            sources=res.sources,
-        )
-
-
 class ListWeeklyDigestInboxTool(Tool):
     name = "list_weekly_digest_inbox"
     description = "查看 Otomo 本地 inbox 里的周报历史；用于『看看本周周报/历史周报/未读周报』。"
@@ -721,9 +597,5 @@ class ListWeeklyDigestInboxTool(Tool):
 def build_watchorder_tools(client: BangumiClient, ltm: LongTermMemory | None = None) -> list[Tool]:
     tools: list[Tool] = [WatchOrderTool(client), WatchCopilotTool(client), WeeklyDigestTool(client)]
     if ltm is not None:
-        tools.extend([
-            ConfigureWeeklyDigestTool(client, ltm),
-            GenerateWeeklyDigestNowTool(client, ltm),
-            ListWeeklyDigestInboxTool(client, ltm),
-        ])
+        tools.append(ListWeeklyDigestInboxTool(client, ltm))
     return tools

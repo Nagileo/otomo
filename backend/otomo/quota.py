@@ -118,7 +118,7 @@ class RateLimiter:
 class TokenQuotaStore:
     def __init__(self, path: str | None = None) -> None:
         raw = Path(path or settings.quota_store_path)
-        self.path = raw if raw.is_absolute() else Path(__file__).resolve().parents[2] / raw
+        self.path = raw
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = Lock()
 

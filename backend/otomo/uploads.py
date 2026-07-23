@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 from .config import settings
 from .memory.consolidate import now_iso
 
-_DEFAULT_DIR = Path(__file__).resolve().parents[2] / "cache" / "uploads"
+_DEFAULT_DIR = Path(settings.upload_store_path)
 _DATA_URL_RE = re.compile(r"^data:(image/(?:png|jpeg|jpg|webp));base64,([A-Za-z0-9+/=\r\n]+)$")
 _EXT = {
     "image/png": ".png",
@@ -124,4 +124,3 @@ class ImageUploadStore:
 
 
 upload_store = ImageUploadStore()
-

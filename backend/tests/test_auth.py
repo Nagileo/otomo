@@ -3,9 +3,12 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+from fastapi.testclient import TestClient
+
 from otomo import config
-from otomo.api.app import _request_client
+from otomo.api.app import _request_client, app
 from otomo.auth import AuthStore, BangumiToken, build_authorization_url
+from otomo.share import CreateShareSnapshotRequest
 
 
 def test_auth_store_oauth_state_roundtrip(tmp_path, monkeypatch):
@@ -100,3 +103,79 @@ def test_request_client_without_web_session_keeps_global_token(tmp_path, monkeyp
         assert client._client.headers.get("Authorization") == "Bearer developer-global-token"
     finally:
         asyncio.run(client.aclose())
+
+
+def test_http_session_is_cookie_only_and_not_exposed(tmp_path, monkeypatch):
+    monkeypatch.setattr(config.settings, "auth_store_path", str(tmp_path / "auth.sqlite3"))
+    monkeypatch.setattr(config.settings, "session_store_path", str(tmp_path / "sessions.sqlite3"))
+    monkeypatch.setattr(config.settings, "share_store_path", str(tmp_path / "shares.sqlite3"))
+    monkeypatch.setattr(config.settings, "subscription_store_path", str(tmp_path / "subs.sqlite3"))
+    monkeypatch.setattr(config.settings, "ltm_store_path", str(tmp_path / "ltm.sqlite3"))
+    monkeypatch.setattr(config.settings, "quota_store_path", str(tmp_path / "quota.json"))
+    monkeypatch.setattr(config.settings, "subscription_scheduler_enabled", False)
+
+    with TestClient(app) as client:
+        first_response = client.get("/auth/session")
+        assert first_response.status_code == 200
+        assert "auth_session_id" not in first_response.json()
+        assert "httponly" in first_response.headers["set-cookie"].lower()
+        first_cookie = client.cookies.get(config.settings.session_cookie_name)
+        client.cookies.clear()
+        client.get("/auth/session")
+        second_cookie = client.cookies.get(config.settings.session_cookie_name)
+        assert first_cookie and second_cookie and first_cookie != second_cookie
+
+        # Legacy/body/query identifiers are not an identity input anymore.
+        client.cookies.clear()
+        client.cookies.set(
+            config.settings.session_cookie_name,
+            first_cookie,
+            domain="testserver.local",
+            path="/",
+        )
+        response = client.get(f"/auth/session?auth_session_id={second_cookie}")
+        assert response.status_code == 200
+        assert client.cookies.get(
+            config.settings.session_cookie_name,
+            domain="testserver.local",
+            path="/",
+        ) == first_cookie
+
+
+def test_private_share_requires_owner_cookie(tmp_path, monkeypatch):
+    monkeypatch.setattr(config.settings, "auth_store_path", str(tmp_path / "auth.sqlite3"))
+    monkeypatch.setattr(config.settings, "session_store_path", str(tmp_path / "sessions.sqlite3"))
+    monkeypatch.setattr(config.settings, "share_store_path", str(tmp_path / "shares.sqlite3"))
+    monkeypatch.setattr(config.settings, "subscription_store_path", str(tmp_path / "subs.sqlite3"))
+    monkeypatch.setattr(config.settings, "ltm_store_path", str(tmp_path / "ltm.sqlite3"))
+    monkeypatch.setattr(config.settings, "quota_store_path", str(tmp_path / "quota.json"))
+    monkeypatch.setattr(config.settings, "subscription_scheduler_enabled", False)
+
+    with TestClient(app) as client:
+        client.get("/auth/session")
+        session_id = client.cookies.get(config.settings.session_cookie_name)
+        assert session_id
+        app.state.auth.save_token(
+            BangumiToken(auth_session_id=session_id, access_token="token", username="alice")
+        )
+        private = app.state.share_store.create(
+            CreateShareSnapshotRequest(
+                type="subject_dossier",
+                title="private",
+                visibility="private_preview",
+            ),
+            owner_key="user:alice",
+            created_by="alice",
+        )
+        public = app.state.share_store.create(
+            CreateShareSnapshotRequest(type="subject_dossier", title="public"),
+            owner_key="user:alice",
+            created_by="alice",
+        )
+
+        own = client.get(f"/share/snapshots/{private.id}")
+        assert own.status_code == 200
+        assert "created_by" not in own.json()["snapshot"]
+        client.cookies.clear()
+        assert client.get(f"/share/snapshots/{private.id}").status_code == 404
+        assert client.get(f"/share/snapshots/{public.id}").status_code == 200

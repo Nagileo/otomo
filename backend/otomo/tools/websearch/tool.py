@@ -9,7 +9,7 @@ from __future__ import annotations
 import ipaddress
 import re
 from html.parser import HTMLParser
-from typing import Any, Literal
+from typing import Literal
 from urllib.parse import urlparse
 
 import httpx

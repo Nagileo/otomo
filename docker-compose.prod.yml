@@ -2,7 +2,7 @@
 # 用法(和基础 compose 叠加):
 #   docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile discord pull
 #   docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile discord up -d
-# 或直接跑 ./deploy.sh。
+# 或直接跑 bash deploy.sh。
 services:
   backend:
     image: ghcr.io/nagileo/otomo-backend:latest

@@ -7,7 +7,6 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 import json
-import logging
 import uuid
 from typing import Any, AsyncIterator, Literal
 from urllib.parse import urlencode
@@ -24,7 +23,8 @@ from ..auth import AuthStore, BangumiToken, build_authorization_url, exchange_oa
 from ..config import settings
 from ..memory import LongTermMemory
 from ..memory.consolidate import now_iso
-from ..memory.models import VisualFeedbackItem, VisualFeedbackSignal, WeeklyChannel, WeeklyDigestSubscription, WeeklyWebhookFormat, memory_summary
+from ..memory.models import VisualFeedbackItem, VisualFeedbackSignal, memory_summary
+from ..notifications import validate_webhook_url
 from ..obs import append_visual_feedback, traced_stream
 from ..factory import build_registry
 from ..quota import (
@@ -36,6 +36,7 @@ from ..quota import (
     estimate_tokens,
 )
 from ..session_store import SessionStore
+from ..security_context import tenant_scope
 from ..share import CreateShareSnapshotRequest, ShareSnapshot, ShareSnapshotStore
 from ..subscriptions import (
     CreateSubscriptionRuleRequest,
@@ -45,12 +46,10 @@ from ..subscriptions import (
 )
 from ..uploads import upload_store
 from .. import trajectory
-from ..weekly import WeeklyDigestService
 from ..agent.plan_execute import PlanExecuteRunner
 from ..agent.react import ReActRunner
 from ..tools.bangumi.client import SUBJECT_TYPE, BangumiClient
 from ..tools.moegirl.client import MoegirlClient
-from ..tools.watchorder.tool import GenerateWeeklyDigestNowArgs, GenerateWeeklyDigestNowTool
 
 
 @asynccontextmanager
@@ -62,15 +61,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.session_store = SessionStore()
     app.state.share_store = ShareSnapshotStore()
     app.state.subscription_store = SubscriptionStore()
-    app.state.weekly_service = WeeklyDigestService(app.state.ltm, app.state.auth)
     app.state.subscription_service = SubscriptionService(
         app.state.subscription_store,
         app.state.ltm,
         app.state.auth,
-    )
-    app.state.weekly_task = (
-        asyncio.create_task(app.state.weekly_service.run_forever())
-        if settings.weekly_scheduler_enabled else None
     )
     app.state.subscription_task = (
         asyncio.create_task(app.state.subscription_service.run_forever())
@@ -79,6 +73,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.rate_limiter = RateLimiter()
     app.state.quota_store = TokenQuotaStore()
     app.state.sessions: dict[str, AgentState] = {}  # 短期记忆：session_id -> 会话状态
+    app.state.session_locks: dict[str, asyncio.Lock] = {}
 
     async def _session_cleanup_loop() -> None:
         while True:
@@ -101,13 +96,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await app.state.session_cleanup_task
         except asyncio.CancelledError:
             pass
-        if app.state.weekly_task is not None:
-            await app.state.weekly_service.stop()
-            app.state.weekly_task.cancel()
-            try:
-                await app.state.weekly_task
-            except asyncio.CancelledError:
-                pass
         if app.state.subscription_task is not None:
             await app.state.subscription_service.stop()
             app.state.subscription_task.cancel()
@@ -153,7 +141,6 @@ class ChatRequest(BaseModel):
     spoiler_mode: Literal["none", "mild", "full"] | None = None
     progress_episode: int | None = None
     attachments: list[dict[str, Any]] = Field(default_factory=list)
-    auth_session_id: str | None = None
 
 
 class UploadImageRequest(BaseModel):
@@ -163,15 +150,11 @@ class UploadImageRequest(BaseModel):
 
 class ActionRequest(BaseModel):
     action_id: str
-    username: str | None = None
     reason: str = ""
-    auth_session_id: str | None = None
 
 
 class UndoActionRequest(BaseModel):
     action_id: str | None = None
-    username: str | None = None
-    auth_session_id: str | None = None
 
 
 class PrepareWriteRequest(BaseModel):
@@ -179,7 +162,6 @@ class PrepareWriteRequest(BaseModel):
     subject_name: str = ""
     collection_type: int = Field(1, ge=1, le=5)
     reason: str = "前端卡片一键写回"
-    auth_session_id: str | None = None
 
 
 class PrepareDownloaderPushRequest(BaseModel):
@@ -192,7 +174,6 @@ class PrepareDownloaderPushRequest(BaseModel):
     save_path: str = ""
     paused: bool = False
     reason: str = "从 release 面板准备推送到下载器"
-    auth_session_id: str | None = None
 
 
 class VisualFeedbackRequest(BaseModel):
@@ -207,42 +188,16 @@ class VisualFeedbackRequest(BaseModel):
     corrected_subject_id: int | None = None
     corrected_subject_name: str = ""
     note: str = ""
-    auth_session_id: str | None = None
 
 
 class VisualFeedbackSearchRequest(BaseModel):
     keyword: str
     subject_type: Literal["anime", "book", "music", "game", "real"] = "anime"
     limit: int = Field(8, ge=1, le=12)
-    auth_session_id: str | None = None
 
 
 class RenameSessionRequest(BaseModel):
     title: str
-    auth_session_id: str | None = None
-
-
-class NotificationSubscriptionUpdate(BaseModel):
-    enabled: bool | None = None
-    weekday: int | None = Field(None, ge=0, le=6)
-    hour: int | None = Field(None, ge=0, le=23)
-    timezone: str | None = None
-    push_grading: Literal["brief", "normal", "detailed"] | None = None
-    limit: int | None = Field(None, ge=3, le=20)
-    include_on_hold: bool | None = None
-    channels: list[WeeklyChannel] | None = None
-    email: str | None = None
-    webhook_url: str | None = None
-    webhook_format: WeeklyWebhookFormat | None = None
-    web_push_endpoint: str | None = None
-    web_push_p256dh: str | None = None
-    web_push_auth: str | None = None
-
-
-class NotificationTestRequest(BaseModel):
-    auth_session_id: str | None = None
-    kind: Literal["weekly"] = "weekly"
-    dispatch: bool = True
 
 
 def _set_auth_cookies(response: Response, session) -> None:
@@ -272,12 +227,12 @@ def _clear_auth_cookies(response: Response) -> None:
     response.delete_cookie(settings.csrf_cookie_name, path="/")
 
 
-def _auth_session_id(request: Request, explicit: str | None = None) -> str:
-    return explicit or request.cookies.get(settings.session_cookie_name, "") or ""
+def _auth_session_id(request: Request) -> str:
+    return request.cookies.get(settings.session_cookie_name, "") or ""
 
 
-def _ensure_auth_session(request: Request, response: Response, explicit: str | None = None):
-    session = app.state.auth.get_or_create_session(_auth_session_id(request, explicit) or None)
+def _ensure_auth_session(request: Request, response: Response):
+    session = app.state.auth.get_or_create_session(_auth_session_id(request) or None)
     _set_auth_cookies(response, session)
     return session
 
@@ -344,6 +299,19 @@ def _check_share_limits(request: Request, username: str) -> None:
     limiter.cleanup()
 
 
+def _check_subscription_limits(request: Request, username: str, *, test: bool = False) -> None:
+    suffix = "test" if test else "mutation"
+    limit = (
+        settings.rate_limit_subscription_tests_per_hour
+        if test else settings.rate_limit_subscription_mutations_per_hour
+    )
+    app.state.rate_limiter.check(
+        f"subscription:{suffix}:{username}:{client_ip(request)}",
+        limit=limit,
+        window_seconds=3600,
+    )
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -353,26 +321,15 @@ async def health() -> dict[str, str]:
 async def auth_session(
     request: Request,
     response: Response,
-    auth_session_id: str | None = None,
 ) -> dict[str, Any]:
-    session = _ensure_auth_session(request, response, auth_session_id)
+    session = _ensure_auth_session(request, response)
+    await token_for_session(app.state.auth, session.auth_session_id)
     payload = app.state.auth.identity(session.auth_session_id).model_dump(mode="json")
+    payload.pop("auth_session_id", None)
     payload["oauth_configured"] = bool(settings.bangumi_oauth_client_id and settings.bangumi_oauth_client_secret)
     payload["dev_token_available"] = bool(settings.bangumi_token)
     payload["csrf_token"] = session.csrf_token
     return payload
-
-
-@app.post("/weekly/run-due")
-async def weekly_run_due(request: Request, response: Response) -> dict[str, Any]:
-    session = _ensure_auth_session(request, response)
-    _require_csrf(request, session.auth_session_id)
-    count = await app.state.weekly_service.run_due_once()
-    return {"ok": True, "generated": count}
-
-
-def _subscription_public(sub: WeeklyDigestSubscription) -> dict[str, Any]:
-    return sub.model_dump(mode="json")
 
 
 def _share_url(snapshot: ShareSnapshot) -> str:
@@ -384,84 +341,8 @@ def _share_public(snapshot: ShareSnapshot, *, include_owner: bool = False) -> di
     payload["url"] = _share_url(snapshot)
     if not include_owner:
         payload.pop("owner_key", None)
+        payload.pop("created_by", None)
     return payload
-
-
-@app.get("/notifications/subscription")
-async def get_notification_subscription(request: Request, response: Response) -> dict[str, Any]:
-    session = _ensure_auth_session(request, response)
-    identity = _authenticated_identity(session.auth_session_id)
-    username = identity.username or str(identity.user_id or "")
-    mem = app.state.ltm.load_user(username)
-    return {
-        "ok": True,
-        "username": username,
-        "subscription": _subscription_public(mem.weekly_digest_subscription),
-        "memory": memory_summary(mem).model_dump(mode="json"),
-        "notes": [
-            "本地运行时只有 backend 常驻才会推送；部署到服务器后才适合 24/7 主动提醒。",
-            "Web Push 需要 HTTPS、service worker 和浏览器订阅；当前 API 只保存订阅字段。",
-        ],
-    }
-
-
-@app.put("/notifications/subscription")
-async def update_notification_subscription(
-    req: NotificationSubscriptionUpdate,
-    request: Request,
-    response: Response,
-) -> dict[str, Any]:
-    session = _ensure_auth_session(request, response)
-    _require_csrf(request, session.auth_session_id)
-    identity = _authenticated_identity(session.auth_session_id)
-    username = identity.username or str(identity.user_id or "")
-    mem = app.state.ltm.load_user(username)
-    sub = mem.weekly_digest_subscription.model_copy(deep=True)
-    updates = req.model_dump(exclude_unset=True)
-    if "channels" in updates:
-        updates["channels"] = list(dict.fromkeys(updates.get("channels") or ["inbox"]))
-    for key, value in updates.items():
-        if isinstance(value, str):
-            value = value.strip()
-        setattr(sub, key, value)
-    sub.updated_at = now_iso()
-    mem.weekly_digest_subscription = sub
-    app.state.ltm.save_user(mem)
-    return {
-        "ok": True,
-        "username": username,
-        "subscription": _subscription_public(sub),
-        "memory": memory_summary(mem).model_dump(mode="json"),
-    }
-
-
-@app.post("/notifications/test")
-async def test_notification_subscription(
-    req: NotificationTestRequest,
-    request: Request,
-    response: Response,
-) -> dict[str, Any]:
-    session = _ensure_auth_session(request, response, req.auth_session_id)
-    _require_csrf(request, session.auth_session_id)
-    identity = _authenticated_identity(session.auth_session_id)
-    username = identity.username or str(identity.user_id or "")
-    client = await _request_client(app, session.auth_session_id)
-    try:
-        tool = GenerateWeeklyDigestNowTool(client, app.state.ltm)
-        res = await tool.run(GenerateWeeklyDigestNowArgs(username=username, dispatch=req.dispatch))
-    finally:
-        if hasattr(client, "aclose"):
-            await client.aclose()
-    if not res.ok:
-        raise HTTPException(status_code=500, detail=res.error or "测试推送失败")
-    mem = app.state.ltm.load_user(username)
-    return {
-        "ok": True,
-        "username": username,
-        "subscription": _subscription_public(mem.weekly_digest_subscription),
-        "inbox": [x.model_dump(mode="json") for x in mem.inbox[-6:]],
-        "memory": memory_summary(mem).model_dump(mode="json"),
-    }
 
 
 @app.post("/share/snapshots")
@@ -481,10 +362,17 @@ async def create_share_snapshot(
 
 
 @app.get("/share/snapshots/{share_id}")
-async def get_share_snapshot(share_id: str) -> dict[str, Any]:
+async def get_share_snapshot(share_id: str, request: Request) -> dict[str, Any]:
     snapshot = app.state.share_store.get(share_id)
     if not snapshot:
         raise HTTPException(status_code=404, detail="分享页不存在、已过期或已撤销")
+    if snapshot.visibility == "private_preview":
+        auth_session_id = _auth_session_id(request)
+        identity = app.state.auth.identity(auth_session_id) if auth_session_id else None
+        owner = f"user:{identity.username}" if identity and identity.authenticated else ""
+        if not owner or owner != snapshot.owner_key:
+            # Do not disclose whether a private snapshot exists.
+            raise HTTPException(status_code=404, detail="分享页不存在、已过期或已撤销")
     return {"ok": True, "snapshot": _share_public(snapshot)}
 
 
@@ -542,6 +430,12 @@ async def create_subscription_rule(
     session = _ensure_auth_session(request, response)
     _require_csrf(request, session.auth_session_id)
     owner, username = _subscription_owner(session.auth_session_id)
+    _check_subscription_limits(request, username)
+    if req.webhook_url:
+        try:
+            await validate_webhook_url(req.webhook_url, req.webhook_format)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
     rule = app.state.subscription_store.create(req, owner_key=owner, username=username)
     return {"ok": True, "rule": rule.model_dump(mode="json", exclude={"owner_key"})}
 
@@ -555,7 +449,19 @@ async def update_subscription_rule(
 ) -> dict[str, Any]:
     session = _ensure_auth_session(request, response)
     _require_csrf(request, session.auth_session_id)
-    owner, _ = _subscription_owner(session.auth_session_id)
+    owner, username = _subscription_owner(session.auth_session_id)
+    _check_subscription_limits(request, username)
+    existing = app.state.subscription_store.get(rule_id, owner)
+    if not existing:
+        raise HTTPException(status_code=404, detail="订阅不存在或无权修改")
+    if req.webhook_url is not None or req.webhook_format is not None:
+        final_url = req.webhook_url if req.webhook_url is not None else existing.webhook_url
+        fmt = req.webhook_format or existing.webhook_format
+        if final_url:
+            try:
+                await validate_webhook_url(final_url, fmt)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e)) from e
     rule = app.state.subscription_store.update(rule_id, owner, req)
     if not rule:
         raise HTTPException(status_code=404, detail="订阅不存在或无权修改")
@@ -566,7 +472,8 @@ async def update_subscription_rule(
 async def delete_subscription_rule(rule_id: str, request: Request, response: Response) -> dict[str, Any]:
     session = _ensure_auth_session(request, response)
     _require_csrf(request, session.auth_session_id)
-    owner, _ = _subscription_owner(session.auth_session_id)
+    owner, username = _subscription_owner(session.auth_session_id)
+    _check_subscription_limits(request, username)
     ok = app.state.subscription_store.delete(rule_id, owner)
     if not ok:
         raise HTTPException(status_code=404, detail="订阅不存在或无权删除")
@@ -577,7 +484,8 @@ async def delete_subscription_rule(rule_id: str, request: Request, response: Res
 async def test_subscription_rule(rule_id: str, request: Request, response: Response) -> dict[str, Any]:
     session = _ensure_auth_session(request, response)
     _require_csrf(request, session.auth_session_id)
-    owner, _ = _subscription_owner(session.auth_session_id)
+    owner, username = _subscription_owner(session.auth_session_id)
+    _check_subscription_limits(request, username, test=True)
     rule = app.state.subscription_store.get(rule_id, owner)
     if not rule:
         raise HTTPException(status_code=404, detail="订阅不存在或无权测试")
@@ -602,9 +510,8 @@ async def list_subscription_deliveries(
 async def bangumi_login(
     request: Request,
     response: Response,
-    auth_session_id: str | None = None,
 ) -> dict[str, Any]:
-    session = _ensure_auth_session(request, response, auth_session_id)
+    session = _ensure_auth_session(request, response)
     try:
         url = build_authorization_url(app.state.auth, session.auth_session_id)
     except RuntimeError as e:
@@ -621,7 +528,7 @@ def _is_local_request(request: Request) -> bool:
 async def dev_token_login(req: dict[str, str], request: Request, response: Response) -> dict[str, Any]:
     if not _is_local_request(request):
         raise HTTPException(status_code=403, detail="本地 Token 登录仅允许 localhost 开发调试")
-    session = _ensure_auth_session(request, response, req.get("auth_session_id") or None)
+    session = _ensure_auth_session(request, response)
     _require_csrf(request, session.auth_session_id)
     if not settings.bangumi_token:
         raise HTTPException(status_code=400, detail="未配置 BANGUMI_TOKEN")
@@ -641,23 +548,21 @@ async def dev_token_login(req: dict[str, str], request: Request, response: Respo
         # 登录前的匿名会话迁给账号归属，跨设备/换浏览器仍可见
         app.state.session_store.migrate_owner(session.auth_session_id, f"user:{token.username}")
     identity = app.state.auth.identity(session.auth_session_id).model_dump(mode="json")
+    identity.pop("auth_session_id", None)
     identity["csrf_token"] = session.csrf_token
     return {"ok": True, "identity": identity}
 
 
 @app.get("/auth/bangumi/start")
-async def bangumi_start(request: Request, response: Response, discord_link: str = "", discord_code: str = "") -> RedirectResponse:
+async def bangumi_start(request: Request, response: Response, discord_code: str = "") -> RedirectResponse:
     """浏览器可直接打开的登录入口:302 跳 Bangumi 授权。Discord 绑定用——
-    bot 的 /link 给出带 discord_link(Fernet 签名的 discord_user_id)的链接,
-    授权成功后回调里自动绑定。"""
+    bot 的 /绑定 给出一次性短码，授权成功后回调里自动绑定。"""
     session = _ensure_auth_session(request, response)
     discord_user_id = ""
-    if discord_code:  # 新:短码方案
-        discord_user_id = app.state.auth.resolve_discord_link_code(discord_code) or ""
-    elif discord_link:  # 旧:加密串(向后兼容)
-        discord_user_id = app.state.auth.decode_discord_link(discord_link) or ""
-    logging.getLogger("otomo.auth").warning(
-        "bangumi_start: code=%s decoded=%r", discord_code or "-", discord_user_id)
+    if discord_code:
+        discord_user_id = app.state.auth.consume_discord_link_code(discord_code) or ""
+        if not discord_user_id:
+            raise HTTPException(status_code=400, detail="Discord 绑定链接无效或已过期，请回 Discord 重新生成")
     try:
         url = build_authorization_url(app.state.auth, session.auth_session_id, discord_user_id or "")
     except RuntimeError as e:
@@ -692,11 +597,11 @@ async def bangumi_callback(code: str = "", state: str = "") -> RedirectResponse:
 
 @app.post("/auth/logout")
 async def bangumi_logout(req: dict[str, str], request: Request, response: Response) -> dict[str, Any]:
-    session = _ensure_auth_session(request, response, req.get("auth_session_id") or None)
+    session = _ensure_auth_session(request, response)
     _require_csrf(request, session.auth_session_id)
     app.state.auth.delete_token(session.auth_session_id)
     _clear_auth_cookies(response)
-    return {"ok": True, "auth_session_id": session.auth_session_id}
+    return {"ok": True}
 
 
 @app.post("/uploads/image")
@@ -753,7 +658,7 @@ async def rename_session(
     request: Request,
     response: Response,
 ) -> dict[str, Any]:
-    session = _ensure_auth_session(request, response, req.auth_session_id)
+    session = _ensure_auth_session(request, response)
     _require_csrf(request, session.auth_session_id)
     try:
         payload = app.state.session_store.rename_session(session_id, _session_owner(session.auth_session_id), req.title)
@@ -825,9 +730,11 @@ async def _dispatch_action(
     client = await _request_client(app, auth_session_id)
     try:
         registry = build_registry(client, app.state.moegirl, app.state.ltm)
-        result = await registry.dispatch(
-            tool_name, json.dumps(payload, ensure_ascii=False), allow_write=allow_write
-        )
+        identity = app.state.auth.identity(auth_session_id or "")
+        with tenant_scope(identity.username, authenticated=identity.authenticated):
+            result = await registry.dispatch(
+                tool_name, json.dumps(payload, ensure_ascii=False), allow_write=allow_write
+            )
         return result.model_dump(mode="json", exclude_none=True)
     finally:
         await client.aclose()
@@ -835,12 +742,12 @@ async def _dispatch_action(
 
 @app.post("/actions/confirm")
 async def confirm_action(req: ActionRequest, request: Request, response: Response) -> dict[str, Any]:
-    session = _ensure_auth_session(request, response, req.auth_session_id)
+    session = _ensure_auth_session(request, response)
     _require_csrf(request, session.auth_session_id)
     return await _dispatch_action(
         app,
         "execute_bangumi_write_action",
-        {"username": req.username, "action_id": req.action_id, "confirmed": True},
+        {"action_id": req.action_id, "confirmed": True},
         allow_write=True,
         auth_session_id=session.auth_session_id,
     )
@@ -848,12 +755,12 @@ async def confirm_action(req: ActionRequest, request: Request, response: Respons
 
 @app.post("/actions/cancel")
 async def cancel_action(req: ActionRequest, request: Request, response: Response) -> dict[str, Any]:
-    session = _ensure_auth_session(request, response, req.auth_session_id)
+    session = _ensure_auth_session(request, response)
     _require_csrf(request, session.auth_session_id)
     return await _dispatch_action(
         app,
         "cancel_bangumi_write_action",
-        {"username": req.username, "action_id": req.action_id, "reason": req.reason},
+        {"action_id": req.action_id, "reason": req.reason},
         allow_write=False,
         auth_session_id=session.auth_session_id,
     )
@@ -861,12 +768,12 @@ async def cancel_action(req: ActionRequest, request: Request, response: Response
 
 @app.post("/actions/undo")
 async def undo_action(req: UndoActionRequest, request: Request, response: Response) -> dict[str, Any]:
-    session = _ensure_auth_session(request, response, req.auth_session_id)
+    session = _ensure_auth_session(request, response)
     _require_csrf(request, session.auth_session_id)
     return await _dispatch_action(
         app,
         "undo_bangumi_write_action",
-        {"username": req.username, "action_id": req.action_id, "confirmed": True},
+        {"action_id": req.action_id, "confirmed": True},
         allow_write=True,
         auth_session_id=session.auth_session_id,
     )
@@ -874,7 +781,7 @@ async def undo_action(req: UndoActionRequest, request: Request, response: Respon
 
 @app.post("/actions/prepare-write")
 async def prepare_write_action(req: PrepareWriteRequest, request: Request, response: Response) -> dict[str, Any]:
-    session = _ensure_auth_session(request, response, req.auth_session_id)
+    session = _ensure_auth_session(request, response)
     _require_csrf(request, session.auth_session_id)
     _authenticated_identity(session.auth_session_id)
     return await _dispatch_action(
@@ -894,7 +801,7 @@ async def prepare_write_action(req: PrepareWriteRequest, request: Request, respo
 
 @app.post("/actions/prepare-downloader-push")
 async def prepare_downloader_push(req: PrepareDownloaderPushRequest, request: Request, response: Response) -> dict[str, Any]:
-    session = _ensure_auth_session(request, response, req.auth_session_id)
+    session = _ensure_auth_session(request, response)
     _require_csrf(request, session.auth_session_id)
     _authenticated_identity(session.auth_session_id)
     return await _dispatch_action(
@@ -919,15 +826,14 @@ async def prepare_downloader_push(req: PrepareDownloaderPushRequest, request: Re
 class AnswerFeedbackRequest(BaseModel):
     session_id: str
     turn_id: str
-    rating: Literal["up", "down"]
+    rating: Literal["up", "down", "clear"]
     note: str = ""
-    auth_session_id: str | None = None
 
 
 @app.post("/feedback/answer")
 async def answer_feedback(req: AnswerFeedbackRequest, request: Request, response: Response) -> dict[str, Any]:
-    """答案级 👍👎（RL 轨迹飞轮的反馈信号，按 turn_id 关联轨迹 JSONL）。匿名也可反馈。"""
-    session = _ensure_auth_session(request, response, req.auth_session_id)
+    """答案级反馈；clear 是撤销事件，导出时同 turn 只取最后一条。"""
+    session = _ensure_auth_session(request, response)
     _require_csrf(request, session.auth_session_id)
     record = trajectory.record_feedback(
         turn_id=req.turn_id[:64],
@@ -941,7 +847,7 @@ async def answer_feedback(req: AnswerFeedbackRequest, request: Request, response
 
 @app.post("/feedback/visual")
 async def visual_feedback(req: VisualFeedbackRequest, request: Request, response: Response) -> dict[str, Any]:
-    session = _ensure_auth_session(request, response, req.auth_session_id)
+    session = _ensure_auth_session(request, response)
     _require_csrf(request, session.auth_session_id)
     client = await _request_client(app, session.auth_session_id)
     try:
@@ -967,13 +873,13 @@ async def visual_feedback(req: VisualFeedbackRequest, request: Request, response
             note=req.note[:500],
             ts=now_iso(),
         )
-        mem = app.state.ltm.load_user(username)
-        mem.visual_feedback.append(item)
-        mem.visual_feedback = mem.visual_feedback[-200:]
-        app.state.ltm.save_user(mem)
+        with tenant_scope(username, authenticated=True):
+            mem = app.state.ltm.load_user(username)
+            mem.visual_feedback.append(item)
+            mem.visual_feedback = mem.visual_feedback[-200:]
+            app.state.ltm.save_user(mem)
         append_visual_feedback({
             "username": username,
-            "auth_session_id": session.auth_session_id,
             "feedback": item.model_dump(mode="json", exclude_none=True),
         })
         return {
@@ -991,7 +897,7 @@ async def visual_feedback_search_subjects(
     request: Request,
     response: Response,
 ) -> dict[str, Any]:
-    session = _ensure_auth_session(request, response, req.auth_session_id)
+    session = _ensure_auth_session(request, response)
     _require_csrf(request, session.auth_session_id)
     keyword = req.keyword.strip()
     if not keyword:
@@ -1035,13 +941,14 @@ async def _attach_memory_state(app: FastAPI, state: AgentState | None, client: B
 
 @app.post("/chat")
 async def chat(req: ChatRequest, request: Request):
-    session = app.state.auth.get_or_create_session(_auth_session_id(request, req.auth_session_id) or None)
+    session = app.state.auth.get_or_create_session(_auth_session_id(request) or None)
     _require_csrf(request, session.auth_session_id)
     _check_chat_limits(request, session.auth_session_id)
     quota_key = _quota_key(session.auth_session_id, request)
     app.state.quota_store.check(quota_key)
     begin_usage_ledger()  # 本请求所有 LLM/VLM 调用的真实 token 记到这本账
-    authenticated = app.state.auth.identity(session.auth_session_id).authenticated
+    identity = app.state.auth.identity(session.auth_session_id)
+    authenticated = identity.authenticated
     if req.attachments and not authenticated:
         raise HTTPException(status_code=401, detail="多模态上传需要先绑定 Bangumi 账号")
     client = await _request_client(app, session.auth_session_id)
@@ -1049,46 +956,20 @@ async def chat(req: ChatRequest, request: Request):
     runner = _runner_from_registry(req.runner, registry)
     chat_session_id = req.session_id or uuid.uuid4().hex
     session_owner = _session_owner(session.auth_session_id)
-    # 短期记忆：有 session_id 就复用既有状态，否则新建
-    state = _session_state(app, chat_session_id, session_owner)
+    try:
+        app.state.session_store.ensure_session(chat_session_id, session_owner)
+    except PermissionError as e:
+        await client.aclose()
+        raise HTTPException(status_code=403, detail="无权访问该会话") from e
     if not authenticated and settings.anonymous_session_turn_limit > 0:
-        try:
-            message_count = app.state.session_store.message_count(chat_session_id, session_owner)
-        except FileNotFoundError:
-            message_count = 0
+        message_count = app.state.session_store.message_count(chat_session_id, session_owner)
         if message_count >= settings.anonymous_session_turn_limit * 2:
             await client.aclose()
             raise HTTPException(
                 status_code=403,
                 detail=f"未登录会话最多 {settings.anonymous_session_turn_limit} 轮；请绑定 Bangumi 账号后继续",
             )
-    if state is not None and (req.spoiler_mode or req.progress_episode is not None):
-        current = dict(state.short_term.get("spoiler") or {})
-        if req.spoiler_mode:
-            current["mode"] = req.spoiler_mode
-        if req.progress_episode is not None:
-            current["progress_episode"] = req.progress_episode
-        state.short_term["spoiler"] = current
-    turn_has_attachments = state is not None and bool(req.attachments)
-    if turn_has_attachments:
-        cleaned: list[dict[str, Any]] = []
-        for item in req.attachments[:4]:
-            if not isinstance(item, dict):
-                continue
-            uri = str(item.get("uri") or item.get("image_url") or "").strip()
-            if not uri.startswith("upload://"):
-                continue
-            cleaned.append(
-                {
-                    "uri": uri,
-                    "filename": str(item.get("filename") or "")[:160],
-                    "mime_type": str(item.get("mime_type") or "image"),
-                    "size": int(item.get("size") or 0),
-                }
-            )
-        if cleaned:
-            state.short_term["attachments"] = cleaned
-    await _attach_memory_state(app, state, client)
+    turn_has_attachments = bool(req.attachments)
     stored_attachments = [
         {
             **item,
@@ -1098,20 +979,13 @@ async def chat(req: ChatRequest, request: Request):
         for item in (req.attachments or [])[:4]
         if isinstance(item, dict)
     ]
-    app.state.session_store.append_message(
-        chat_session_id,
-        session_owner,
-        role="user",
-        content=req.message,
-        attachments=stored_attachments,
-    )
-
     turn_id = uuid.uuid4().hex  # 轨迹/反馈关联键，meta 事件发给前端
+    lock_key = f"{session_owner}:{chat_session_id}"
+    lock = app.state.session_locks.setdefault(lock_key, asyncio.Lock())
 
     async def event_gen() -> AsyncIterator[dict]:
         meta = {
             "session_id": chat_session_id,
-            "auth_session_id": session.auth_session_id,
             "runner": req.runner,
             "turn_id": turn_id,
         }
@@ -1119,50 +993,92 @@ async def chat(req: ChatRequest, request: Request):
         evidence: dict[str, list[dict[str, Any]]] = {}
         sources: list[dict[str, Any]] = []
         tools_called: list[str] = []
-        yield {"event": "meta", "data": json.dumps({"type": "meta", **meta}, ensure_ascii=False)}
+        state: AgentState | None = None
         try:
-            async for ev in traced_stream(runner, req.message, state, meta):
-                if ev.type == "tool_call":
-                    tools_called.append(ev.name)
-                if ev.type == "observation" and getattr(ev, "data", None):
-                    evidence.setdefault(ev.name, []).append(ev.data)
-                elif ev.type == "claim_check":
-                    evidence.setdefault("claim_check", []).append(ev.model_dump(mode="json", exclude_none=True))
-                elif ev.type == "final":
-                    final_answer = ev.answer
-                    sources = [s.model_dump(mode="json", exclude_none=True) for s in ev.sources]
-                yield {"event": ev.type, "data": ev.model_dump_json()}
-        finally:
-            if turn_has_attachments and state is not None:
-                state.short_term.pop("attachments", None)
-            if final_answer:
+            async with lock:
+                # The complete read-modify-stream-save transaction is under
+                # one per-conversation lock. Loading state before acquiring it
+                # loses turns when two browser requests overlap.
+                state = _session_state(app, chat_session_id, session_owner)
+                if req.spoiler_mode or req.progress_episode is not None:
+                    current = dict(state.short_term.get("spoiler") or {})
+                    if req.spoiler_mode:
+                        current["mode"] = req.spoiler_mode
+                    if req.progress_episode is not None:
+                        current["progress_episode"] = req.progress_episode
+                    state.short_term["spoiler"] = current
+                if turn_has_attachments:
+                    cleaned: list[dict[str, Any]] = []
+                    for item in (req.attachments or [])[:4]:
+                        if not isinstance(item, dict):
+                            continue
+                        uri = str(item.get("uri") or item.get("image_url") or "").strip()
+                        if not uri.startswith("upload://"):
+                            continue
+                        cleaned.append(
+                            {
+                                "uri": uri,
+                                "filename": str(item.get("filename") or "")[:160],
+                                "mime_type": str(item.get("mime_type") or "image"),
+                                "size": int(item.get("size") or 0),
+                            }
+                        )
+                    if cleaned:
+                        state.short_term["attachments"] = cleaned
+                with tenant_scope(identity.username, authenticated=authenticated):
+                    await _attach_memory_state(app, state, client)
                 app.state.session_store.append_message(
                     chat_session_id,
                     session_owner,
-                    role="assistant",
-                    content=final_answer,
-                    evidence=evidence,
-                    sources=sources,
+                    role="user",
+                    content=req.message,
+                    attachments=stored_attachments,
                 )
-            tokens = 0
-            try:
-                # 真实 usage 优先（llm.py 代理逐次累加）；provider 不回报时退回字符估算
-                tokens = collected_usage() or estimate_tokens(req.message, final_answer)
-                app.state.quota_store.record(quota_key, tokens)
-            except Exception:  # noqa: BLE001 - quota 落盘失败不能吞掉已完成回答
-                pass
-            trajectory.log_turn(
-                turn_id=turn_id,
-                session_id=chat_session_id,
-                owner=session_owner,
-                runner=req.runner or "adaptive",
-                user_message=req.message,
-                final_answer=final_answer,
-                messages=getattr(state, "messages", None),
-                tools_called=tools_called,
-                usage_tokens=tokens,
-            )
-            app.state.session_store.save_state(chat_session_id, session_owner, state)
+                yield {"event": "meta", "data": json.dumps({"type": "meta", **meta}, ensure_ascii=False)}
+                try:
+                    with tenant_scope(identity.username, authenticated=authenticated):
+                        async for ev in traced_stream(runner, req.message, state, meta):
+                            if ev.type == "tool_call":
+                                tools_called.append(ev.name)
+                            if ev.type == "observation" and getattr(ev, "data", None):
+                                evidence.setdefault(ev.name, []).append(ev.data)
+                            elif ev.type == "claim_check":
+                                evidence.setdefault("claim_check", []).append(ev.model_dump(mode="json", exclude_none=True))
+                            elif ev.type == "final":
+                                final_answer = ev.answer
+                                sources = [s.model_dump(mode="json", exclude_none=True) for s in ev.sources]
+                            yield {"event": ev.type, "data": ev.model_dump_json()}
+                finally:
+                    if turn_has_attachments:
+                        state.short_term.pop("attachments", None)
+                    if final_answer:
+                        app.state.session_store.append_message(
+                            chat_session_id,
+                            session_owner,
+                            role="assistant",
+                            content=final_answer,
+                            evidence=evidence,
+                            sources=sources,
+                        )
+                    tokens = 0
+                    try:
+                        tokens = collected_usage() or estimate_tokens(req.message, final_answer)
+                        app.state.quota_store.record(quota_key, tokens)
+                    except Exception:  # noqa: BLE001 - quota failure must not hide the answer
+                        pass
+                    trajectory.log_turn(
+                        turn_id=turn_id,
+                        session_id=chat_session_id,
+                        owner=session_owner,
+                        runner=req.runner or "adaptive",
+                        user_message=req.message,
+                        final_answer=final_answer,
+                        messages=state.messages,
+                        tools_called=tools_called,
+                        usage_tokens=tokens,
+                    )
+                    app.state.session_store.save_state(chat_session_id, session_owner, state)
+        finally:
             await client.aclose()
 
     response = EventSourceResponse(event_gen())

@@ -323,7 +323,6 @@ async def main() -> None:
         summary: dict[str, Any] = {}
         for name, rows in scores.items():
             hrs, ndcgs, hrns = ([r[i] for r in rows] for i in range(3))
-            std = statistics.pstdev if len(rows) > 1 else lambda _: 0.0
             line = (_fmt(statistics.mean(hrs), statistics.pstdev(hrs) if len(rows) > 1 else 0.0),
                     _fmt(statistics.mean(ndcgs), statistics.pstdev(ndcgs) if len(rows) > 1 else 0.0),
                     _fmt(statistics.mean(hrns), statistics.pstdev(hrns) if len(rows) > 1 else 0.0))

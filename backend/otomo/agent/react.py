@@ -80,7 +80,15 @@ class ReActRunner(AgentRunner):
                         continue
                     break
                 selector.note_meta_calls(msg)
-                async for ev in C.step_tools(self.registry, msg, state.messages, sources, seen_urls, state):
+                async for ev in C.step_tools(
+                    self.registry,
+                    msg,
+                    state.messages,
+                    sources,
+                    seen_urls,
+                    state,
+                    selector.allowed_write_tools,
+                ):
                     if isinstance(ev, ToolCallEvent):
                         steps += 1
                     yield ev

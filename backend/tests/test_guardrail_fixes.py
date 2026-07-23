@@ -337,7 +337,7 @@ def test_upload_store_ttl_cleanup(tmp_path, monkeypatch):
 
 
 def test_selector_exposes_write_tools_in_memory_plan_group():
-    """口头确认写回：execute/undo 写工具经 memory_plan 组暴露给模型（护栏在工具层 confirmed 参数）。"""
+    """Only an explicit raw user confirmation exposes external write tools."""
     import asyncio as _a
     from otomo.factory import build_registry
     from otomo.tools.bangumi.client import BangumiClient
@@ -352,10 +352,14 @@ def test_selector_exposes_write_tools_in_memory_plan_group():
             names = {s["function"]["name"] for s in sel.schemas()}
             assert "prepare_bangumi_write_action" in names
             assert "execute_bangumi_write_action" in names  # 关键词"在看/确认/写回"命中 memory_plan
-            # 无关查询不暴露写工具
-            sel2 = ToolSelector(reg, "孤独摇滚是谁做的")
+            # 命中写回工具组但没有确认时，只能 prepare，不能 execute。
+            sel2 = ToolSelector(reg, "帮我把这部加入在看")
             names2 = {s["function"]["name"] for s in sel2.schemas()}
+            assert "prepare_bangumi_write_action" in names2
             assert "execute_bangumi_write_action" not in names2
+            sel3 = ToolSelector(reg, "不要执行，我还没确认")
+            names3 = {s["function"]["name"] for s in sel3.schemas()}
+            assert "execute_bangumi_write_action" not in names3
 
     _a.run(scenario())
 
@@ -396,7 +400,9 @@ def test_trajectory_flywheel_log_feedback_export(tmp_path, monkeypatch):
     assert "<email>" in _scrub("a@b.com") and "token=<redacted>" in _scrub("u?token=abc")
 
     # 导出行为：SFT 排除 👎；DPO 对成型
-    import subprocess, sys, os
+    import os
+    import subprocess
+    import sys
     env = {**os.environ, "TRAJECTORY_DIR": str(tmp_path)}
     out = subprocess.run(
         [sys.executable, "-m", "scripts.export_trajectories", "--sft", str(tmp_path / "sft.jsonl"), "--dpo", str(tmp_path / "dpo.jsonl")],
@@ -473,7 +479,7 @@ def test_friends_matrix_shrinkage_ranking(monkeypatch):
     res = _a.run(tool.run(ua.TasteCompareArgs(mode="friends_matrix", friends_limit=5)))
     assert res.ok and res.data and len(res.data.matrix) == 3
     by_name = {e.username: e for e in res.data.matrix}
-    a, b, c = by_name["a"], by_name["b"], by_name["c"]
+    a, b = by_name["a"], by_name["b"]
     assert res.data.matrix[-1].username == "c"  # 反向口味垫底
     assert b.shrunk_score < b.sync_score  # 小样本满分被往中位拉
     assert abs(a.shrunk_score - a.sync_score) <= 2  # 大样本几乎不动
@@ -914,29 +920,23 @@ def test_semantic_recall_index():
     assert all(int(h["id"]) != first_id for h in hits2)
 
 
-def test_discord_link_store_and_signed_token(tmp_path):
-    """Discord 绑定:Fernet 签名令牌往返 + 映射存取 + 反查 + 篡改拒绝。"""
-    import os
-    os.environ["AUTH_ENCRYPTION_KEY"] = "Zk9wQ2h2Y3Jt0123456789ABCDEFabcdefGHIJ12345="  # 固定 Fernet key
+def test_discord_link_store_uses_single_use_short_code(tmp_path):
+    """Discord link codes are server-side, one-time, and mappings are one-to-one."""
     from otomo.auth import AuthStore
 
     store = AuthStore(base_dir=tmp_path)
-    # 签名令牌:bot 编码 → backend 解码
-    tok = store.encode_discord_link("discord_123")
-    assert store.decode_discord_link(tok) == "discord_123"
-    # 过期拒绝
-    assert store.decode_discord_link(tok, ttl=-1) is None
-    # 篡改拒绝
-    assert store.decode_discord_link(tok + "x") is None
-    assert store.decode_discord_link("garbage") is None
-    # 映射存取 + 双向反查
+    code = store.create_discord_link_code("discord_123")
+    assert store.consume_discord_link_code(code) == "discord_123"
+    assert store.consume_discord_link_code(code) is None
     store.set_discord_link("discord_123", "luorily")
     assert store.username_for_discord("discord_123") == "luorily"
     assert store.discord_for_username("luorily") == "discord_123"
     assert store.username_for_discord("discord_999") is None
-    # 解绑
-    store.unlink_discord("discord_123")
+    store.set_discord_link("discord_456", "luorily")
     assert store.username_for_discord("discord_123") is None
+    assert store.discord_for_username("luorily") == "discord_456"
+    store.unlink_discord("discord_456")
+    assert store.username_for_discord("discord_456") is None
 
 
 def test_discord_dm_dispatch(monkeypatch, tmp_path):

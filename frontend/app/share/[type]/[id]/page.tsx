@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { cookies } from "next/headers";
 
 // 分享页是 server component：fetch 在 Node 服务端跑，不能用浏览器相对路径 "/api"。
 // 容器里走 INTERNAL_BACKEND（如 http://backend:8000）直连后端；本地开发退回 localhost。
@@ -17,9 +18,22 @@ function text(value: any, fallback = "未知") {
   return s || fallback;
 }
 
+function safeHref(value: any): string | undefined {
+  const raw = String(value ?? "").trim();
+  if (!raw) return undefined;
+  try {
+    const parsed = new URL(raw);
+    return parsed.protocol === "https:" || parsed.protocol === "http:" ? raw : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function getSnapshot(id: string) {
+  const cookieHeader = cookies().toString();
   const res = await fetch(`${BACKEND}/share/snapshots/${encodeURIComponent(id)}`, {
-    next: { revalidate: 30 },
+    headers: cookieHeader ? { cookie: cookieHeader } : undefined,
+    cache: "no-store",
   });
   if (!res.ok) return null;
   const payload = await res.json().catch(() => ({}));
@@ -201,7 +215,7 @@ function SeasonGuideShare({ data }: { data: AnyRecord }) {
               const hit = list(video.verified_hits)[0] || {};
               const href = hit.url || video.url || video.up_url;
               return (
-                <a href={href} key={`${video.up_name}-${i}`}>
+                <a href={safeHref(href)} key={`${video.up_name}-${i}`}>
                   <b>{text(video.up_name)}</b>
                   <span>{video.verified ? "已命中具体视频" : "仅导航入口"} · {text(video.positioning)}</span>
                   <small>{text(hit.title || video.verification_note || video.match_reason, "")}</small>
@@ -284,20 +298,20 @@ function ShareReleaseSection({ section }: { section: AnyRecord }) {
       <h2>Release / RSS</h2>
       <div className="share-list">
         {groups.slice(0, 10).map((group, i) => (
-          <a href={group.rss_url || group.url || group.page_url || undefined} key={`${group.source}-${group.subgroup}-${i}`}>
+          <a href={safeHref(group.rss_url || group.url || group.page_url)} key={`${group.source}-${group.subgroup}-${i}`}>
             <b>RSS · {text(group.source)} {text(group.subgroup, "")}</b>
             <span>{text(group.quality, "tv")}{group.latest_items ? ` · 最近 ${list(group.latest_items).length} 条` : ""}</span>
             {group.rss_url ? <small>{group.rss_url}</small> : null}
           </a>
         ))}
         {links.slice(0, 8).map((link, i) => (
-          <a href={link.url || undefined} key={`${link.url}-${i}`}>
+          <a href={safeHref(link.url)} key={`${link.url}-${i}`}>
             <b>搜索入口 · {text(link.label || link.source)}</b>
             <span>{text(link.note, "")}</span>
           </a>
         ))}
         {!groups.length && !links.length && fallback.slice(0, 8).map((item, i) => (
-          <a href={item.page_url || item.torrent_url || undefined} key={`${item.title}-${i}`}>
+          <a href={safeHref(item.page_url || item.torrent_url)} key={`${item.title}-${i}`}>
             <b>{text(item.title)}</b>
             <span>{text(item.source, "")}{item.subgroup ? ` · ${item.subgroup}` : ""}</span>
           </a>
@@ -365,10 +379,12 @@ function ShareEpisodeRadarSection({ section }: { section: AnyRecord }) {
 
 function ShareItem({ item }: { item: AnyRecord }) {
   if (typeof item === "string") return <span>{item}</span>;
-  const href = item.id ? `https://bgm.tv/subject/${item.id}` : item.url || item.page_url || item.bangumi_url || item.animethemes_url || "";
+  const href = item.id
+    ? `https://bgm.tv/subject/${item.id}`
+    : safeHref(item.url || item.page_url || item.bangumi_url || item.animethemes_url);
   const title = item.name || item.title || item.song_title || item.consensus || item.relation || item.source || item.status || item.rating || item.tag;
   return (
-    <a href={href || undefined}>
+    <a href={href}>
       <b>{text(title, "条目")}</b>
       <span>
         {item.score ? `score ${item.score}` : ""}
@@ -397,7 +413,7 @@ function ShareSources({ snapshot }: { snapshot: AnyRecord }) {
       {sources.length > 0 && (
         <div className="share-source-list">
           {sources.slice(0, 16).map((source, i) => (
-            <a href={source.url} key={`${source.url}-${i}`}>{text(source.source, "source")} · {text(source.title)}</a>
+            <a href={safeHref(source.url)} key={`${source.url}-${i}`}>{text(source.source, "source")} · {text(source.title)}</a>
           ))}
         </div>
       )}

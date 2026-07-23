@@ -15,14 +15,21 @@ v2:
 """
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import logging
 import re
 
 from .agent.contracts import AgentState, ErrorEvent, FinalEvent, ObservationEvent
-from .auth import AuthStore
+from .auth import AuthStore, refreshed_token_for_username
 from .config import settings
 from .factory import build_runner
 from .memory import LongTermMemory
+from .obs import traced_stream
+from .quota import begin_usage_ledger, collected_usage, estimate_tokens
+from .security_context import tenant_scope
+from .session_store import SessionStore
+from . import trajectory
 from .tools.bangumi.client import BangumiClient
 from .tools.moegirl.client import MoegirlClient
 
@@ -30,7 +37,6 @@ log = logging.getLogger("otomo.discord")
 _PANEL_RE = re.compile(r"\[\[panel:[^\]]*\]\]")
 _DISCORD_LIMIT = 1900
 _MAX_HISTORY = 24
-_MAX_USER_RUNNERS = 32   # 绑定用户各一个带 token 的 runner,LRU 上限防膨胀
 
 
 def _clean(answer: str) -> str:
@@ -164,49 +170,95 @@ def run() -> None:
 
     auth = AuthStore()
     ltm = LongTermMemory()
+    session_store = SessionStore()
     moegirl = MoegirlClient()
-    _sessions: dict[int, AgentState] = {}
+    _locks: dict[str, asyncio.Lock] = {}
     # guest 客户端**绝不**带部署者的 BANGUMI_TOKEN(否则未绑定用户的推荐会意外基于
     # 部署者自己的收藏画像——朋友指出的坑,Web 路径已避免,这里对齐:纯匿名 token="")。
     _guest_client = BangumiClient(token="", user_agent=settings.bangumi_user_agent)
     _guest_runner = build_runner(_guest_client, moegirl, "adaptive", ltm)
-    _user_runners: dict[str, object] = {}   # username -> runner(带该用户 token)
-
-    def _runner_for(discord_user_id: int):
+    async def _runner_for(discord_user_id: int):
         """绑定用户 → 用其 Bangumi token 的个人化 runner;否则 guest。"""
         username = auth.username_for_discord(str(discord_user_id))
         if not username:
-            return _guest_runner, None
-        tok = auth.token_for_username(username)
+            return _guest_runner, None, None
+        tok = await refreshed_token_for_username(auth, username)
         if not tok or tok.status != "active":
-            return _guest_runner, username  # 绑过但 token 失效:退回 guest,回答里可提示重绑
-        if username not in _user_runners:
-            if len(_user_runners) >= _MAX_USER_RUNNERS:
-                _user_runners.pop(next(iter(_user_runners)))
-            client = BangumiClient(token=tok.access_token, user_agent=settings.bangumi_user_agent)
-            _user_runners[username] = build_runner(client, moegirl, "adaptive", ltm)
-        return _user_runners[username], username
+            return _guest_runner, username, None
+        user_client = BangumiClient(token=tok.access_token, user_agent=settings.bangumi_user_agent)
+        return build_runner(user_client, moegirl, "adaptive", ltm), username, user_client
 
-    async def _answer(discord_user_id: int, question: str) -> tuple[str, list]:
+    def _conversation(discord_user_id: int, channel_id: int, guild_id: int | None) -> tuple[str, str]:
+        raw = f"{guild_id or 'dm'}:{channel_id}:{discord_user_id}"
+        session_id = "discord_" + hashlib.sha256(raw.encode()).hexdigest()[:32]
+        return session_id, f"discord:{discord_user_id}"
+
+    async def _answer(
+        discord_user_id: int,
+        channel_id: int,
+        guild_id: int | None,
+        question: str,
+    ) -> tuple[str, list]:
         """返回 (清洗后的文本回答, embed 卡片列表)。"""
-        runner, _username = _runner_for(discord_user_id)
-        state = _sessions.get(discord_user_id) or AgentState()
+        runner, username, owned_client = await _runner_for(discord_user_id)
+        session_id, owner = _conversation(discord_user_id, channel_id, guild_id)
+        lock = _locks.setdefault(session_id, asyncio.Lock())
         result = ""
         observations: list[tuple[str, dict]] = []
+        tools_called: list[str] = []
+        state = AgentState()
+        turn_id = ""
+        begin_usage_ledger()
         try:
-            async for ev in runner.stream(question, state):
-                if isinstance(ev, FinalEvent):
-                    result = ev.answer
-                elif isinstance(ev, ObservationEvent) and ev.data:
-                    observations.append((ev.name, ev.data))
-                elif isinstance(ev, ErrorEvent):
-                    result = result or f"⚠️ 出错了:{ev.message[:200]}"
+            async with lock:
+                session_store.ensure_session(session_id, owner, title="Discord 对话")
+                state = session_store.load_state(session_id, owner) or AgentState()
+                turn_id = hashlib.sha256(
+                    f"{session_id}:{question}:{len(state.messages)}".encode()
+                ).hexdigest()[:32]
+                try:
+                    with tenant_scope(username, authenticated=bool(username and owned_client)):
+                        async for ev in traced_stream(
+                            runner,
+                            question,
+                            state,
+                            {
+                                "session_id": session_id,
+                                "runner": "adaptive",
+                                "turn_id": turn_id,
+                                "surface": "discord",
+                            },
+                        ):
+                            if isinstance(ev, FinalEvent):
+                                result = ev.answer
+                            elif isinstance(ev, ObservationEvent):
+                                tools_called.append(ev.name)
+                                if ev.data:
+                                    observations.append((ev.name, ev.data))
+                            elif isinstance(ev, ErrorEvent):
+                                result = result or f"⚠️ 出错了:{ev.message[:200]}"
+                finally:
+                    if len(state.messages) > _MAX_HISTORY:
+                        state.messages = state.messages[:1] + state.messages[-(_MAX_HISTORY - 1):]
+                    session_store.save_state(session_id, owner, state)
         except Exception as e:  # noqa: BLE001
             log.exception("discord answer failed")
             return f"抱歉,处理时出错了({type(e).__name__}),换个问法再试试?", []
-        if len(state.messages) > _MAX_HISTORY:
-            state.messages = state.messages[:1] + state.messages[-(_MAX_HISTORY - 1):]
-        _sessions[discord_user_id] = state
+        finally:
+            usage = collected_usage() or estimate_tokens(question, result)
+            trajectory.log_turn(
+                turn_id=turn_id,
+                session_id=session_id,
+                owner=owner,
+                runner="adaptive",
+                user_message=question,
+                final_answer=result,
+                messages=state.messages,
+                tools_called=tools_called,
+                usage_tokens=usage,
+            )
+            if owned_client is not None:
+                await owned_client.aclose()
         embeds: list = []
         for nm, dat in observations:
             embeds.extend(build_embeds(discord, nm, dat))
@@ -252,29 +304,42 @@ def run() -> None:
         if mentioned:
             content = re.sub(rf"<@!?{client.user.id}>", "", content).strip()
         if not content:
-            await message.channel.send("在的~ 直接问我番剧推荐 / 评价 / 在哪看 / 梗出处都行,或用 `/绑定` 关联你的 Bangumi 账号。")
+            await message.channel.send(
+                "在的~ 直接问我番剧推荐 / 评价 / 在哪看 / 梗出处都行,或用 `/绑定` 关联你的 Bangumi 账号。",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
             return
         async with message.channel.typing():
-            reply, embeds = await _answer(message.author.id, content)
+            reply, embeds = await _answer(
+                message.author.id,
+                message.channel.id,
+                message.guild.id if message.guild else None,
+                content,
+            )
         parts = _split(reply)
         for i, chunk in enumerate(parts):
             # embed 附在最后一段文本上(Discord 单条消息可带 content + 最多10个embed)
             if embeds and i == len(parts) - 1:
-                await message.channel.send(chunk, embeds=embeds)
+                await message.channel.send(chunk, embeds=embeds, allowed_mentions=discord.AllowedMentions.none())
             else:
-                await message.channel.send(chunk)
+                await message.channel.send(chunk, allowed_mentions=discord.AllowedMentions.none())
         if embeds and not parts:
-            await message.channel.send(embeds=embeds)
+            await message.channel.send(embeds=embeds, allowed_mentions=discord.AllowedMentions.none())
 
     async def _slash_answer(interaction: "discord.Interaction", question: str) -> None:
         await interaction.response.defer(thinking=True)
-        reply, embeds = await _answer(interaction.user.id, question)
+        reply, embeds = await _answer(
+            interaction.user.id,
+            int(interaction.channel_id or interaction.user.id),
+            interaction.guild_id,
+            question,
+        )
         parts = _split(reply) or ["(没有生成回答)"]
         for i, chunk in enumerate(parts):
             if embeds and i == len(parts) - 1:
-                await interaction.followup.send(chunk, embeds=embeds)
+                await interaction.followup.send(chunk, embeds=embeds, allowed_mentions=discord.AllowedMentions.none())
             else:
-                await interaction.followup.send(chunk)
+                await interaction.followup.send(chunk, allowed_mentions=discord.AllowedMentions.none())
 
     @tree.command(name="推荐", description="按你的口味推荐番剧(绑定后更懂你)")
     @app_commands.describe(关键词="想要的题材/心情,如 治愈 / 今晚看完 / 类似孤独摇滚")
@@ -307,7 +372,6 @@ def run() -> None:
     @tree.command(name="解绑", description="解除 Bangumi 账号关联")
     async def unlink(interaction: "discord.Interaction") -> None:
         auth.unlink_discord(str(interaction.user.id))
-        _user_runners.clear()
         await interaction.response.send_message("已解绑。之后回到 guest 模式,`/绑定` 可重新关联。", ephemeral=True)
 
     _HELP = (
@@ -340,7 +404,7 @@ def run() -> None:
             await interaction.response.send_message(
                 f"Discord ID `{uid}`：**未绑定**。用 `/绑定` 关联 Bangumi 账号。", ephemeral=True)
             return
-        tok = auth.token_for_username(username)
+        tok = await refreshed_token_for_username(auth, username)
         status = tok.status if tok else "找不到 token"
         await interaction.response.send_message(
             f"Discord ID `{uid}`\n绑定账号:**{username}**\nToken 状态:`{status}`"

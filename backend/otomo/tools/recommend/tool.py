@@ -18,7 +18,7 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -27,6 +27,7 @@ from ...agent.contracts import Citation, Tool, ToolResult
 from ...config import settings
 from ...memory import LongTermMemory
 from ...memory.models import UserAspectProfile
+from ...security_context import can_access_private_user
 from ...profile import compute_taste_profile
 from .._concurrency import gather_limited
 from ..bangumi.client import SUBJECT_TYPE, BangumiClient
@@ -851,7 +852,7 @@ class RecommendTool(Tool):
         feedback_excluded_ids: set[int] = set()
         feedback_summary: dict = {"positive": 0, "negative": 0, "excluded_ids": []}
         aspect_profile: UserAspectProfile | None = None
-        if self.ltm is not None and username:
+        if self.ltm is not None and username and can_access_private_user(username):
             mem = self.ltm.load_user(username)
             memory_dislikes = [it.value for it in mem.dislikes if it.value.strip()]
             recent_feedback = mem.feedback[-50:]
@@ -989,7 +990,7 @@ class RecommendTool(Tool):
             await self._graph_recall(cand, stype, fav_ids, seen)
         if args.use_cf:  # 协同召回（离线 CF 反哺）：无 i2i 表则 _load_i2i 返回空、静默跳过
             self._cf_recall(cand, fav_ids, seen, _load_i2i(args.subject_type))
-        if effective_cross_media:
+        if effective_cross_media and username:
             if args.subject_type != "anime":
                 source_items = await self.client.get_all_user_collections(
                     username, SUBJECT_TYPE["anime"], collection_type=2, max_items=1000
@@ -1003,6 +1004,8 @@ class RecommendTool(Tool):
                         )
                     )
             await self._cross_media_recall(cand, stype, source_items, seen)
+        elif effective_cross_media:
+            scenario_notes.append("匿名模式无法读取跨媒体收藏；本轮仅使用显式标签和公开内容召回。")
         await emit_tool_progress(
             tool=self.name,
             summary=f"召回完成：{len(cand)} 个候选，开始补评分与封面",

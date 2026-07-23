@@ -62,7 +62,7 @@ Caddy 自动为 `1-2-3-4.nip.io` 申请证书，几秒后 `https://1-2-3-4.nip.i
 
 ## 3. 服务组成（docker-compose）
 - **backend**：FastAPI（`/health` 健康检查）。不跑调度器。
-- **scheduler**：`weekly_daemon`，同时跑周报 + 主动订阅调度（单实例，避免重复推送）。
+- **scheduler**：`weekly_daemon` 只是统一订阅调度器的进程入口（单实例，避免重复推送）；周报、每日追番、RSS、生日和月报都由同一套 `SubscriptionService` 产生。
 - **frontend**：Next.js standalone。`NEXT_PUBLIC_BACKEND=/api`（浏览器走反代）；`INTERNAL_BACKEND=http://backend:8000`（分享页 SSR 服务端直连后端）。
 - **caddy**：反代 + 自动 HTTPS；覆盖 `X-Forwarded-For` 防伪造绕限流。
 - **cloudflared**（可选 `--profile tunnel`）：临时公网隧道。

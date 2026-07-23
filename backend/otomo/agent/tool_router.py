@@ -18,6 +18,7 @@ import re
 from typing import Any
 
 from ..config import settings
+from ..security_context import authorized_write_tools
 from .registry import ToolRegistry
 
 META_TOOL = "load_tool_group"
@@ -114,7 +115,7 @@ TOOL_GROUPS: dict[str, dict[str, Any]] = {
     },
     "digest": {
         "desc": "周报生成/配置、收件箱查看",
-        "tools": {"build_weekly_digest", "configure_weekly_digest", "generate_weekly_digest_now", "list_weekly_digest_inbox"},
+        "tools": {"build_weekly_digest", "list_weekly_digest_inbox"},
         "keywords": ["周报", "订阅", "提醒", "收件箱", "inbox", "推送"],
     },
     "lore_extra": {
@@ -207,15 +208,20 @@ class ToolSelector:
         self.registry = registry
         self.enabled = settings.tool_progressive_disclosure_enabled if enabled is None else enabled
         self.active_groups: set[str] = initial_groups(user_input) if self.enabled else set(_ALL_GROUP_NAMES)
+        self.allowed_write_tools = authorized_write_tools(user_input)
 
     def active_names(self) -> set[str]:
         return CORE_TOOLS | _group_tools(self.active_groups)
 
     def schemas(self) -> list[dict[str, Any]]:
         """当前暴露给模型的工具 schema。始终含逃生舱（除非全量模式）。"""
-        if not self.enabled:
-            return self.registry.openai_tools(include_write=True)
         names = self.active_names()
+        names = {
+            name for name in names
+            if not getattr(self.registry.get(name), "is_write", False) or name in self.allowed_write_tools
+        }
+        if not self.enabled:
+            return self.registry.openai_tools_for(names, include_write=True)
         schemas = self.registry.openai_tools_for(names, include_write=True)
         schemas.append(meta_tool_schema())
         return schemas

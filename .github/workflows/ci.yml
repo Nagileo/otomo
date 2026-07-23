@@ -34,6 +34,8 @@ jobs:
           python-version: "3.12"
       - name: Install backend
         run: pip install -e ".[dev]"
+      - name: Lint backend
+        run: ruff check otomo tests scripts
       - name: Run tests
         run: pytest -m "not external"
 

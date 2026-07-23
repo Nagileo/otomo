@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from .config import settings
 from .memory.consolidate import now_iso
@@ -93,15 +93,23 @@ class ShareSnapshot(BaseModel):
 
 class CreateShareSnapshotRequest(BaseModel):
     type: ShareType
-    title: str = ""
-    summary: str = ""
+    title: str = Field("", max_length=160)
+    summary: str = Field("", max_length=500)
     payload: dict[str, Any] = Field(default_factory=dict)
-    sources: list[dict[str, Any]] = Field(default_factory=list)
+    sources: list[dict[str, Any]] = Field(default_factory=list, max_length=50)
     visibility: ShareVisibility = "public_unlisted"
     include_personalized_reason: bool = False
     personalization_mode: SharePersonalization = "public_generic"
     expires_in_days: int | None = Field(None, ge=1, le=365)
     spoiler_level: ShareSpoilerLevel = "none"
+
+    @model_validator(mode="after")
+    def validate_snapshot_size(self):
+        if len(_dump(self.payload).encode("utf-8")) > 512 * 1024:
+            raise ValueError("分享页 payload 不能超过 512 KiB")
+        if len(_dump(self.sources).encode("utf-8")) > 128 * 1024:
+            raise ValueError("分享页 sources 不能超过 128 KiB")
+        return self
 
 
 class ShareSnapshotStore:
@@ -261,7 +269,6 @@ def _redact(value: Any, redaction: ShareRedaction, *, path: str, personalization
             if personalization_mode == "public_generic" and lower in {
                 "memory",
                 "profile_snapshot",
-                "weekly_digest_subscription",
                 "aspect_profiles",
                 "recent_feedback",
                 "recent_decisions",

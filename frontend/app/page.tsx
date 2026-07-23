@@ -123,13 +123,11 @@ type MemoryState = {
   recent_decisions?: Record<string, any>[];
   watch_plan?: Record<string, any>[];
   recommendation_lists?: Record<string, any>[];
-  weekly_digest_subscription?: Record<string, any>;
   inbox?: Record<string, any>[];
   recent_visual_feedback?: Record<string, any>[];
   updated_at?: string;
 };
 type AuthState = {
-  auth_session_id?: string;
   authenticated?: boolean;
   username?: string;
   user_id?: number;
@@ -139,7 +137,6 @@ type AuthState = {
 };
 type AuthNotice = { tone: "good" | "warn" | "bad"; text: string };
 type UploadNotice = { tone: "good" | "warn" | "bad"; text: string };
-type NotificationSubscription = Record<string, any>;
 type ChatSession = {
   id: string;
   title: string;
@@ -150,18 +147,6 @@ type ChatSession = {
 
 const MAX_IMAGES = 4;
 const SUPPORTED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/jpg", "image/webp"]);
-const WEEKDAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
-const NOTIFICATION_CHANNELS = [
-  ["inbox", "站内收件箱"],
-  ["webhook", "Webhook"],
-  ["email", "Email"],
-] as const;
-const WEBHOOK_FORMATS = ["generic", "serverchan", "telegram", "discord", "feishu"] as const;
-const PUSH_GRADINGS = [
-  ["brief", "简短"],
-  ["normal", "标准"],
-  ["detailed", "详细"],
-] as const;
 
 function list(value: any): any[] {
   return Array.isArray(value) ? value : [];
@@ -254,146 +239,6 @@ function AnswerSupport({ sources, evidence }: { sources: Source[]; evidence: Evi
           </div>
         </details>
       )}
-    </section>
-  );
-}
-
-function NotificationSettingsPanel({
-  open,
-  authenticated,
-  subscription,
-  notice,
-  busy,
-  onToggle,
-  onReload,
-  onChange,
-  onChannelToggle,
-  onSave,
-  onTest,
-}: {
-  open: boolean;
-  authenticated: boolean;
-  subscription: NotificationSubscription | null;
-  notice: AuthNotice | null;
-  busy: boolean;
-  onToggle: () => void;
-  onReload: () => void;
-  onChange: (field: string, value: any) => void;
-  onChannelToggle: (channel: string) => void;
-  onSave: () => void;
-  onTest: () => void;
-}) {
-  if (!open) return null;
-  const sub = subscription || {};
-  const channels = list(sub.channels) as string[];
-  return (
-    <section className="settings-card">
-      <div className="settings-head">
-        <div>
-          <div className="settings-title">主动提醒设置</div>
-          <div className="settings-sub">这里保留每周周报的快捷设置；每日追番、RSS、生日和 B站提醒请使用主动订阅中心。</div>
-        </div>
-        <button className="inline-action" onClick={onToggle} disabled={busy}>收起</button>
-      </div>
-      {!authenticated ? (
-        <div className="settings-empty">需要先绑定 Bangumi 账号，订阅配置会按当前用户隔离保存。</div>
-      ) : (
-        <>
-          <div className="settings-grid">
-            <label className="setting-card">
-              <span className="setting-line">
-                <input type="checkbox" checked={Boolean(sub.enabled)} onChange={(e) => onChange("enabled", e.target.checked)} />
-                <b>每周周报</b>
-              </span>
-              <span className="setting-copy">自动生成本周追番/想看/搁置盘活建议。</span>
-            </label>
-            <label className="setting-card">
-              <span className="setting-line">
-                <a className="inline-action" href="/settings/subscriptions">打开订阅中心</a>
-              </span>
-              <span className="setting-copy">新版订阅系统统一管理 daily_airing、RSS、新视频和生日提醒。</span>
-            </label>
-            <label className="setting-field">
-              <span>周报日</span>
-              <select value={Number(sub.weekday ?? 0)} onChange={(e) => onChange("weekday", Number(e.target.value))}>
-                {WEEKDAYS.map((label, idx) => <option value={idx} key={label}>{label}</option>)}
-              </select>
-            </label>
-            <label className="setting-field">
-              <span>周报小时</span>
-              <input type="number" min={0} max={23} value={Number(sub.hour ?? 9)} onChange={(e) => onChange("hour", Number(e.target.value))} />
-            </label>
-            <label className="setting-field">
-              <span>时区</span>
-              <input type="text" value={String(sub.timezone ?? "Asia/Shanghai")} onChange={(e) => onChange("timezone", e.target.value)} />
-            </label>
-            <label className="setting-field">
-              <span>推送粒度</span>
-              <select value={String(sub.push_grading ?? "normal")} onChange={(e) => onChange("push_grading", e.target.value)}>
-                {PUSH_GRADINGS.map(([value, label]) => <option value={value} key={value}>{label}</option>)}
-              </select>
-            </label>
-            <label className="setting-field">
-              <span>候选数量</span>
-              <input type="number" min={3} max={20} value={Number(sub.limit ?? 8)} onChange={(e) => onChange("limit", Number(e.target.value))} />
-            </label>
-          </div>
-          <div className="settings-section">
-            <div className="settings-label">推送渠道</div>
-            <div className="settings-options">
-              {NOTIFICATION_CHANNELS.map(([value, label]) => (
-                <label className="settings-check" key={value}>
-                  <input type="checkbox" checked={channels.includes(value)} onChange={() => onChannelToggle(value)} />
-                  <span>{label}</span>
-                </label>
-              ))}
-              <label className="settings-check">
-                <input type="checkbox" checked={Boolean(sub.include_on_hold)} onChange={(e) => onChange("include_on_hold", e.target.checked)} />
-                <span>包含搁置盘活</span>
-              </label>
-            </div>
-          </div>
-          <div className="settings-grid">
-            <label className="setting-field wide">
-              <span>Email 收件地址</span>
-              <input type="email" value={String(sub.email ?? "")} onChange={(e) => onChange("email", e.target.value)} placeholder="you@example.com" />
-            </label>
-            <label className="setting-field">
-              <span>Webhook 格式</span>
-              <select value={String(sub.webhook_format ?? "generic")} onChange={(e) => onChange("webhook_format", e.target.value)}>
-                {WEBHOOK_FORMATS.map((fmt) => <option value={fmt} key={fmt}>{fmt}</option>)}
-              </select>
-            </label>
-            <label className="setting-field wide">
-              <span>Webhook URL</span>
-              <input type="url" value={String(sub.webhook_url ?? "")} onChange={(e) => onChange("webhook_url", e.target.value)} placeholder="https://..." />
-            </label>
-          </div>
-          <details className="quiet-detail settings-webpush">
-            <summary>Web Push 预留字段</summary>
-            <div className="settings-grid">
-              <label className="setting-field wide">
-                <span>Endpoint</span>
-                <input type="url" value={String(sub.web_push_endpoint ?? "")} onChange={(e) => onChange("web_push_endpoint", e.target.value)} />
-              </label>
-              <label className="setting-field">
-                <span>p256dh</span>
-                <input type="text" value={String(sub.web_push_p256dh ?? "")} onChange={(e) => onChange("web_push_p256dh", e.target.value)} />
-              </label>
-              <label className="setting-field">
-                <span>auth</span>
-                <input type="text" value={String(sub.web_push_auth ?? "")} onChange={(e) => onChange("web_push_auth", e.target.value)} />
-              </label>
-            </div>
-          </details>
-          <div className="settings-actions">
-            <button className="inline-action" onClick={onReload} disabled={busy}>重新读取</button>
-            <button className="inline-action primary" onClick={onSave} disabled={busy}>保存设置</button>
-            <button className="inline-action" onClick={onTest} disabled={busy}>测试推送</button>
-          </div>
-        </>
-      )}
-      {notice && <div className={`auth-notice ${notice.tone}`}>{notice.text}</div>}
     </section>
   );
 }
@@ -529,17 +374,12 @@ export default function Home() {
   const [authNotice, setAuthNotice] = useState<AuthNotice | null>(null);
   const [uploadNotice, setUploadNotice] = useState<UploadNotice | null>(null);
   const [shareNotice, setShareNotice] = useState<AuthNotice | null>(null);
-  const [subscriptionOpen, setSubscriptionOpen] = useState(false);
-  const [subscription, setSubscription] = useState<NotificationSubscription | null>(null);
-  const [subscriptionNotice, setSubscriptionNotice] = useState<AuthNotice | null>(null);
-  const [subscriptionBusy, setSubscriptionBusy] = useState(false);
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState("");
   const [busy, setBusy] = useState(false);
   const answerRef = useRef("");
   const evidenceRef = useRef<EvidenceMap>({});  // finally 定型消息时读（state 闭包会是旧值）
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const authSessionId = useRef("");
   const csrfToken = useRef("");
   const sessionId = useRef("");  // 多轮会话 id（首次发送时生成；"新对话"会重置）
   const lastQ = useRef("");      // 最近一次用户问题（剧透 followup chips 重发用）
@@ -597,13 +437,12 @@ export default function Home() {
       const res = await fetch(`${BACKEND}/auth/session`, { credentials: "include" });
       if (res.ok) {
         const payload = await res.json();
-        authSessionId.current = payload.auth_session_id || "";
         csrfToken.current = payload.csrf_token || "";
         setAuth(payload);
         await loadSessions();
       }
     } catch {
-      setAuth({ auth_session_id: authSessionId.current, authenticated: false });
+      setAuth({ authenticated: false });
     }
   }
 
@@ -778,7 +617,6 @@ export default function Home() {
     if (!msg?.turnId) return;
     const next = msg.feedback === rating ? undefined : rating; // 再点一次取消
     setMessages((m) => m.map((x, i) => (i === idx ? { ...x, feedback: next } : x)));
-    if (!next) return;
     try {
       await fetch(`${BACKEND}/feedback/answer`, {
         method: "POST",
@@ -787,8 +625,7 @@ export default function Home() {
         body: JSON.stringify({
           session_id: sessionId.current,
           turn_id: msg.turnId,
-          rating: next,
-          auth_session_id: authSessionId.current,
+          rating: next ?? "clear",
         }),
       });
     } catch {
@@ -1129,7 +966,7 @@ export default function Home() {
   }
 
   async function startBangumiLogin() {
-    if (!authSessionId.current || !csrfToken.current) await refreshAuthSession();
+    if (!csrfToken.current) await refreshAuthSession();
     if (auth && !auth.oauth_configured) {
       setAuthNotice({
         tone: "warn",
@@ -1150,7 +987,7 @@ export default function Home() {
   }
 
   async function loginWithLocalToken() {
-    if (!authSessionId.current || !csrfToken.current) await refreshAuthSession();
+    if (!csrfToken.current) await refreshAuthSession();
     try {
       const res = await fetch(`${BACKEND}/auth/dev-token-login`, {
         method: "POST",
@@ -1164,7 +1001,6 @@ export default function Home() {
         return;
       }
       setAuth(payload.identity);
-      authSessionId.current = payload.identity?.auth_session_id || authSessionId.current;
       csrfToken.current = payload.identity?.csrf_token || csrfToken.current;
       setAuthNotice({ tone: "good", text: `已使用本地 BANGUMI_TOKEN 绑定：@${payload.identity?.username || "unknown"}` });
     } catch (e) {
@@ -1179,120 +1015,16 @@ export default function Home() {
       headers: csrfHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({}),
     });
-    authSessionId.current = "";
     csrfToken.current = "";
-    setAuth({ auth_session_id: authSessionId.current, authenticated: false });
+    setAuth({ authenticated: false });
     setAuthNotice({ tone: "warn", text: "已退出当前浏览器会话的 Bangumi 绑定" });
     setMemory(null);
-    setSubscription(null);
-    setSubscriptionOpen(false);
-  }
-
-  async function loadNotificationSubscription() {
-    if (!auth?.authenticated) {
-      setSubscriptionNotice({ tone: "warn", text: "需要先绑定 Bangumi 账号后才能管理订阅。" });
-      return;
-    }
-    setSubscriptionBusy(true);
-    try {
-      const res = await fetch(`${BACKEND}/notifications/subscription`, { credentials: "include" });
-      const payload = await res.json().catch(() => ({}));
-      if (!res.ok || !payload.ok) {
-        setSubscriptionNotice({ tone: "bad", text: payload.detail || payload.error || `读取失败：HTTP ${res.status}` });
-        return;
-      }
-      setSubscription(payload.subscription || {});
-      if (payload.memory) setMemory(payload.memory);
-      setSubscriptionNotice({ tone: "good", text: "订阅设置已同步。" });
-    } catch (e) {
-      setSubscriptionNotice({ tone: "bad", text: `读取订阅失败：${String(e)}` });
-    } finally {
-      setSubscriptionBusy(false);
-    }
-  }
-
-  function toggleSubscriptionSettings() {
-    setSubscriptionOpen((open) => {
-      const next = !open;
-      if (next && auth?.authenticated && !subscription && !subscriptionBusy) {
-        void loadNotificationSubscription();
-      }
-      return next;
-    });
-  }
-
-  function updateSubscriptionField(field: string, value: any) {
-    setSubscription((prev) => ({ ...(prev ?? {}), [field]: value }));
-  }
-
-  function toggleSubscriptionChannel(channel: string) {
-    setSubscription((prev) => {
-      const current = new Set(list(prev?.channels) as string[]);
-      if (current.has(channel)) current.delete(channel);
-      else current.add(channel);
-      if (!current.size) current.add("inbox");
-      return { ...(prev ?? {}), channels: Array.from(current) };
-    });
-  }
-
-  async function saveNotificationSubscription() {
-    if (!auth?.authenticated || !subscription) return;
-    setSubscriptionBusy(true);
-    try {
-      const res = await fetch(`${BACKEND}/notifications/subscription`, {
-        method: "PUT",
-        credentials: "include",
-        headers: csrfHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify(subscription),
-      });
-      const payload = await res.json().catch(() => ({}));
-      if (!res.ok || !payload.ok) {
-        setSubscriptionNotice({ tone: "bad", text: payload.detail || payload.error || `保存失败：HTTP ${res.status}` });
-        return;
-      }
-      setSubscription(payload.subscription || {});
-      if (payload.memory) setMemory(payload.memory);
-      setSubscriptionNotice({ tone: "good", text: "订阅设置已保存。" });
-    } catch (e) {
-      setSubscriptionNotice({ tone: "bad", text: `保存订阅失败：${String(e)}` });
-    } finally {
-      setSubscriptionBusy(false);
-    }
-  }
-
-  async function testNotificationSubscription() {
-    if (!auth?.authenticated) return;
-    setSubscriptionBusy(true);
-    try {
-      const res = await fetch(`${BACKEND}/notifications/test`, {
-        method: "POST",
-        credentials: "include",
-        headers: csrfHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ kind: "weekly", dispatch: true }),
-      });
-      const payload = await res.json().catch(() => ({}));
-      if (!res.ok || !payload.ok) {
-        setSubscriptionNotice({ tone: "bad", text: payload.detail || payload.error || `测试失败：HTTP ${res.status}` });
-        return;
-      }
-      setSubscription(payload.subscription || subscription || {});
-      if (payload.memory) setMemory(payload.memory);
-      setSubscriptionNotice({ tone: "good", text: "测试周报已生成，并按当前渠道尝试发送。" });
-      setEvidence((prev) => ({
-        ...prev,
-        list_weekly_digest_inbox: payload.inbox ? [{ items: payload.inbox, username: payload.username }] : (prev.list_weekly_digest_inbox ?? []),
-      }));
-    } catch (e) {
-      setSubscriptionNotice({ tone: "bad", text: `测试推送失败：${String(e)}` });
-    } finally {
-      setSubscriptionBusy(false);
-    }
   }
 
   async function createShareSnapshot(req: Record<string, any>) {
     setShareNotice(null);
     try {
-      if (!authSessionId.current || !csrfToken.current) await refreshAuthSession();
+      if (!csrfToken.current) await refreshAuthSession();
       const res = await fetch(`${BACKEND}/share/snapshots`, {
         method: "POST",
         credentials: "include",
@@ -1353,9 +1085,6 @@ export default function Home() {
             {auth?.authenticated ? (
               <>
                 <span className="badge good">Bangumi @{auth.username}</span>
-                <button className="inline-action" onClick={toggleSubscriptionSettings} disabled={busy || subscriptionBusy}>
-                  推送设置
-                </button>
                 <a className="inline-action" href="/share/mine">我的分享</a>
                 <a className="inline-action" href="/settings/subscriptions">订阅中心</a>
                 <button className="inline-action" onClick={logoutBangumi} disabled={busy}>退出</button>
@@ -1374,19 +1103,6 @@ export default function Home() {
           </div>
           {authNotice && <div className={`auth-notice ${authNotice.tone}`}>{authNotice.text}</div>}
           {shareNotice && <div className={`auth-notice ${shareNotice.tone}`}>{shareNotice.text}</div>}
-          <NotificationSettingsPanel
-            open={subscriptionOpen}
-            authenticated={Boolean(auth?.authenticated)}
-            subscription={subscription}
-            notice={subscriptionNotice}
-            busy={busy || subscriptionBusy}
-            onToggle={toggleSubscriptionSettings}
-            onReload={loadNotificationSubscription}
-            onChange={updateSubscriptionField}
-            onChannelToggle={toggleSubscriptionChannel}
-            onSave={saveNotificationSubscription}
-            onTest={testNotificationSubscription}
-          />
           <div className="session-strip">
             <button className="inline-action" onClick={newChat} disabled={busy}>新建</button>
             {sessions.slice(0, 6).map((s) => (

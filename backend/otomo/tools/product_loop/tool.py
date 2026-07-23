@@ -16,9 +16,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from ...agent.contracts import Citation, Tool, ToolResult
 from ...memory import LongTermMemory
 from ...memory.models import MemorySummary, memory_summary
+from ...subscription_read import public_subscription_summary
 from .._concurrency import gather_limited
 from ..bangumi.client import SUBJECT_TYPE, BangumiClient
-from ..bangumi.models import RelatedSubject, SubjectBrief, SubjectDetail
 from ..bangumi.tools import GetSubjectRelationsTool, SubjectRelationsArgs
 from ..calendar.tool import AiringProgressArgs, AiringProgressTool, BroadcastCalendarArgs, BroadcastCalendarTool
 from ..discovery.tool import EpisodeBuzzRadarTool, EpisodeRadarArgs
@@ -453,7 +453,7 @@ class WatchCockpitTool(Tool):
             username=username,
             today=date.today().isoformat(),
             sections=sections,
-            subscription=mem.weekly_digest_subscription.model_dump(mode="json", exclude={"webhook_url", "email", "web_push_endpoint", "web_push_p256dh", "web_push_auth"}),
+            subscription=public_subscription_summary(username),
             memory=memory_summary(mem),
             next_actions=[
                 "确认今天继续追的条目后，可写回 Bangumi ep_status。",

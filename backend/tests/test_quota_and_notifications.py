@@ -3,8 +3,8 @@ import time
 import pytest
 from fastapi import HTTPException
 
-from otomo.memory.models import InboxItem, WeeklyDigestSubscription
-from otomo.notifications import _telegram_endpoint_and_payload, digest_text
+from otomo.memory.models import InboxItem
+from otomo.notifications import NotificationTarget, _telegram_endpoint_and_payload, digest_text
 from otomo.quota import RateLimiter, TokenQuotaStore, estimate_tokens
 
 
@@ -83,7 +83,10 @@ def test_digest_text_honors_push_grading_brief():
 
 
 def test_telegram_webhook_url_can_carry_chat_id():
-    sub = WeeklyDigestSubscription(webhook_format="telegram", webhook_url="https://api.telegram.org/botTOKEN/sendMessage?chat_id=42")
+    sub = NotificationTarget(
+        webhook_format="telegram",
+        webhook_url="https://api.telegram.org/botTOKEN/sendMessage?chat_id=42",
+    )
     endpoint, payload = _telegram_endpoint_and_payload(sub.webhook_url, "hello")
     assert endpoint == "https://api.telegram.org/botTOKEN/sendMessage"
     assert payload["chat_id"] == "42"
