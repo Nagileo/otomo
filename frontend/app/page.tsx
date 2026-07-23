@@ -49,7 +49,7 @@ type ImageAttachment = {
   preview_url?: string;
 };
 type PendingImage = { id: string; file: File; preview: string };
-type Msg = { role: "user" | "assistant"; content: string; attachments?: ImageAttachment[]; evidence?: EvidenceMap; turnId?: string; feedback?: "up" | "down" };
+type Msg = { role: "user" | "assistant"; content: string; attachments?: ImageAttachment[]; evidence?: EvidenceMap; turnId?: string; feedback?: "up" | "down"; steps?: string[]; elapsedMs?: number };
 type EvidenceMap = Record<string, Record<string, any>[]>;
 
 // [[panel:tool_name]]：LLM 在正文中锚定证据面板的位置。
@@ -102,6 +102,34 @@ function AssistantContent({
   if (tail.trim()) nodes.push(<Markdown text={tail} key={`md-${idx++}`} />);
   return <>{nodes}</>;
 }
+
+/** 等待体验：生成中在气泡里滚动当前动作（豆包/Gemini 式"看它思考"）。 */
+function AgentLiveStatus({ steps, startedAt }: { steps: string[]; startedAt: number }) {
+  const latest = steps[steps.length - 1] || "正在理解你的问题…";
+  const secs = startedAt ? Math.max(0, Math.round((Date.now() - startedAt) / 1000)) : 0;
+  return (
+    <div className="live-status">
+      <span className="live-dot" aria-hidden />
+      <span className="live-text">{latest}</span>
+      <span className="live-clock">{secs}s{steps.length > 1 ? ` · 第 ${steps.length} 步` : ""}</span>
+    </div>
+  );
+}
+
+/** 完成后收敛成一行小字，点开回看它当时做了什么。 */
+function AgentStepsFold({ steps, elapsedMs }: { steps?: string[]; elapsedMs?: number }) {
+  if (!steps?.length) return null;
+  const secs = elapsedMs ? Math.round(elapsedMs / 1000) : null;
+  return (
+    <details className="agent-steps">
+      <summary>⏱ {secs ? `思考了 ${secs} 秒` : "思考过程"} · {steps.length} 步</summary>
+      <ol>
+        {steps.map((s, i) => <li key={i}>{s}</li>)}
+      </ol>
+    </details>
+  );
+}
+
 type SpoilerState = {
   mode?: string;
   memory_default?: string;
@@ -296,14 +324,14 @@ function TracePanel({
   return (
     <div className="panel trace-panel">
       <div className="panel-title-row">
-        <h3>执行过程</h3>
+        <h3>幕后 · 它在做什么</h3>
         <div className="segmented">
           <button className={mode === "summary" ? "active" : ""} onClick={() => onModeChange("summary")}>简洁</button>
           <button className={mode === "dev" ? "active" : ""} onClick={() => onModeChange("dev")}>开发</button>
         </div>
       </div>
       {trace.length === 0 && !busy && (
-        <div className="trace-empty">工具调用与证据状态会实时出现在这里</div>
+        <div className="trace-empty">提问后，它检索和查证的每一步会实时出现在这里</div>
       )}
       {trace.length > 0 && (
         <div className="trace-metrics">
@@ -352,7 +380,7 @@ function TracePanel({
           </div>
         )
       )}
-      {busy && <div className="trace-item processing">● 处理中…（推荐类查询可能要十几秒）</div>}
+      {busy && <div className="trace-item processing">● 正在思考…（推荐类问题通常要十几秒）</div>}
     </div>
   );
 }
@@ -379,6 +407,11 @@ export default function Home() {
   const [busy, setBusy] = useState(false);
   const answerRef = useRef("");
   const evidenceRef = useRef<EvidenceMap>({});  // finally 定型消息时读（state 闭包会是旧值）
+  // 等待体验：本轮 agent 步骤实时滚动（豆包/Gemini 式"看它思考"），完成后收敛进消息
+  const [liveSteps, setLiveSteps] = useState<string[]>([]);
+  const liveStepsRef = useRef<string[]>([]);
+  const turnStartRef = useRef(0);
+  const [, setClockTick] = useState(0);  // busy 时每秒 tick 一次驱动秒表重绘
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const csrfToken = useRef("");
   const sessionId = useRef("");  // 多轮会话 id（首次发送时生成；"新对话"会重置）
@@ -395,6 +428,12 @@ export default function Home() {
       });
     }
   }, [messages.length]);
+
+  useEffect(() => {
+    if (!busy) return;
+    const t = setInterval(() => setClockTick((x) => x + 1), 1000);  // 驱动等待秒表
+    return () => clearInterval(t);
+  }, [busy]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -649,6 +688,9 @@ export default function Home() {
     setFollowups([]);
     setAnswer("");
     answerRef.current = "";
+    liveStepsRef.current = [];
+    setLiveSteps([]);
+    turnStartRef.current = Date.now();
     setBusy(true);
     if (!sessionId.current) {
       sessionId.current = crypto.randomUUID();  // 客户端 lazy 生成，避免 SSR mismatch
@@ -703,8 +745,14 @@ export default function Home() {
       const final = answerRef.current;
       if (final) {
         const turnEvidence = evidenceRef.current;
-        setMessages((m) => [...m, { role: "assistant", content: final, evidence: turnEvidence, turnId: turnIdRef.current || undefined }]);
+        setMessages((m) => [...m, {
+          role: "assistant", content: final, evidence: turnEvidence, turnId: turnIdRef.current || undefined,
+          steps: liveStepsRef.current.length ? liveStepsRef.current : undefined,
+          elapsedMs: turnStartRef.current ? Date.now() - turnStartRef.current : undefined,
+        }]);
       }
+      liveStepsRef.current = [];
+      setLiveSteps([]);
       setAnswer("");
       setBusy(false);
       void loadSessions();
@@ -870,6 +918,15 @@ export default function Home() {
     }
   }
 
+  function pushStep(text: string) {
+    const clean = String(text || "").trim().slice(0, 80);
+    if (!clean) return;
+    const steps = liveStepsRef.current;
+    if (steps[steps.length - 1] === clean) return;  // 连续重复去重
+    liveStepsRef.current = [...steps.slice(-119), clean];
+    setLiveSteps(liveStepsRef.current);
+  }
+
   function handleEvent(ev: any) {
     switch (ev.type) {
       case "meta":
@@ -877,6 +934,7 @@ export default function Home() {
         break;
       case "plan":
         setTrace((t) => [...t, { kind: "note", text: `📋 ${ev.summary}` }]);
+        pushStep(`规划：${ev.summary}`);
         break;
       case "reflect":
         setTrace((t) => [...t, { kind: "note", text: ev.complete ? "↺ 反思：完整" : `↺ 反思：${ev.note}` }]);
@@ -896,9 +954,11 @@ export default function Home() {
             note: ev.note || "",
           },
         ]);
+        pushStep(ev.summary);
         break;
       case "observation":
         setTrace((t) => [...t, { kind: "obs", name: ev.name, ok: ev.ok, summary: ev.summary }]);
+        pushStep(`${ev.ok ? "✓" : "✗"} ${ev.summary}`);
         if (ev.data) {
           evidenceRef.current = {
             ...evidenceRef.current,
@@ -1078,7 +1138,7 @@ export default function Home() {
       <div className="topbar">
         <div>
           <div className="title">Otomo · 番组搭子</div>
-          <div className="sub">ACGN 知识图谱 Agent — 多跳问答 / 跨媒体追溯 / 语义 RAG / 个性化推荐</div>
+          <div className="sub">懂番的 AI 搭子 — 推荐 · 评价 · 追番 · 资源 · 考据，一句话直接问</div>
           <SpoilerBadge spoiler={spoiler} />
           <MemoryBadge memory={memory} />
           <div className="auth-state">
@@ -1177,6 +1237,7 @@ export default function Home() {
                 </div>
               ) : (
                 <div className="bubble">
+                  <AgentStepsFold steps={m.steps} elapsedMs={m.elapsedMs} />
                   <AssistantContent content={m.content} evidence={m.evidence} handlers={panelHandlers} />
                   {m.turnId && (
                     <div className="answer-feedback">
@@ -1199,10 +1260,19 @@ export default function Home() {
               )}
             </div>
           ))}
+          {busy && !answer && (
+            <div className="msg assistant">
+              <div className="role">Otomo</div>
+              <div className="bubble">
+                <AgentLiveStatus steps={liveSteps} startedAt={turnStartRef.current} />
+              </div>
+            </div>
+          )}
           {answer && (
             <div className="msg assistant">
               <div className="role">Otomo</div>
               <div className="bubble">
+                {busy && <AgentLiveStatus steps={liveSteps} startedAt={turnStartRef.current} />}
                 {/* 流式中面板标记逐字到达后即时嵌入（inline 锚定对打字中的回答同样生效） */}
                 <AssistantContent content={answer + "▍"} evidence={evidence} handlers={panelHandlers} />
               </div>
@@ -1212,9 +1282,9 @@ export default function Home() {
           {hasEvidence && (
             <div className="evidence-toolbar">
               <div>
-                <div className="evidence-toolbar-title">证据视图</div>
+                <div className="evidence-toolbar-title">资料卡片</div>
                 <div className="evidence-toolbar-sub">
-                  {evidenceMode === "user" ? "面板锚定在回答对应位置，未锚定的收进各消息的折叠区" : "开发模式在底部展示本轮全部原始证据"}
+                  {evidenceMode === "user" ? "卡片嵌在回答对应位置，其余收进折叠区" : "开发者模式：本轮全部原始证据都平铺在底部"}
                 </div>
               </div>
               <div className="segmented" aria-label="证据视图">

@@ -1142,3 +1142,46 @@ a.card-title:hover { color: var(--accent); }
 .buzz-main { flex: 1; min-width: 0; }
 .buzz-main small { color: var(--dim); }
 .buzz-stats { display: inline-flex; align-items: center; gap: 6px; color: var(--dim); font-size: var(--fs-sm); white-space: nowrap; }
+
+/* ── 等待体验:生成中的"看它思考"状态条 + 完成后的步骤折叠 ── */
+.live-status {
+  display: flex; align-items: center; gap: 9px; padding: 9px 12px; margin-bottom: 8px;
+  border: 1px solid rgba(122, 162, 247, .25); border-radius: var(--radius-md);
+  background: rgba(122, 162, 247, .06); font-size: var(--fs-md);
+}
+.live-dot {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--accent); flex: none;
+  animation: live-pulse 1.2s ease-in-out infinite;
+}
+@keyframes live-pulse {
+  0%, 100% { opacity: .35; transform: scale(.85); }
+  50% { opacity: 1; transform: scale(1.15); }
+}
+.live-text {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: #cbd0dc;
+}
+.live-clock { flex: none; color: var(--dim); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; }
+
+.agent-steps { margin: 0 0 8px; font-size: var(--fs-sm); color: var(--dim); }
+.agent-steps > summary {
+  cursor: pointer; user-select: none; list-style: none; display: inline-flex;
+  align-items: center; gap: 4px; font-size: var(--fs-xs); opacity: .7;
+}
+.agent-steps > summary::-webkit-details-marker { display: none; }
+.agent-steps > summary:hover { color: var(--accent); opacity: 1; }
+.agent-steps[open] > summary { margin-bottom: 6px; }
+.agent-steps ol {
+  margin: 0; padding: 8px 10px 8px 26px; border: 1px solid var(--border);
+  border-radius: var(--radius-sm); background: #0c0e13; display: grid; gap: 4px;
+  max-height: 260px; overflow-y: auto;
+}
+.agent-steps li { line-height: 1.5; overflow-wrap: anywhere; }
+
+/* 对话流呼吸感:气泡留白与行距(豆包式干净骨架,密度留给卡片内部) */
+.msg { margin: 16px 0; }
+.msg .bubble { line-height: 1.7; }
+.msg.user .bubble {
+  display: inline-block; padding: 9px 14px; border-radius: 14px 14px 3px 14px;
+  background: rgba(122, 162, 247, .12); color: var(--text); max-width: 92%;
+}
