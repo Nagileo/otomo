@@ -38,6 +38,10 @@ class SubjectBrief(BaseModel):
     rank: int | None = None
     role: str | None = None  # 在该作品里的职责/角色（来自关系边 staff，如 主演/配音 角色名）
     image: str | None = None  # 封面图 URL
+    matched_alias: str | None = None
+    match_confidence: float | None = None
+    matched_by: str | None = None
+    match_note: str | None = None
 
     @classmethod
     def from_raw(cls, raw: dict) -> "SubjectBrief":
@@ -107,6 +111,9 @@ class SubjectListResult(BaseModel):
     query: str
     count: int
     subjects: list[SubjectBrief] = Field(default_factory=list)
+    resolution_status: str = "search_only"
+    resolved_subject_id: int | None = None
+    resolution_note: str = ""
 
 
 class CharacterListResult(BaseModel):

@@ -83,7 +83,10 @@ def digest_text(item: InboxItem) -> str:
         for row in (section.get("items") or [])[:item_limit]:
             name = row.get("name") or row.get("title") or row.get("subject_name") or "未命名条目"
             why = row.get("why") or row.get("reasons") or []
-            reason = row.get("reason") or row.get("note") or row.get("action") or ""
+            # Subscription materializers use ``summary`` as their canonical
+            # human-readable sentence.  Omitting it made Discord/webhook pushes
+            # show only a title (notably rating alerts) while email looked fine.
+            reason = row.get("summary") or row.get("reason") or row.get("note") or row.get("action") or ""
             if not reason and why:
                 reason = "；".join(str(x) for x in why[:2])
             lines.append(f"- {name}" + (f"：{reason}" if reason else ""))

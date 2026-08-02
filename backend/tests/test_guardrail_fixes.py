@@ -1035,3 +1035,181 @@ def test_discord_embed_builders():
     # 未知工具 / 空 data → 走文本
     assert build_embeds(FD, "unknown_tool", {"x": 1}) == []
     assert build_embeds(FD, "recommend_subjects", None) == []
+
+
+class _AliasBangumi:
+    def __init__(self, *, season: list[dict] | None = None, watching: list[dict] | None = None):
+        self.season = season or []
+        self.watching = watching or []
+
+    async def search_subjects(
+        self, keyword="", subject_type=None, sort="match", limit=10,
+        tags=None, offset=0, air_date=None,
+    ):
+        if keyword:
+            return {
+                "data": [{
+                    "id": 999,
+                    "name": "Koi no Search Noise",
+                    "name_cn": "无关搜索结果",
+                    "type": 2,
+                }]
+            }
+        return {"data": self.season if offset == 0 else []}
+
+    async def get_me(self):
+        return {"username": "tester"}
+
+    async def get_all_user_collections(
+        self, username, subject_type=2, collection_type=None, max_items=500,
+    ):
+        if collection_type == 3:
+            return [{"subject": subject} for subject in self.watching]
+        return []
+
+
+def test_bangumi_alias_resolution_uses_canonical_titles_and_personal_context(monkeypatch):
+    from datetime import date
+
+    from otomo.tools.bangumi.tools import SearchSubjectsArgs, SearchSubjectsTool
+
+    monkeypatch.setattr("otomo.tools.bangumi.alias._today", lambda: date(2026, 8, 3))
+    love_to_death = {
+        "id": 541285,
+        "name": "きみが死ぬまで恋をしたい",
+        "name_cn": "与你相恋到生命尽头",
+        "type": 2,
+        "date": "2026-07-07",
+    }
+    draw_to_death = {
+        "id": 545917,
+        "name": "これ描いて死ね",
+        "name_cn": "画完这个再去死",
+        "type": 2,
+        "date": "2026-07-03",
+    }
+
+    love = asyncio.run(
+        SearchSubjectsTool(_AliasBangumi(watching=[love_to_death])).run(
+            SearchSubjectsArgs(keyword="恋死", type="anime")
+        )
+    )
+    assert love.ok and love.data is not None
+    assert love.data.resolution_status == "confident_alias"
+    assert love.data.resolved_subject_id == 541285
+    assert love.data.subjects[0].id == 541285
+    assert love.data.subjects[0].match_confidence is not None
+
+    drawing = asyncio.run(
+        SearchSubjectsTool(_AliasBangumi(season=[draw_to_death])).run(
+            SearchSubjectsArgs(keyword="绘死", type="anime")
+        )
+    )
+    assert drawing.ok and drawing.data is not None
+    assert drawing.data.resolution_status == "confident_alias"
+    assert drawing.data.resolved_subject_id == 545917
+    assert drawing.data.subjects[0].id == 545917  # 绘/画/描 only, not fuzzy first-result fallback
+
+
+def test_bangumi_alias_resolution_refuses_ambiguous_write_anchor(monkeypatch):
+    from datetime import date
+
+    from otomo.tools.bangumi.tools import SearchSubjectsArgs, SearchSubjectsTool
+
+    monkeypatch.setattr("otomo.tools.bangumi.alias._today", lambda: date(2026, 8, 3))
+    candidates = [
+        {"id": 1, "name": "死ぬまで恋を", "name_cn": "至死仍恋", "type": 2, "date": "2026-07-01"},
+        {"id": 2, "name": "恋と死", "name_cn": "恋与死", "type": 2, "date": "2026-07-02"},
+    ]
+    result = asyncio.run(
+        SearchSubjectsTool(_AliasBangumi(season=candidates)).run(
+            SearchSubjectsArgs(keyword="恋死", type="anime")
+        )
+    )
+    assert result.ok and result.data is not None
+    assert result.data.resolution_status == "ambiguous"
+    assert result.data.resolved_subject_id is None
+    assert "不可直接写回" in result.data.resolution_note
+
+
+def test_prepare_write_panel_keeps_confirmation_handle_outside_memory_snapshot():
+    from otomo.agent._common import panel_data_from_payload
+
+    payload = {
+        "username": "tester",
+        "action": {
+            "id": "wr_123",
+            "operation": "mark_episodes_watched",
+            "summary": "将《恋死》看到第 3 集",
+            "subject_id": 541285,
+            "payload": {"up_to": 3},
+            "status": "pending",
+        },
+        "warning": "需要确认",
+        "memory": {
+            "username": "tester",
+            "pending_write_actions": [{"id": "wr_123", "status": "pending"}],
+        },
+    }
+    safe = panel_data_from_payload("prepare_bangumi_write_action", payload)
+    assert safe is not None
+    assert safe["action"]["id"] == "wr_123"
+    assert safe["action"]["payload"] == {"up_to": 3}
+    assert safe["pending_write_actions"][0]["id"] == "wr_123"
+
+
+def test_rating_alert_text_includes_summary_and_explains_delta():
+    from otomo.memory.models import InboxItem
+    from otomo.notifications import digest_text
+
+    item = InboxItem(
+        id="rating-1",
+        kind="system",
+        title="口碑哨兵",
+        payload={
+            "sections": [{
+                "title": "口碑异动",
+                "items": [{
+                    "name": "测试番",
+                    "summary": "近 30 天加权均分 8.10 → 7.80（30 天 -0.30，当前 1234 人评分）。",
+                }],
+            }]
+        },
+    )
+    text = digest_text(item)
+    assert "8.10 → 7.80" in text
+    assert "30 天 -0.30" in text
+    assert "1234 人评分" in text
+
+
+def test_discord_rating_movers_embed_explains_numbers():
+    from otomo.discord_bot import build_embeds
+
+    class FakeEmbed:
+        def __init__(self, **kw):
+            self.kw = kw
+            self.fields = []
+            self.footer = ""
+
+        def add_field(self, name, value, inline=False):
+            self.fields.append((name, value))
+
+        def set_footer(self, text):
+            self.footer = text
+
+    class FD:
+        Embed = FakeEmbed
+
+    embeds = build_embeds(FD, "get_rating_movers", {
+        "down": [{
+            "subject_id": 7,
+            "title": "测试番",
+            "delta_score": -0.31,
+            "current_score": 7.82,
+            "rating_total": 1234,
+        }],
+    })
+    assert len(embeds) == 1
+    assert "当前加权均分" in embeds[0].kw["description"]
+    assert "1234 人评分" in embeds[0].fields[0][1]
+    assert "30 天 -0.31" in embeds[0].fields[0][1]

@@ -549,11 +549,22 @@ class SubscriptionService:
         for board, label, emoji in ((movers.data.up, "评分上涨", "📈"), (movers.data.down, "评分下跌", "📉")):
             for m in board:
                 if m.subject_id in mine:
+                    delta = float(m.delta_score)
+                    change = f"{delta:+.2f}"
+                    score_detail = ""
+                    if m.current_score is not None:
+                        previous = float(m.current_score) - delta
+                        score_detail = (
+                            f"：加权均分约 {previous:.2f} → {float(m.current_score):.2f}"
+                            f"（30 天 {change}，当前 {m.rating_total} 人评分）"
+                        )
                     lines.append({
                         "id": m.subject_id,
                         "name": m.title,
-                        "summary": f"{emoji} 你{mine[m.subject_id]}的《{m.title}》近30天{label} {abs(m.delta_score)} 分"
-                                   + (f"（现 {m.current_score}，{m.rating_total} 人评分）" if m.current_score is not None else ""),
+                        "summary": (
+                            f"{emoji} 你{mine[m.subject_id]}的作品近 30 天{label} {abs(m.delta_score)} 分{score_detail}。"
+                            "这是评分趋势提醒，不代表作品质量已被定论。"
+                        ),
                         "url": f"https://bgm.tv/subject/{m.subject_id}",
                     })
         return {

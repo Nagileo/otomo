@@ -9,6 +9,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from ...agent.contracts import Citation, Tool, ToolResult
+from .alias import resolve_subject_alias
 from .client import SUBJECT_TYPE, BangumiClient
 from .models import (
     CharacterBrief,
@@ -83,7 +84,10 @@ class SubjectRelationsArgs(BaseModel):
 
 class SearchSubjectsTool(Tool):
     name = "search_subjects"
-    description = "按关键词搜索作品（番剧/书/游戏等），返回候选及评分。用于把作品名解析成 ID。"
+    description = (
+        "按作品名或圈内简称搜索作品（番剧/书/游戏等），返回候选及评分，用于解析 Bangumi ID。"
+        "resolution_status=ambiguous 时绝不能直接选择第一条或执行写回，必须让用户确认候选。"
+    )
     args_model = SearchSubjectsArgs
     result_model = SubjectListResult
 
@@ -93,10 +97,34 @@ class SearchSubjectsTool(Tool):
     async def run(self, args: SearchSubjectsArgs) -> ToolResult[SubjectListResult]:
         stype = SUBJECT_TYPE.get(args.type) if args.type else None
         raw = await self.client.search_subjects(args.keyword, stype, limit=args.limit)
-        items = [SubjectBrief.from_raw(s) for s in (raw.get("data") or [])]
+        resolution = await resolve_subject_alias(
+            self.client,
+            args.keyword,
+            raw.get("data") or [],
+            subject_type=stype,
+            limit=args.limit,
+        )
+        items = []
+        for candidate in resolution.candidates:
+            item = SubjectBrief.from_raw(candidate.subject)
+            if candidate.confidence is not None:
+                item = item.model_copy(update={
+                    "matched_alias": args.keyword,
+                    "match_confidence": candidate.confidence,
+                    "matched_by": candidate.matched_by,
+                    "match_note": candidate.match_note,
+                })
+            items.append(item)
         return ToolResult(
             ok=True,
-            data=SubjectListResult(query=args.keyword, count=len(items), subjects=items),
+            data=SubjectListResult(
+                query=args.keyword,
+                count=len(items),
+                subjects=items,
+                resolution_status=resolution.status,
+                resolved_subject_id=resolution.resolved_subject_id,
+                resolution_note=resolution.note,
+            ),
             sources=[_subject_citation(s.id, s.name_cn or s.name, s.image) for s in items[:5]],
         )
 

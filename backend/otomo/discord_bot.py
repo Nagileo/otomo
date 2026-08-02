@@ -179,27 +179,41 @@ def _season_embeds(discord, data: dict) -> list:
 
 
 def _movers_embeds(discord, data: dict) -> list:
-    boards = [("📉 口碑下跌(崩)", data.get("down")), ("📈 口碑上涨", data.get("up")), ("🏁 近期完结", data.get("done"))]
+    boards = [
+        ("📉 下降较多", data.get("down")),
+        ("📈 上涨较多", data.get("up")),
+        ("🏁 近期完结后的变化", data.get("done")),
+    ]
     lines_all = []
     for label, board in boards:
         rows = (board or [])[:6]
         if not rows:
             continue
         lines = []
-        for m in rows:
+        for index, m in enumerate(rows, 1):
             delta = float(m.get("delta_score") or 0)
-            sign = "+" if delta > 0 else ""
+            current = m.get("current_score")
+            score = f"{float(current):.2f} 分" if current is not None else "当前分暂无"
+            total = int(m.get("rating_total") or 0)
+            sample = f"，{total} 人评分" if total else ""
             lines.append(
-                f"[{m.get('title') or '?'}](https://bgm.tv/subject/{m.get('subject_id')}) "
-                f"`{sign}{delta}` (现 {m.get('current_score') or '?'})"
+                f"{index}. [{m.get('title') or '?'}](https://bgm.tv/subject/{m.get('subject_id')})："
+                f"{score}{sample}，**30 天 {delta:+.2f}**"
             )
         lines_all.append((label, "\n".join(lines)))
     if not lines_all:
         return []
-    e = discord.Embed(title="口碑异动 · 近 30 天", color=_EMBED_COLOR)
+    e = discord.Embed(
+        title="最近 30 天评分变化",
+        description=(
+            "**变化值 = 当前加权均分 - 30 天前加权均分**。"
+            "正数表示上涨，负数表示下降；它反映近期评分趋势，不等于作品质量结论。"
+        ),
+        color=_EMBED_COLOR,
+    )
     for label, value in lines_all:
         e.add_field(name=label, value=value[:1024], inline=False)
-    e.set_footer(text="数据来自 netaba.re 快照(第三方)")
+    e.set_footer(text="netaba.re 第三方每日快照 · 样本量越小，波动越需谨慎")
     return [e]
 
 
@@ -731,12 +745,28 @@ def run() -> None:
         observations: list[tuple[str, dict]] = []
         tools_called: list[str] = []
         pending_actions: list[dict] = []
+        pending_action_ids: set[str] = set()
+        baseline_pending_ids: set[str] = set()
         followups: list[str] = []
         spoiler_snapshot: dict = {}
         final_sources: list[dict] = []
         state = AgentState()
         turn_id = ""
         begin_usage_ledger()
+
+        def add_pending_action(action: object) -> None:
+            if not isinstance(action, dict) or not active_username:
+                return
+            action_id = str(action.get("id") or "")
+            if not action_id or action_id in pending_action_ids:
+                return
+            pending_action_ids.add(action_id)
+            pending_actions.append({
+                "id": action_id,
+                "summary": str(action.get("summary") or "写回动作"),
+                "username": active_username,
+            })
+
         try:
             async with lock:
                 session_store.ensure_session(session_id, owner, title="Discord 对话")
@@ -761,6 +791,11 @@ def run() -> None:
                             ltm,
                             username=active_username,
                         )
+                    baseline_pending_ids = {
+                        str(action.get("id"))
+                        for action in ((state.short_term.get("memory") or {}).get("pending_write_actions") or [])
+                        if isinstance(action, dict) and action.get("id")
+                    }
                 else:
                     state.short_term.pop("memory", None)
                 if attachments:  # 与 Web /chat 同构:识图工具从 short_term 读 upload:// 附件
@@ -792,6 +827,13 @@ def run() -> None:
                             elif isinstance(ev, StateEvent):
                                 if ev.scope == "memory":
                                     state.short_term["memory"] = dict(ev.snapshot or {})
+                                    # Protocol fallback: if a future memory tool
+                                    # changes its Observation projection, newly
+                                    # created pending writes still get Discord
+                                    # buttons from the authoritative memory state.
+                                    for action in (ev.snapshot or {}).get("pending_write_actions") or []:
+                                        if isinstance(action, dict) and str(action.get("id") or "") not in baseline_pending_ids:
+                                            add_pending_action(action)
                                 elif ev.scope == "spoiler":
                                     spoiler_snapshot = dict(ev.snapshot or {})
                             elif isinstance(ev, ProgressEvent) and progress_cb:
@@ -804,13 +846,7 @@ def run() -> None:
                                 if ev.data:
                                     observations.append((ev.name, ev.data))
                                     if ev.name == "prepare_bangumi_write_action" and ev.ok:
-                                        action = (ev.data or {}).get("action") or {}
-                                        if action.get("id") and active_username:
-                                            pending_actions.append({
-                                                "id": str(action["id"]),
-                                                "summary": str(action.get("summary") or "写回动作"),
-                                                "username": active_username,
-                                            })
+                                        add_pending_action((ev.data or {}).get("action") or {})
                             elif isinstance(ev, ErrorEvent):
                                 result = result or f"⚠️ 出错了:{ev.message[:200]}"
                 finally:
@@ -1216,6 +1252,20 @@ def run() -> None:
     async def calendar(interaction: "discord.Interaction", 范围: app_commands.Choice[str]) -> None:
         await _slash_answer(interaction, "今天我在追的番更新什么？" if 范围.value == "today" else "给我本周追番放送日历")
 
+    @tree.command(name="打卡", description="把某部作品看到第几集写回 Bangumi（执行前会二次确认）")
+    @app_commands.describe(作品="全名或圈内简称，如 恋死 / 绘死", 集数="已经看到的正片集数")
+    async def episode_checkin(
+        interaction: "discord.Interaction",
+        作品: str,
+        集数: app_commands.Range[int, 1, 10000],
+    ) -> None:
+        await _slash_answer(
+            interaction,
+            f"请解析动画简称“{作品}”，把对应 Bangumi 动画的正片进度标记为看到第 {int(集数)} 集。"
+            "先用 search_subjects(type='anime') 查看 resolution_status；如果 ambiguous 就列候选让我选，"
+            "只有 exact/confident_alias 才 prepare 写回，执行前必须给我确认按钮。",
+        )
+
     @tree.command(name="记忆", description="查看 Otomo 对你的长期偏好、进度和反馈记忆")
     async def memory(interaction: "discord.Interaction") -> None:
         await _slash_answer(interaction, "你现在长期记住了我的哪些偏好、避雷、观看进度和推荐反馈？")
@@ -1387,11 +1437,11 @@ def run() -> None:
         "**怎么用:**\n"
         "• 在频道里 **@我** 提问,或**私信我**(私信不用 @)\n"
         "• **发图给我**能识番(截图/CG/封面都行)\n"
-        "• 斜杠命令:`/推荐` `/评价` `/在哪看` `/新番` `/日历` `/记忆` `/剧透` `/订阅` `/新对话`\n\n"
+        "• 斜杠命令:`/推荐` `/评价` `/在哪看` `/新番` `/日历` `/打卡` `/记忆` `/剧透` `/订阅` `/新对话`\n\n"
         "**能问什么(举例):**\n"
         "• 推荐:`推荐几部治愈番` / `类似孤独摇滚的` / `今晚能看完的短番`\n"
         "• 评价:`药屋少女的呢喃口碑怎么样` / `最近什么番崩了`\n"
-        "• 追番:`这季什么番最火` / `药屋在哪能看` / `我看完孤独摇滚第8集了`(带确认按钮写回)\n"
+        "• 追番:`这季什么番最火` / `药屋在哪能看` / `/打卡 作品:恋死 集数:3`(带确认按钮写回)\n"
         "• 考据:`白色相簿2 冬马的声优还配过谁` / `这是什么梗`\n"
         "• 玩:`抽个今日番签` / `考考我`(答案点开剧透条揭晓)\n\n"
         "**个人化:** `/绑定` 关联你的 Bangumi 账号后,推荐用你自己的收藏画像,进度打卡/写回也解锁。\n"

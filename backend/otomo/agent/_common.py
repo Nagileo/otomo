@@ -185,7 +185,19 @@ def _memory_prompt_lines(memory: dict[str, Any]) -> list[str]:
             lines.append("- 本地计划板：" + "；".join(plan_bits) + "。")
     pending_write_actions = memory.get("pending_write_actions") or []
     if isinstance(pending_write_actions, list) and pending_write_actions:
-        lines.append("- 有待用户确认的写动作（Bangumi 写回或下载器推送）；不要声称已执行，等待前端确认。")
+        pending_bits = []
+        for action in pending_write_actions[:6]:
+            if not isinstance(action, dict) or action.get("status") not in {None, "pending"}:
+                continue
+            if action.get("id"):
+                pending_bits.append(f"{action['id']}={action.get('summary') or action.get('operation') or '写回动作'}")
+        detail = "；".join(pending_bits)
+        lines.append(
+            "- 有待用户确认的写动作（Bangumi 写回或下载器推送）"
+            + (f"：{detail}" if detail else "")
+            + "。不要声称已执行；用户点击界面按钮或本轮明确说“确认/执行”时，"
+              "用对应 action_id 调 execute_bangumi_write_action，不要再次 prepare。"
+        )
     profiles = memory.get("profile_snapshot") or {}
     if isinstance(profiles, dict) and profiles:
         chunks = []
@@ -991,12 +1003,12 @@ def _safe_collection_dashboard_payload(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _safe_memory_payload(data: dict[str, Any]) -> dict[str, Any]:
+def _safe_memory_payload(data: dict[str, Any], *, include_action: bool = True) -> dict[str, Any]:
     memory = data.get("memory") if isinstance(data.get("memory"), dict) else data
     if not isinstance(memory, dict):
         return {}
     progress = memory.get("progress") if isinstance(memory.get("progress"), dict) else {}
-    return {
+    safe = {
         "username": memory.get("username"),
         "likes": _trim_dicts(memory.get("likes"), limit=12),
         "dislikes": _trim_dicts(memory.get("dislikes"), limit=12),
@@ -1012,6 +1024,39 @@ def _safe_memory_payload(data: dict[str, Any]) -> dict[str, Any]:
         "recommendation_lists": _trim_dicts(memory.get("recommendation_lists"), limit=6),
         "inbox": _trim_dicts(memory.get("inbox"), limit=8),
         "updated_at": memory.get("updated_at"),
+    }
+    # Memory tools return both a summary snapshot and operation-specific data.
+    # Keep the confirmation handle in ObservationEvent data; otherwise Discord
+    # cannot render its native confirm/cancel buttons even though Web can still
+    # discover the pending action through the memory StateEvent.
+    action = data.get("action") if include_action and isinstance(data.get("action"), dict) else None
+    if action:
+        safe["action"] = {
+            key: action.get(key)
+            for key in (
+                "id", "operation", "summary", "subject_id", "subject_name",
+                "episode_id", "payload", "status", "created_at", "error",
+            )
+            if action.get(key) is not None
+        }
+    if include_action:
+        for key in ("requires_confirmation", "warning", "message", "decision"):
+            if data.get(key) is not None:
+                safe[key] = data.get(key)
+    return safe
+
+
+def _safe_rating_movers_payload(data: dict[str, Any]) -> dict[str, Any]:
+    analysis = data.get("season_analysis") if isinstance(data.get("season_analysis"), dict) else {}
+    return {
+        "up": _trim_dicts(data.get("up"), limit=10),
+        "down": _trim_dicts(data.get("down"), limit=10),
+        "done": _trim_dicts(data.get("done"), limit=10),
+        "season_analysis": {
+            str(key): _trim_text(value, 700)
+            for key, value in list(analysis.items())[:4]
+        },
+        "caveats": _trim_strings(data.get("caveats"), limit=4, text_limit=180),
     }
 
 
@@ -1367,6 +1412,8 @@ def panel_data_from_payload(name: str, payload: dict[str, Any] | None) -> dict[s
         return _safe_pixiv_payload(data)
     if name == "get_trending_subjects":
         return _safe_trending_payload(data)
+    if name == "get_rating_movers":
+        return _safe_rating_movers_payload(data)
     if name == "get_character_birthdays":
         return {
             "date": data.get("date"),
@@ -1422,6 +1469,9 @@ def memory_state_from_result(name: str, result: ToolResult) -> dict[str, Any] | 
     if name == "build_taste_report":
         data = payload.get("memory") if isinstance(payload.get("memory"), dict) else None
         return _safe_memory_payload(data) if data else None
+    if name in _MEMORY_TOOLS:
+        data = payload.get("memory") if isinstance(payload.get("memory"), dict) else payload
+        return _safe_memory_payload({"memory": data}, include_action=False)
     data = panel_data_from_payload(name, payload)
     return data if data else None
 
