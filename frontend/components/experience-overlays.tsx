@@ -50,7 +50,8 @@ export function CommandPalette() {
   const commands = [
     ["/", "今天看什么", "今日追番与落后进度"], ["/chat", "打开对话", "向 Otomo 提问"],
     ["/discover", "发现作品", "季番导视与跨媒介推荐"], ["/library", "查看收藏", "仪表盘与月报"],
-    ["/workspace", "我的工作区", "保存视图与自定义清单"], ["/settings/subscriptions", "订阅中心", "推送规则与投递记录"],
+    ["/workspace", "我的工作区", "保存视图与自定义清单"], ["/friends", "打开好友圈", "追番动态与口味同步率"],
+    ["/settings/subscriptions", "订阅中心", "推送规则与投递记录"],
   ];
   function go(href: string) { exp.setCommandOpen(false); router.push(href); }
   return (

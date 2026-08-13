@@ -166,6 +166,91 @@ def test_workspace_and_inbox_are_account_scoped(tmp_path, monkeypatch):
         assert client.get("/product/inbox").json()["data"]["unread"] == 0
 
 
+def test_workspace_friends_are_account_scoped_and_feed_product_pulse(tmp_path, monkeypatch):
+    _configure_stores(tmp_path, monkeypatch)
+
+    async def fake_get_user(_self, username):
+        return {"username": username, "nickname": "测试好友"}
+
+    async def fake_collections(
+        _self, username, subject_type=2, collection_type=None, max_items=500,
+    ):
+        assert username == "bob"
+        assert subject_type == 2
+        assert collection_type is None
+        assert max_items == 1000
+        return [{
+            "type": 3,
+            "rate": 8,
+            "ep_status": 4,
+            "updated_at": "2026-08-12T08:00:00Z",
+            "subject": {
+                "id": 42,
+                "name_cn": "测试作品",
+                "eps": 12,
+                "images": {"small": "https://example.test/42.jpg"},
+            },
+        }]
+
+    async def fake_compare(_self, args):
+        from otomo.tools.user_analysis.tool import (
+            FriendSyncEntry,
+            FriendsPulse,
+            PulseEntry,
+            TasteCompareResult,
+        )
+        if args.mode == "friends_pulse":
+            return ToolResult(ok=True, data=TasteCompareResult(
+                username="alice", peer_username="", subject_type="anime",
+                pulse=FriendsPulse(
+                    watching_hot=[PulseEntry(
+                        subject_id=42, name="测试作品", count=1, friends=["bob"],
+                    )],
+                    friends_counted=1,
+                ),
+            ))
+        return ToolResult(ok=True, data=TasteCompareResult(
+            username="alice", peer_username="", subject_type="anime",
+            matrix=[FriendSyncEntry(
+                username="bob", sync_score=82, shrunk_score=78, sync_level=8, common_rated=30,
+            )],
+        ))
+
+    monkeypatch.setattr("otomo.api.app.BangumiClient.get_user", fake_get_user)
+    monkeypatch.setattr(
+        "otomo.api.app.BangumiClient.get_all_user_collections", fake_collections,
+    )
+    monkeypatch.setattr("otomo.api.app.CompareUserTasteTool.run", fake_compare)
+    with TestClient(app) as client:
+        assert client.get("/workspace/friends").status_code == 401
+        _session_id, csrf = _login(client)
+        created = client.post(
+            "/workspace/friends",
+            headers={"x-otomo-csrf": csrf},
+            json={"username": "Bob"},
+        )
+        assert created.status_code == 200
+        assert created.json()["data"]["username"] == "bob"
+        assert created.json()["data"]["nickname"] == "测试好友"
+        rows = client.get("/workspace/friends").json()["data"]
+        assert [row["username"] for row in rows] == ["bob"]
+
+        product = client.get("/product/friends?subject_type=anime").json()["data"]
+        assert product["pulse"]["watching_hot"][0]["subject_id"] == 42
+        assert product["matrix"][0]["shrunk_score"] == 78
+
+        detail = client.get("/product/friends/bob?subject_type=anime")
+        assert detail.status_code == 200
+        assert detail.json()["data"]["watching"][0]["ep_status"] == 4
+        assert client.get("/product/friends/not-saved").status_code == 404
+
+        deleted = client.delete(
+            "/workspace/friends/bob", headers={"x-otomo-csrf": csrf},
+        )
+        assert deleted.status_code == 200
+        assert client.get("/workspace/friends").json()["data"] == []
+
+
 def test_webpush_api_binds_devices_without_exposing_capability_secrets(tmp_path, monkeypatch):
     _configure_stores(tmp_path, monkeypatch)
     monkeypatch.setattr(config.settings, "webpush_enabled", True)

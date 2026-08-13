@@ -53,6 +53,7 @@ type ExperienceContextValue = {
   unread: number;
   refreshUnread: () => Promise<void>;
   authenticated: boolean;
+  authReady: boolean;
   csrf: string;
   online: boolean;
 };
@@ -60,7 +61,7 @@ type ExperienceContextValue = {
 const ExperienceContext = createContext<ExperienceContextValue | null>(null);
 const APPEARANCE_KEY = "otomo:appearance:v1";
 const COMPARE_KEY = "otomo:compare:v1";
-const TASK_KEY = "otomo:tasks:v1";
+const TASK_KEY = "otomo:tasks:v2";
 
 function parseLocal<T>(key: string, fallback: T): T {
   if (typeof window === "undefined") return fallback;
@@ -114,6 +115,7 @@ export function ExperienceProvider({ children }: { children: ReactNode }) {
   const [tasks, setTasks] = useState<TaskRecord[]>([]);
   const [unread, setUnread] = useState(0);
   const [authenticated, setAuthenticated] = useState(false);
+  const [authReady, setAuthReady] = useState(false);
   const [csrf, setCsrf] = useState("");
   const [online, setOnline] = useState(true);
 
@@ -123,14 +125,21 @@ export function ExperienceProvider({ children }: { children: ReactNode }) {
     try { setCompareItems(JSON.parse(localStorage.getItem(COMPARE_KEY) || "[]").slice(0, 3)); } catch { /* ignore */ }
     try {
       const previous: TaskRecord[] = JSON.parse(localStorage.getItem(TASK_KEY) || "[]");
-      setTasks(previous.map<TaskRecord>((task) => task.status === "running" ? { ...task, status: "interrupted" } : task).slice(0, 12));
+      const cutoff = Date.now() - 15 * 60 * 1000;
+      setTasks(previous
+        .filter((task) => task.status === "running" || new Date(task.updatedAt).getTime() >= cutoff)
+        .map<TaskRecord>((task) => task.status === "running" ? { ...task, status: "interrupted" } : task)
+        .slice(0, 12));
     } catch { /* ignore */ }
     wallpaperAsset("get").then((blob) => {
       if (blob) setWallpaperUrl(URL.createObjectURL(blob));
     }).catch(() => undefined);
     const syncOnline = () => setOnline(navigator.onLine);
     syncOnline(); window.addEventListener("online", syncOnline); window.addEventListener("offline", syncOnline);
-    authSession().then((auth) => { setAuthenticated(Boolean(auth.authenticated)); setCsrf(auth.csrf_token || ""); }).catch(() => undefined);
+    authSession()
+      .then((auth) => { setAuthenticated(Boolean(auth.authenticated)); setCsrf(auth.csrf_token || ""); })
+      .catch(() => undefined)
+      .finally(() => setAuthReady(true));
     if ("serviceWorker" in navigator) {
       if (process.env.NODE_ENV === "production") {
         navigator.serviceWorker.register("/sw.js").catch(() => undefined);
@@ -153,11 +162,12 @@ export function ExperienceProvider({ children }: { children: ReactNode }) {
       "/product/monthly-report": "生成观看报告", "/product/compare": "对比作品",
     };
     const started = (event: Event) => {
-      const d = (event as CustomEvent<{ id: string; path: string }>).detail;
+      const d = (event as CustomEvent<{ id: string; path: string; label?: string; href?: string }>).detail;
       const key = Object.keys(labels).find((x) => d.path.startsWith(x));
-      if (!key) return;
+      if (!key && !d.label) return;
       const now = new Date().toISOString();
-      const record: TaskRecord = { id: d.id, label: labels[key], href: pathname, status: "running", startedAt: now, updatedAt: now };
+      const label = d.label || (key ? labels[key] : "后台任务");
+      const record: TaskRecord = { id: d.id, label, href: d.href || pathname, status: "running", startedAt: now, updatedAt: now };
       setTasks((rows) => [record, ...rows].slice(0, 12));
     };
     const finished = (event: Event) => {
@@ -228,8 +238,8 @@ export function ExperienceProvider({ children }: { children: ReactNode }) {
     compareItems, addCompareItem, removeCompareItem: (id) => setCompareItems((rows) => rows.filter((x) => x.id !== id)),
     clearCompareItems: () => setCompareItems([]), tasks, startTask, finishTask,
     dismissTask: (id) => setTasks((rows) => rows.filter((x) => x.id !== id)),
-    unread, refreshUnread, authenticated, csrf, online,
-  }), [appearance, wallpaperUrl, commandOpen, notificationOpen, watchOpen, settingsOpen, compareOpen, compareItems, tasks, unread, authenticated, csrf, online, setAppearance, saveWallpaper, clearWallpaper, addCompareItem, startTask, finishTask, refreshUnread]);
+    unread, refreshUnread, authenticated, authReady, csrf, online,
+  }), [appearance, wallpaperUrl, commandOpen, notificationOpen, watchOpen, settingsOpen, compareOpen, compareItems, tasks, unread, authenticated, authReady, csrf, online, setAppearance, saveWallpaper, clearWallpaper, addCompareItem, startTask, finishTask, refreshUnread]);
 
   useEffect(() => {
     const handler = (event: Event) => {

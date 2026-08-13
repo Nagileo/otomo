@@ -12,9 +12,21 @@ export async function authSession() {
   return readJson(await fetch(`${BACKEND}/auth/session`, { credentials: "include" }));
 }
 
-export async function productFetch(path: string, init?: RequestInit) {
-  const taskId = typeof window !== "undefined" ? crypto.randomUUID() : "";
-  if (taskId) window.dispatchEvent(new CustomEvent("otomo:task-start", { detail: { id: taskId, path } }));
+type ProductFetchOptions = {
+  track?: boolean;
+  label?: string;
+  href?: string;
+};
+
+export async function productFetch(
+  path: string,
+  init?: RequestInit,
+  options: ProductFetchOptions = {},
+) {
+  const taskId = options.track && typeof window !== "undefined" ? crypto.randomUUID() : "";
+  if (taskId) window.dispatchEvent(new CustomEvent("otomo:task-start", {
+    detail: { id: taskId, path, label: options.label, href: options.href },
+  }));
   try {
     const response = await fetch(`${BACKEND}${path}`, { credentials: "include", ...init });
     const result = await readJson(response);

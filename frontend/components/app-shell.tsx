@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   Bell, BookOpen, CalendarDays, Command, Compass, ListChecks, LogIn, LogOut,
-  MessageCircle, MonitorCog, Palette, Sparkles,
+  MessageCircle, MonitorCog, Palette, Sparkles, Users,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 
@@ -75,6 +75,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <button className="secondary-nav" onClick={() => exp.setWatchOpen(true)}><CalendarDays size={17} /><span>快捷追番</span></button>
         <button className="secondary-nav" onClick={() => exp.setNotificationOpen(true)}><Bell size={17} /><span>通知</span>{exp.unread ? <b className="nav-count">{exp.unread > 99 ? "99+" : exp.unread}</b> : null}</button>
         <button className="secondary-nav" onClick={() => exp.setCompareOpen(true)}><ListChecks size={17} /><span>作品对比</span>{exp.compareItems.length ? <b className="nav-count">{exp.compareItems.length}</b> : null}</button>
+        <Link className={`secondary-nav${active(pathname, "/friends") ? " active" : ""}`} href="/friends"><Users size={17} /><span>好友圈</span></Link>
         <button className="secondary-nav" onClick={() => exp.setSettingsOpen(true)}><Palette size={17} /><span>外观</span></button>
         <Link className="secondary-nav" href="/settings/subscriptions"><MonitorCog size={17} /><span>订阅设置</span></Link>
         <Link className="secondary-nav" href="/share/mine"><Sparkles size={17} /><span>我的分享</span></Link>

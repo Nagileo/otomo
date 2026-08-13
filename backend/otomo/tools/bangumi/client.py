@@ -220,6 +220,10 @@ class BangumiClient:
         """用 token 取当前用户信息（含 username）。需要 BANGUMI_TOKEN。"""
         return await self._get("/v0/me")
 
+    async def get_user(self, username: str) -> Any:
+        """Public Bangumi user profile by username."""
+        return await self._get(f"/v0/users/{username}")
+
     async def get_user_collection(self, username: str, subject_id: int) -> Any:
         """获取用户单个条目收藏。未收藏/私有不可见时上抛 httpx.HTTPStatusError。"""
         return await self._get(f"/v0/users/{username}/collections/{subject_id}")

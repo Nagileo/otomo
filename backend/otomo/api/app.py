@@ -12,6 +12,7 @@ import uuid
 from typing import Any, AsyncIterator, Literal
 from urllib.parse import urlencode, urlparse
 
+import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, Response
@@ -72,8 +73,10 @@ from ..tools.product_loop.tool import (
 )
 from ..tools.profile.tool import CollectionDashboardArgs, CollectionDashboardTool
 from ..tools.season.tool import SeasonGuideBriefArgs, SeasonGuideBriefTool
+from ..tools.user_analysis.tool import CompareUserTasteTool, TasteCompareArgs, _fetch_friends
 from ..workspace import (
     SavedViewCreate,
+    WorkspaceFriendCreate,
     WorkspaceListCreate,
     WorkspaceListItemRequest,
     WorkspaceStore,
@@ -1587,6 +1590,196 @@ async def delete_workspace_list_item(
     ):
         raise HTTPException(status_code=404, detail="清单或条目不存在")
     return {"ok": True, "subject_id": subject_id}
+
+
+@app.get("/workspace/friends")
+async def list_workspace_friends(request: Request, response: Response) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    rows = app.state.workspace_store.list_friends(_workspace_owner(session.auth_session_id))
+    return {"ok": True, "data": [x.model_dump(mode="json") for x in rows]}
+
+
+@app.post("/workspace/friends")
+async def upsert_workspace_friend(
+    req: WorkspaceFriendCreate, request: Request, response: Response,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    identity = _authenticated_identity(session.auth_session_id)
+    if req.username.strip().lstrip("@").lower() == str(identity.username or "").lower():
+        raise HTTPException(status_code=400, detail="不能把自己加入好友关注名单")
+    client = await _request_client(app, session.auth_session_id)
+    try:
+        try:
+            profile = await client.get_user(req.username.strip().lstrip("@"))
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                raise HTTPException(status_code=404, detail="没有找到这个 Bangumi 用户") from exc
+            raise HTTPException(status_code=502, detail="Bangumi 用户服务暂时不可用") from exc
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail="无法连接 Bangumi 用户服务") from exc
+    finally:
+        await client.aclose()
+    canonical = str(profile.get("username") or req.username).strip()
+    nickname = req.nickname or str(profile.get("nickname") or "")
+    row = app.state.workspace_store.upsert_friend(
+        _workspace_owner(session.auth_session_id),
+        WorkspaceFriendCreate(username=canonical, nickname=nickname),
+    )
+    return {"ok": True, "data": row.model_dump(mode="json")}
+
+
+@app.post("/workspace/friends/import")
+async def import_workspace_friends(request: Request, response: Response) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    identity = _authenticated_identity(session.auth_session_id)
+    try:
+        friends, source_url = await _fetch_friends(identity.username, 200)
+    except Exception as exc:  # noqa: BLE001 - external HTML source may change
+        raise HTTPException(status_code=502, detail=f"Bangumi 好友页读取失败：{type(exc).__name__}") from exc
+    rows = app.state.workspace_store.import_friends(
+        _workspace_owner(session.auth_session_id),
+        [WorkspaceFriendCreate(username=x.username, nickname=x.nickname) for x in friends],
+    )
+    return {
+        "ok": True,
+        "data": [x.model_dump(mode="json") for x in rows],
+        "imported": len(friends),
+        "source_url": source_url,
+    }
+
+
+@app.delete("/workspace/friends/{username}")
+async def delete_workspace_friend(
+    username: str, request: Request, response: Response,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    if not app.state.workspace_store.delete_friend(
+        _workspace_owner(session.auth_session_id), username,
+    ):
+        raise HTTPException(status_code=404, detail="好友不在关注名单中")
+    return {"ok": True, "username": username}
+
+
+@app.get("/product/friends")
+async def product_friends(
+    request: Request,
+    response: Response,
+    subject_type: Literal["anime", "book", "music", "game", "real"] = "anime",
+    limit: int = 12,
+) -> dict[str, Any]:
+    """Account-scoped friend pulse and taste ranking for the product UI."""
+    session = _ensure_auth_session(request, response)
+    _product_rate_limit(request, session.auth_session_id, "friends")
+    identity = _authenticated_identity(session.auth_session_id)
+    friends = app.state.workspace_store.list_friends(_workspace_owner(session.auth_session_id))
+    selected = friends[: min(max(limit, 1), 20)]
+    if not selected:
+        return {
+            "ok": True,
+            "data": {"friends": [], "pulse": None, "matrix": [], "caveats": []},
+        }
+    names = [x.username for x in selected]
+    client = await _request_client(app, session.auth_session_id)
+    try:
+        tool = CompareUserTasteTool(client)
+        common = {
+            "username": identity.username,
+            "subject_type": subject_type,
+            "friends_limit": len(names),
+            "peer_usernames": names,
+        }
+        # Run sequentially so the second report reuses the first report's Bangumi cache.
+        pulse = await tool.run(TasteCompareArgs(**common, mode="friends_pulse"))
+        matrix = await tool.run(TasteCompareArgs(**common, mode="friends_matrix"))
+        caveats = list(dict.fromkeys(
+            [*(pulse.data.caveats if pulse.ok and pulse.data else []),
+             *(matrix.data.caveats if matrix.ok and matrix.data else [])]
+        ))
+        return {
+            "ok": True,
+            "data": {
+                "friends": [x.model_dump(mode="json") for x in selected],
+                "pulse": pulse.data.pulse.model_dump(mode="json", exclude_none=True)
+                if pulse.ok and pulse.data and pulse.data.pulse else None,
+                "matrix": [x.model_dump(mode="json", exclude_none=True) for x in matrix.data.matrix]
+                if matrix.ok and matrix.data else [],
+                "caveats": caveats,
+            },
+        }
+    finally:
+        await client.aclose()
+
+
+def _friend_collection_item(row: dict[str, Any]) -> dict[str, Any] | None:
+    subject = row.get("subject") if isinstance(row.get("subject"), dict) else {}
+    subject_id = subject.get("id") or row.get("subject_id")
+    if not subject_id:
+        return None
+    images = subject.get("images") if isinstance(subject.get("images"), dict) else {}
+    return {
+        "subject_id": int(subject_id),
+        "name": subject.get("name_cn") or subject.get("name") or f"Subject {subject_id}",
+        "image": images.get("small") or images.get("common") or "",
+        "collection_type": row.get("type"),
+        "rate": row.get("rate") or None,
+        "ep_status": row.get("ep_status") or 0,
+        "eps": subject.get("eps") or subject.get("total_episodes") or None,
+        "updated_at": row.get("updated_at") or "",
+    }
+
+
+@app.get("/product/friends/{friend_username}")
+async def product_friend_detail(
+    friend_username: str,
+    request: Request,
+    response: Response,
+    subject_type: Literal["anime", "book", "music", "game", "real"] = "anime",
+) -> dict[str, Any]:
+    """Return one saved friend's public collection; arbitrary users are not exposed here."""
+    session = _ensure_auth_session(request, response)
+    _product_rate_limit(request, session.auth_session_id, "friend-detail")
+    saved = {
+        row.username: row
+        for row in app.state.workspace_store.list_friends(_workspace_owner(session.auth_session_id))
+    }
+    normalized = friend_username.strip().lstrip("@").lower()
+    friend = saved.get(normalized)
+    if not friend:
+        raise HTTPException(status_code=404, detail="请先把该用户加入好友关注名单")
+
+    client = await _request_client(app, session.auth_session_id)
+    try:
+        rows = await client.get_all_user_collections(
+            normalized,
+            subject_type=SUBJECT_TYPE[subject_type],
+            collection_type=None,
+            max_items=1000,
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            raise HTTPException(status_code=404, detail="没有找到该用户的公开收藏") from exc
+        raise HTTPException(status_code=502, detail="Bangumi 收藏服务暂时不可用") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="无法连接 Bangumi 收藏服务") from exc
+    finally:
+        await client.aclose()
+
+    items = [item for row in rows if (item := _friend_collection_item(row))]
+    recent = sorted(items, key=lambda item: item["updated_at"], reverse=True)
+    return {
+        "ok": True,
+        "data": {
+            "friend": friend.model_dump(mode="json"),
+            "subject_type": subject_type,
+            "watching": [item for item in recent if item["collection_type"] == 3][:30],
+            "wishlist": [item for item in recent if item["collection_type"] == 1][:20],
+            "recent": recent[:30],
+            "total_public": len(items),
+        },
+    }
 
 
 @app.patch("/today/preferences/{subject_id}")

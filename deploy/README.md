@@ -71,12 +71,49 @@ Caddy 自动为 `1-2-3-4.nip.io` 申请证书，几秒后 `https://1-2-3-4.nip.i
 
 ---
 
-## 4. 上线检查清单
+## 4. 浏览器推送（Web Push）
+
+Web Push 不是在阿里云控制台申请 key。它使用你自己长期持有的一对 **VAPID** 密钥；服务器负责推送，浏览器负责向用户请求通知权限。
+
+首次配置只需在服务器仓库目录运行：
+
+```bash
+cd ~/otomo
+bash deploy/configure_webpush.sh 你的邮箱@example.com
+bash deploy.sh
+```
+
+脚本会使用 CI 发布的 backend 镜像生成公私钥，并写入服务器本地的 `backend/.env`：
+
+```dotenv
+WEBPUSH_ENABLED=true
+WEBPUSH_VAPID_PUBLIC_KEY=<浏览器订阅使用的公钥>
+WEBPUSH_VAPID_PRIVATE_KEY=<只保存在服务器的私钥>
+WEBPUSH_VAPID_SUBJECT=mailto:你的邮箱@example.com
+```
+
+部署后，在网页执行两步：
+
+1. `订阅设置 -> 浏览器设备 -> 允许当前浏览器`，接受浏览器通知权限。
+2. 新建或编辑订阅规则，在渠道中勾选 `浏览器推送`。
+
+backend 和 scheduler 都从同一个 `backend/.env` 读取密钥，因此 `bash deploy.sh` 会同时更新。不要把真实私钥提交到 GitHub，也不要随意轮换密钥；轮换后所有浏览器都需要重新授权。确需轮换可执行：
+
+```bash
+bash deploy/configure_webpush.sh --rotate 你的邮箱@example.com
+bash deploy.sh
+```
+
+要求：公网 HTTPS、浏览器允许通知、scheduler 常驻。电脑关闭不影响服务器产生推送，但接收设备需要联网。
+
+---
+
+## 5. 上线检查清单
 - [ ] CI 绿（尤其 frontend build）
 - [ ] `AUTH_ENCRYPTION_KEY` 固定（换了全员登录失效）
 - [ ] `COOKIE_SECURE=true` + `CORS_ALLOWED_ORIGINS` 收敛到你的公网 URL
 - [ ] Bangumi OAuth 回调地址 = `FRONTEND_BASE_URL/auth/bangumi/callback`
-- [ ] 如需浏览器推送，用 `npx --yes web-push generate-vapid-keys --json` 生成一次性长期密钥，填入 `WEBPUSH_VAPID_PUBLIC_KEY/PRIVATE_KEY`，设置 `WEBPUSH_ENABLED=true`；不要在仍有活跃订阅时轮换，否则所有浏览器都要重新授权
+- [ ] 如需浏览器推送，运行 `bash deploy/configure_webpush.sh 你的邮箱@example.com`，然后重新部署并在订阅设置授权浏览器
 - [ ] `DAILY_TOKEN_BUDGET_*` 按预算设（防爬虫刷爆 LLM 账单）
 - [ ] LLM/VLM provider 后台设月度充值上限（第二道熔断）
 - [ ] 备份 cache/（auth/sessions/share/subscriptions/ltm）：`deploy/backup_cache.sh` 挂 cron，可选传 OSS
@@ -84,7 +121,7 @@ Caddy 自动为 `1-2-3-4.nip.io` 申请证书，几秒后 `https://1-2-3-4.nip.i
 
 ---
 
-## 5. 常见坑
+## 6. 常见坑
 - **分享页打不开/404**：Caddyfile 的 `@api` 千万别放裸 `/share/*`——那是前端分享页路由；API 一律走 `/api/share/*`。
 - **分享页服务端报 fetch failed**：确认 frontend 服务有 `INTERNAL_BACKEND=http://backend:8000`（SSR 不能用浏览器相对 `/api`）。
 - **`NEXT_PUBLIC_BACKEND` 改了不生效**：它是 build 期内联的，改了要 `--build` 重建 frontend 镜像。

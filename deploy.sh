@@ -34,6 +34,10 @@ cookie_secure="$(env_value COOKIE_SECURE)"
 auth_key="$(env_value AUTH_ENCRYPTION_KEY)"
 oauth_client_id="$(env_value BANGUMI_OAUTH_CLIENT_ID)"
 oauth_redirect="$(env_value BANGUMI_OAUTH_REDIRECT_URI)"
+webpush_enabled="$(env_value WEBPUSH_ENABLED)"
+webpush_public="$(env_value WEBPUSH_VAPID_PUBLIC_KEY)"
+webpush_private="$(env_value WEBPUSH_VAPID_PRIVATE_KEY)"
+webpush_subject="$(env_value WEBPUSH_VAPID_SUBJECT)"
 
 if [[ -z "$frontend_url" ]]; then
   echo "ERROR: backend/.env 必须配置 FRONTEND_BASE_URL" >&2
@@ -52,6 +56,17 @@ fi
 if [[ -n "$oauth_client_id" && "$oauth_redirect" != "$frontend_url/auth/bangumi/callback" ]]; then
   echo "ERROR: BANGUMI_OAUTH_REDIRECT_URI 必须等于 ${frontend_url}/auth/bangumi/callback" >&2
   exit 1
+fi
+if [[ "${webpush_enabled,,}" == "true" ]]; then
+  if [[ -z "$webpush_public" || -z "$webpush_private" || -z "$webpush_subject" ]]; then
+    echo "ERROR: WEBPUSH_ENABLED=true 时必须同时配置 VAPID 公钥、私钥和 subject" >&2
+    echo "可运行: bash deploy/configure_webpush.sh admin@example.com" >&2
+    exit 1
+  fi
+  if [[ "$frontend_url" != https://* ]]; then
+    echo "ERROR: 浏览器 Web Push 生产环境必须使用 HTTPS" >&2
+    exit 1
+  fi
 fi
 
 # Compose only interpolates the shell/root .env, not backend/.env. Derive the

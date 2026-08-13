@@ -2,6 +2,8 @@
 
 import { useEffect, useMemo, useState } from "react";
 
+import { AuthGate } from "../../../components/auth-gate";
+
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND ?? "http://localhost:8000";
 
 type AnyRecord = Record<string, any>;
@@ -314,11 +316,7 @@ export default function SubscriptionSettingsPage() {
       </header>
       {notice && <div className={`auth-notice ${notice.tone}`}>{notice.text}</div>}
       {!auth?.authenticated ? (
-        <section className="share-section">
-          <h2>需要先绑定 Bangumi</h2>
-          <p>订阅规则按用户隔离保存；请回到首页完成 OAuth 或本地 Token 绑定。</p>
-          <a className="inline-action" href="/">回到首页</a>
-        </section>
+        <AuthGate eyebrow="ACTIVE DELIVERY" title="让 Otomo 在合适的时间主动找到你" description="订阅规则和投递设备按账户隔离。连接后可以配置每日追番、周报、好友动态和口碑异动。" features={["站内与浏览器通知", "Discord / 邮件 / Webhook", "静默时段与过滤条件"]} />
       ) : (
         <>
           <section className="share-section">

@@ -54,6 +54,16 @@ class WorkspaceList(WorkspaceListCreate):
     updated_at: str
 
 
+class WorkspaceFriendCreate(BaseModel):
+    username: str = Field(..., min_length=1, max_length=64, pattern=r"^@?[A-Za-z0-9_.-]+$")
+    nickname: str = Field("", max_length=80)
+
+
+class WorkspaceFriend(WorkspaceFriendCreate):
+    created_at: str
+    updated_at: str
+
+
 def _dump(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
@@ -97,6 +107,16 @@ class WorkspaceStore:
                     PRIMARY KEY(list_id, subject_id),
                     FOREIGN KEY(list_id) REFERENCES workspace_lists(id) ON DELETE CASCADE
                 );
+                CREATE TABLE IF NOT EXISTS workspace_friends (
+                    owner_key TEXT NOT NULL,
+                    username TEXT NOT NULL,
+                    nickname TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(owner_key, username)
+                );
+                CREATE INDEX IF NOT EXISTS idx_workspace_friends_owner
+                    ON workspace_friends(owner_key, updated_at DESC);
                 """
             )
 
@@ -191,6 +211,55 @@ class WorkspaceStore:
                 conn.execute("UPDATE workspace_lists SET updated_at=? WHERE id=?", (now_iso(), list_id))
         return cur.rowcount > 0
 
+    def list_friends(self, owner_key: str) -> list[WorkspaceFriend]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM workspace_friends WHERE owner_key=? ORDER BY updated_at DESC",
+                (owner_key,),
+            ).fetchall()
+        return [self._friend(row) for row in rows]
+
+    def upsert_friend(self, owner_key: str, req: WorkspaceFriendCreate) -> WorkspaceFriend:
+        now = now_iso()
+        username = req.username.strip().lstrip("@").lower()
+        nickname = req.nickname.strip()
+        with self._connect() as conn:
+            existing = conn.execute(
+                "SELECT created_at FROM workspace_friends WHERE owner_key=? AND username=?",
+                (owner_key, username),
+            ).fetchone()
+            created_at = existing["created_at"] if existing else now
+            conn.execute(
+                """INSERT INTO workspace_friends(owner_key,username,nickname,created_at,updated_at)
+                VALUES(?,?,?,?,?) ON CONFLICT(owner_key,username) DO UPDATE SET
+                    nickname=excluded.nickname,updated_at=excluded.updated_at""",
+                (owner_key, username, nickname, created_at, now),
+            )
+        return WorkspaceFriend(
+            username=username,
+            nickname=nickname,
+            created_at=created_at,
+            updated_at=now,
+        )
+
+    def import_friends(
+        self,
+        owner_key: str,
+        friends: list[WorkspaceFriendCreate],
+    ) -> list[WorkspaceFriend]:
+        for friend in friends:
+            self.upsert_friend(owner_key, friend)
+        return self.list_friends(owner_key)
+
+    def delete_friend(self, owner_key: str, username: str) -> bool:
+        normalized = username.strip().lstrip("@").lower()
+        with self._connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM workspace_friends WHERE owner_key=? AND username=?",
+                (owner_key, normalized),
+            )
+        return cur.rowcount > 0
+
     @staticmethod
     def _view(row: sqlite3.Row) -> SavedView:
         return SavedView(
@@ -210,4 +279,13 @@ class WorkspaceStore:
                 subject_id=x["subject_id"], name=x["name"], subject_type=x["subject_type"],
                 image=x["image"], note=x["note"], created_at=x["created_at"],
             ) for x in items],
+        )
+
+    @staticmethod
+    def _friend(row: sqlite3.Row) -> WorkspaceFriend:
+        return WorkspaceFriend(
+            username=row["username"],
+            nickname=row["nickname"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
         )

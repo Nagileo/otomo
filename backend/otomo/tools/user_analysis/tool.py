@@ -65,6 +65,11 @@ class TasteCompareArgs(BaseModel):
         "friends_pulse=好友圈聚合视图——哪部番好友们都在追/都想看/圈内高分（'我好友都在看什么'）",
     )
     friends_limit: int = Field(10, ge=1, le=20, description="friends_matrix 模式最多比较的好友数")
+    peer_usernames: list[str] | None = Field(
+        None,
+        max_length=20,
+        description="显式好友名单；传入时不再实时解析 Bangumi 好友页",
+    )
     like_threshold: int | None = Field(None, ge=2, le=10, description="好评线（rate>该值算好评）；不传按各自评分分布自动均衡三档")
     dislike_threshold: int | None = Field(None, ge=1, le=9, description="差评线（rate<=该值算差评）；不传自动均衡")
 
@@ -835,12 +840,19 @@ class CompareUserTasteTool(Tool):
     async def _friends_pulse(self, username: str, stype: int, args: TasteCompareArgs) -> ToolResult[TasteCompareResult]:
         """好友圈聚合（用户提名，Shadow 想看推荐/共同追新的多好友升维）：
         按作品聚合好友们的 在看/想看/评分——"哪部番我的好友都在追"。"""
-        try:
-            friends, _url = await _fetch_friends(username, args.friends_limit)
-        except (httpx.HTTPError, httpx.TransportError) as e:
-            return ToolResult(ok=False, error=f"好友页抓取失败：{type(e).__name__}")
+        friends: list[FriendBrief]
+        if args.peer_usernames:
+            friends = [
+                FriendBrief(username=name, url=f"https://bgm.tv/user/{name}")
+                for name in dict.fromkeys(x.strip().lstrip("@").lower() for x in args.peer_usernames if x.strip())
+            ][: args.friends_limit]
+        else:
+            try:
+                friends, _url = await _fetch_friends(username, args.friends_limit)
+            except (httpx.HTTPError, httpx.TransportError) as e:
+                return ToolResult(ok=False, error=f"好友页抓取失败：{type(e).__name__}")
         if not friends:
-            return ToolResult(ok=False, error="没有抓到好友（好友页为空或页面结构变化）")
+            return ToolResult(ok=False, error="没有可用于分析的好友")
         own_items = await self.client.get_all_user_collections(username, stype, None, max_items=_MAX_ITEMS)
         my_status = {}
         _STATUS = {1: "想看", 2: "看过", 3: "在看", 4: "搁置", 5: "抛弃"}
@@ -911,7 +923,7 @@ class CompareUserTasteTool(Tool):
                 pulse=pulse,
                 caveats=[
                     f"聚合了 {counted} 位好友的公开收藏（上限 {args.friends_limit}）；高分榜要求至少 2 人评分。",
-                    "好友列表来自网页解析（非官方 API）。",
+                    "好友收藏只读取公开数据；私密收藏或读取失败的用户不会计入聚合。",
                 ],
             ),
             sources=[Citation(title=f"Bangumi @{username} 好友", url=f"https://bgm.tv/user/{username}/friends", source="bangumi")],
@@ -920,12 +932,19 @@ class CompareUserTasteTool(Tool):
     async def _friends_matrix(self, username: str, stype: int, args: TasteCompareArgs) -> ToolResult[TasteCompareResult]:
         """全好友口味排名（借鉴 Shadow 组件"全缓存好友评级"）：隐藏分余弦打分 +
         贝叶斯收缩（μ 取好友分数中位数，k=10）防止 3 个共同评分的 100 分虚高压过 80 个的 85 分。"""
-        try:
-            friends, _url = await _fetch_friends(username, args.friends_limit)
-        except (httpx.HTTPError, httpx.TransportError) as e:
-            return ToolResult(ok=False, error=f"好友页抓取失败：{type(e).__name__}")
+        friends: list[FriendBrief]
+        if args.peer_usernames:
+            friends = [
+                FriendBrief(username=name, url=f"https://bgm.tv/user/{name}")
+                for name in dict.fromkeys(x.strip().lstrip("@").lower() for x in args.peer_usernames if x.strip())
+            ][: args.friends_limit]
+        else:
+            try:
+                friends, _url = await _fetch_friends(username, args.friends_limit)
+            except (httpx.HTTPError, httpx.TransportError) as e:
+                return ToolResult(ok=False, error=f"好友页抓取失败：{type(e).__name__}")
         if not friends:
-            return ToolResult(ok=False, error="没有抓到好友（好友页为空或页面结构变化）")
+            return ToolResult(ok=False, error="没有可用于分析的好友")
         own_items = await self.client.get_all_user_collections(username, stype, None, max_items=_MAX_ITEMS)
         names = [f.username if hasattr(f, "username") else str(f.get("username") or f) for f in friends[: args.friends_limit]]
         peers = await gather_limited(
@@ -967,7 +986,7 @@ class CompareUserTasteTool(Tool):
                 matrix=entries,
                 caveats=[
                     f"排名用贝叶斯收缩分（μ=好友中位数 {mu}，k={k}）：共同评分越少越向中位回归，防小样本虚高。",
-                    "好友列表来自网页解析（非官方 API）；只统计公开收藏。",
+                    "只统计公开收藏；私密收藏或读取失败的好友会显示为样本不可用。",
                 ],
             ),
             sources=[Citation(title=f"Bangumi @{username} 好友", url=f"https://bgm.tv/user/{username}/friends", source="bangumi")],
