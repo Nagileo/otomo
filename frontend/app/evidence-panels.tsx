@@ -165,7 +165,11 @@ export function renderPanelByName(name: string, rows: AnyRecord[], h: PanelHandl
 
 /** 该 evidence 下有数据、且允许在当前模式渲染的面板名（按注册表顺序）。 */
 export function availablePanelNames(evidence: EvidenceMap, devMode: boolean): string[] {
-  return Object.keys(PANEL_LABELS).filter((name) => {
+  // Object insertion order follows observation arrival order. Keeping it here
+  // preserves the answer document's execution narrative for panels that the
+  // model did not explicitly anchor, instead of regrouping them by registry.
+  return Object.keys(evidence).filter((name) => {
+    if (!PANEL_LABELS[name]) return false;
     if (DEV_ONLY_PANELS.has(name) && !devMode) return false;
     return list(evidence[name]).length > 0;
   });

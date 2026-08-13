@@ -11,6 +11,10 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from .config import settings
+from .memory import LongTermMemory
+from .memory.consolidate import now_iso
+from .memory.models import FeedbackItem
+from .security_context import tenant_scope
 
 RecommendationEvent = Literal[
     "impression", "open", "wishlist", "started", "dismiss", "more", "less", "watched",
@@ -216,3 +220,51 @@ class RecommendationEventStore:
             "dismiss_rate": counts.get("dismiss", 0) / impressions if impressions else 0.0,
             "dismiss_reasons": {row["reason"]: int(row["n"]) for row in reasons},
         }
+
+
+def record_recommendation_feedback(
+    store: RecommendationEventStore,
+    ltm: LongTermMemory,
+    username: str,
+    req: RecommendationFeedbackRequest,
+    *,
+    channel: str = "web",
+) -> dict[str, Any]:
+    """Persist one recommendation decision and its cross-client memory signal."""
+    event = store.record(username, req)
+    payload = store.item_payload(req.recommendation_set_id, username, req.subject_id) or {}
+    signal = None
+    if req.event in {"more", "wishlist"}:
+        signal = "more"
+    elif req.event in {"started", "watched"}:
+        signal = "like"
+    elif req.event == "less":
+        signal = "less"
+    elif req.event == "dismiss" and req.reason in {"not_interested", "genre"}:
+        signal = "dislike"
+    replace_memory = req.event in {"more", "less", "wishlist", "started", "watched", "dismiss"}
+    if event.get("recorded") and replace_memory:
+        with tenant_scope(username, authenticated=True):
+            memory = ltm.load_user(username)
+            memory.feedback = [
+                item for item in memory.feedback
+                if not (
+                    item.subject_id == req.subject_id
+                    and item.source == "explicit_user"
+                    and item.note.startswith("recommendation_card:")
+                )
+            ]
+            if signal:
+                note = req.note or req.reason or req.event
+                memory.feedback.append(FeedbackItem(
+                    subject_id=req.subject_id,
+                    name=str(payload.get("name") or ""),
+                    signal=signal,
+                    note=f"recommendation_card:{channel}:{note}"[:500],
+                    source="explicit_user",
+                    confidence=0.9,
+                    ts=now_iso(),
+                ))
+            memory.feedback = memory.feedback[-100:]
+            ltm.save_user(memory)
+    return event

@@ -2,6 +2,8 @@
 
 // 产品聚合域面板：月报、作品档案、驾驶舱分区、音乐主题曲、周报。
 
+import { useState } from "react";
+
 import { type AnyRecord, type ShareSnapshotType, type ShareSnapshotHandler, list, text, Badge, Panel, EmptyHint, ShareSnapshotButton , Meta } from "./shared";
 import { _wrapText } from "./report";
 
@@ -248,11 +250,28 @@ export function ProductSectionsPanel({
   );
 }
 
-export function SubjectDossierPanel({ data, onShareSnapshot }: { data: AnyRecord; onShareSnapshot?: ShareSnapshotHandler }) {
+export function SubjectDossierPanel({
+  data,
+  onShareSnapshot,
+  productView = false,
+}: {
+  data: AnyRecord;
+  onShareSnapshot?: ShareSnapshotHandler;
+  productView?: boolean;
+}) {
   const subject = data.subject || {};
   const sections = list(data.sections);
   const byTitle = new Map(sections.map((s) => [String(s.title || ""), s]));
   const sectionNames = ["评价矩阵", "观看/购买入口", "OP/ED/音乐", "补番路线", "分集热度雷达", "跨媒体关系", "Release/RSS"];
+  const tabs: Record<string, string[]> = {
+    "概览": ["评价矩阵", "跨媒体关系"],
+    "口碑": ["评价矩阵", "分集热度雷达"],
+    "系列": ["补番路线", "跨媒体关系"],
+    "音乐": ["OP/ED/音乐"],
+    "观看与资源": ["观看/购买入口", "Release/RSS"],
+  };
+  const [activeTab, setActiveTab] = useState("概览");
+  const visibleSections = productView ? tabs[activeTab] : sectionNames;
   return (
     <Panel title="作品档案" subtitle={text(subject.name)}>
       <div className="panel-actions">
@@ -277,8 +296,15 @@ export function SubjectDossierPanel({ data, onShareSnapshot }: { data: AnyRecord
           </div>
         </div>
       </div>
+      {productView ? (
+        <nav className="dossier-tabs" aria-label="作品档案视图">
+          {Object.keys(tabs).map((tab) => (
+            <button type="button" className={activeTab === tab ? "active" : ""} onClick={() => setActiveTab(tab)} key={tab}>{tab}</button>
+          ))}
+        </nav>
+      ) : null}
       <div className="dossier-grid">
-        {sectionNames.map((name) => {
+        {visibleSections.map((name) => {
           const section = byTitle.get(name);
           if (!section) return null;
           const items = list(section.items);
@@ -386,7 +412,7 @@ export function SubjectDossierPanel({ data, onShareSnapshot }: { data: AnyRecord
           );
         })}
       </div>
-      {list<string>(data.quick_actions).length > 0 && (
+      {!productView && list<string>(data.quick_actions).length > 0 && (
         <div className="followups">{list<string>(data.quick_actions).map((q, i) => <span className="chip ghost" key={i}>{q}</span>)}</div>
       )}
       <Meta notes={list<string>(data.caveats)} />

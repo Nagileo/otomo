@@ -117,9 +117,7 @@ export function SubjectMiniList({ title, items }: { title: string; items: AnyRec
           <a
             key={`${item.id || item.name}-${i}`}
             className="compact-subject"
-            href={item.id ? `https://bgm.tv/subject/${item.id}` : undefined}
-            target="_blank"
-            rel="noreferrer"
+            href={item.id ? `/subject/${item.id}` : undefined}
           >
             {item.image ? <img src={item.image} alt="" loading="lazy" /> : <span className="shared-noimg" />}
             <span>
@@ -307,7 +305,7 @@ export function CollectionDashboardPanel({ data }: { data: AnyRecord }) {
           ))}
         </div>
       )}
-      <div className="dashboard-filter">
+      {mediaTypes.length > 2 ? <div className="dashboard-filter">
         <div className="segmented" aria-label="收藏媒介筛选">
           {mediaTypes.map((kind) => (
             <button
@@ -320,13 +318,15 @@ export function CollectionDashboardPanel({ data }: { data: AnyRecord }) {
             </button>
           ))}
         </div>
-      </div>
+      </div> : null}
       <div className="rating-grid">
         {visibleMedia.map((m, i) => (
-          <div className="rating-card" key={`${m.subject_type}-${i}`}>
-            <div className="rating-source">{text(m.subject_type)}</div>
-            <div className="rating-score">{m.total ?? 0}</div>
-            <div className="card-meta">评分 {m.rated ?? 0} · 均分 {m.avg_rating ?? "暂无"}</div>
+          <details className="dashboard-media-details" key={`${m.subject_type}-${i}`}>
+            <summary>
+              <span><b>{text(m.subject_type)}</b><small>{m.total ?? 0} 项 · 已评分 {m.rated ?? 0} · 均分 {m.avg_rating ?? "暂无"}</small></span>
+              <span>展开完整分析</span>
+            </summary>
+            <div className="dashboard-media-body">
             <div className="section-title">收藏状态</div>
             <DistributionBadges data={m.status_counts} />
             <div className="section-title">评分分布</div>
@@ -348,7 +348,8 @@ export function CollectionDashboardPanel({ data }: { data: AnyRecord }) {
             <SubjectMiniList title="高分代表" items={list(m.high_rated)} />
             <SubjectMiniList title="待看/在看" items={list(m.backlog)} />
             <SubjectMiniList title="搁置/抛弃" items={list(m.on_hold_or_abandoned)} />
-          </div>
+            </div>
+          </details>
         ))}
       </div>
       {!visibleMedia.length && <EmptyHint text="该媒介暂无可展示收藏数据" />}

@@ -494,8 +494,9 @@ class SubjectDossierTool(Tool):
             self.relations.run(SubjectRelationsArgs(subject_id=sid, limit=30)),
         ]
         if stype_name == "anime":
+            if args.include_release:
+                jobs.append(self.release.run(AnimeReleaseFeedsArgs(subject_id=sid, title=subject["name"], prefer="auto", limit=8)))
             jobs.extend([
-                self.release.run(AnimeReleaseFeedsArgs(subject_id=sid, title=subject["name"], prefer="auto", limit=8)),
                 self.radar.run(EpisodeRadarArgs(subject_id=sid, top=5, with_summary=False)),
                 self.order.run(WatchOrderArgs(title=subject["name"], subject_type="anime")),
                 self.music.run(AnimeMusicThemesArgs(subject_id=sid, title=subject["name"], limit=12)),

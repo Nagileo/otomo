@@ -908,7 +908,7 @@ export function SeasonGuidePanel({
           <div className="season-card" key={`${item.subject_id}-${i}`}>
             {item.image ? <img src={item.image} alt="" /> : <div className="season-noimg" />}
             <div className="season-main">
-              <a className="card-title title-link" href={`https://bgm.tv/subject/${item.subject_id}`} target="_blank" rel="noreferrer">{text(item.title)}</a>
+              <a className="card-title title-link" href={`/subject/${item.subject_id}`}>{text(item.title)}</a>
               <div className="card-meta">
                 {item.bangumi_score ? `Bangumi ${item.bangumi_score}` : "暂无评分"}
                 {item.broadcast ? ` · ${item.broadcast}` : ""}
@@ -965,9 +965,12 @@ export function SeasonGuidePanel({
                 {item.bili_url && <span>B站正版</span>}
               </div>
               {list(item.guide_videos).length > 0 && (
-                <div className="guide-route-list">
-                  {list(item.guide_videos).slice(0, 3).map(renderGuideRoute)}
-                </div>
+                <details className="item-guide-details">
+                  <summary>导视来源 {list(item.guide_videos).length}</summary>
+                  <div className="guide-route-list">
+                    {list(item.guide_videos).slice(0, 3).map(renderGuideRoute)}
+                  </div>
+                </details>
               )}
             </div>
           </div>

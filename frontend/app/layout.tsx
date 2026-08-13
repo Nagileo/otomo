@@ -1,4 +1,5 @@
 import type { Metadata, Viewport } from "next";
+import { AppShell } from "../components/app-shell";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -20,7 +21,7 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  themeColor: "#171a21",
+  themeColor: "#0d100f",
   width: "device-width",
   initialScale: 1,
   // 移动端不自动放大输入框（配合全局 16px 字号），但不禁用用户缩放
@@ -30,7 +31,7 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="zh">
-      <body>{children}</body>
+      <body><AppShell>{children}</AppShell></body>
     </html>
   );
 }

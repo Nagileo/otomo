@@ -6,7 +6,12 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from otomo.recommendation_events import RecommendationEventStore, RecommendationFeedbackRequest
+from otomo.memory import LongTermMemory
+from otomo.recommendation_events import (
+    RecommendationEventStore,
+    RecommendationFeedbackRequest,
+    record_recommendation_feedback,
+)
 from otomo.recsys_registry import CFModelRegistry
 from otomo.today import TodayCockpitService, TodayPreferenceStore
 from otomo.agent.contracts import ToolResult
@@ -81,6 +86,26 @@ def test_temporary_dismissal_expires_before_durable_dismissal(tmp_path):
     with store._connect() as conn:
         conn.execute("UPDATE recommendation_events SET created_at=? WHERE subject_id=1", (old,))
     assert store.recent_excluded_ids("alice") == {2}
+
+
+def test_recommendation_feedback_service_shares_memory_across_clients(tmp_path):
+    store = RecommendationEventStore(str(tmp_path / "events.sqlite3"))
+    ltm = LongTermMemory(tmp_path / "memory")
+    set_id = store.create_set("alice", "anime", "general", {}, [{"id": 7, "name": "ARIA"}])
+
+    result = record_recommendation_feedback(
+        store,
+        ltm,
+        "alice",
+        RecommendationFeedbackRequest(recommendation_set_id=set_id, subject_id=7, event="watched"),
+        channel="discord",
+    )
+
+    assert result["recorded"] is True
+    memory = ltm.load_user("alice")
+    assert memory.feedback[-1].subject_id == 7
+    assert memory.feedback[-1].signal == "like"
+    assert memory.feedback[-1].note == "recommendation_card:discord:watched"
 
 
 def test_cf_registry_reports_stale_and_missing_models(tmp_path):

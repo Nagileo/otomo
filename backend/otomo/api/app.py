@@ -25,7 +25,7 @@ from ..auth import AuthStore, BangumiToken, build_authorization_url, exchange_oa
 from ..config import settings
 from ..memory import LongTermMemory
 from ..memory.consolidate import now_iso
-from ..memory.models import FeedbackItem, VisualFeedbackItem, VisualFeedbackSignal, memory_summary
+from ..memory.models import VisualFeedbackItem, VisualFeedbackSignal, memory_summary
 from ..memory.runtime import attach_memory_state
 from ..notifications import validate_webhook_url
 from ..obs import append_visual_feedback, traced_stream
@@ -38,7 +38,11 @@ from ..quota import (
     collected_usage,
     estimate_tokens,
 )
-from ..recommendation_events import RecommendationEventStore, RecommendationFeedbackRequest
+from ..recommendation_events import (
+    RecommendationEventStore,
+    RecommendationFeedbackRequest,
+    record_recommendation_feedback,
+)
 from ..recsys_registry import cf_model_registry
 from ..session_store import SessionStore
 from ..security_context import tenant_scope
@@ -57,6 +61,14 @@ from ..agent.react import ReActRunner
 from ..tools.bangumi.client import SUBJECT_TYPE, BangumiClient
 from ..tools.moegirl.client import MoegirlClient
 from ..tools.recommend.tool import RecommendArgs, RecommendTool
+from ..tools.product_loop.tool import (
+    MonthlyWatchReportArgs,
+    MonthlyWatchReportTool,
+    SubjectDossierArgs,
+    SubjectDossierTool,
+)
+from ..tools.profile.tool import CollectionDashboardArgs, CollectionDashboardTool
+from ..tools.season.tool import SeasonGuideBriefArgs, SeasonGuideBriefTool
 
 log = logging.getLogger("otomo.api")
 
@@ -1170,6 +1182,151 @@ async def get_today(
         await client.aclose()
 
 
+def _product_rate_limit(request: Request, auth_session_id: str, surface: str) -> None:
+    app.state.rate_limiter.check(
+        f"product:{surface}:{_quota_key(auth_session_id, request)}",
+        limit=settings.rate_limit_today_per_hour,
+        window_seconds=3600,
+    )
+
+
+@app.get("/product/season-guide")
+async def product_season_guide(
+    request: Request,
+    response: Response,
+    year: int,
+    month: int,
+    mode: Literal["guide", "hot"] = "guide",
+    limit: int = 12,
+    focus_tags: str = "",
+    include_video_comments: bool = False,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _product_rate_limit(request, session.auth_session_id, "season")
+    if month not in {1, 4, 7, 10}:
+        raise HTTPException(status_code=422, detail="month 必须是季度首月：1、4、7 或 10")
+    identity = app.state.auth.identity(session.auth_session_id)
+    client = await _request_client(app, session.auth_session_id)
+    try:
+        args = SeasonGuideBriefArgs(
+            year=year,
+            month=month,
+            mode=mode,
+            limit=min(max(limit, 1), 20),
+            username=identity.username if identity.authenticated else None,
+            focus_tags=[x.strip() for x in focus_tags.split(",") if x.strip()] or None,
+            include_video_comments=include_video_comments,
+        )
+        with tenant_scope(identity.username, authenticated=identity.authenticated):
+            result = await SeasonGuideBriefTool(client).run(args)
+        return result.model_dump(mode="json", exclude_none=True)
+    finally:
+        await client.aclose()
+
+
+@app.post("/product/recommendations")
+async def product_recommendations(
+    req: RecommendArgs,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    _product_rate_limit(request, session.auth_session_id, "recommend")
+    identity = _authenticated_identity(session.auth_session_id)
+    args = req.model_copy(update={"username": identity.username})
+    client = await _request_client(app, session.auth_session_id)
+    try:
+        with tenant_scope(identity.username, authenticated=True):
+            result = await RecommendTool(
+                client,
+                app.state.ltm,
+                event_store=app.state.recommendation_event_store,
+            ).run(args)
+        return result.model_dump(mode="json", exclude_none=True)
+    finally:
+        await client.aclose()
+
+
+@app.get("/product/library")
+async def product_library(
+    request: Request,
+    response: Response,
+    subject_types: str = "anime,book,game,music,real",
+    enrich_people: bool = True,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _product_rate_limit(request, session.auth_session_id, "library")
+    identity = _authenticated_identity(session.auth_session_id)
+    allowed = {"anime", "book", "game", "music", "real"}
+    selected = [x.strip() for x in subject_types.split(",") if x.strip() in allowed]
+    args = CollectionDashboardArgs(
+        username=identity.username,
+        subject_types=selected or ["anime"],
+        enrich_people=enrich_people,
+    )
+    client = await _request_client(app, session.auth_session_id)
+    try:
+        with tenant_scope(identity.username, authenticated=True):
+            result = await CollectionDashboardTool(client, app.state.ltm).run(args)
+        return result.model_dump(mode="json", exclude_none=True)
+    finally:
+        await client.aclose()
+
+
+@app.get("/product/monthly-report")
+async def product_monthly_report(
+    request: Request,
+    response: Response,
+    period: Literal["month", "year"] = "month",
+    year: int | None = None,
+    month: int | None = None,
+    subject_type: Literal["anime", "book", "music", "game", "real"] = "anime",
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _product_rate_limit(request, session.auth_session_id, "report")
+    identity = _authenticated_identity(session.auth_session_id)
+    client = await _request_client(app, session.auth_session_id)
+    try:
+        args = MonthlyWatchReportArgs(
+            username=identity.username,
+            period=period,
+            year=year,
+            month=month,
+            subject_type=subject_type,
+        )
+        with tenant_scope(identity.username, authenticated=True):
+            result = await MonthlyWatchReportTool(client).run(args)
+        return result.model_dump(mode="json", exclude_none=True)
+    finally:
+        await client.aclose()
+
+
+@app.get("/product/subjects/{subject_id}")
+async def product_subject_dossier(
+    subject_id: int,
+    request: Request,
+    response: Response,
+    spoiler_level: Literal["none", "mild", "full"] = "none",
+    include_release: bool = True,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _product_rate_limit(request, session.auth_session_id, "subject")
+    identity = app.state.auth.identity(session.auth_session_id)
+    client = await _request_client(app, session.auth_session_id)
+    try:
+        args = SubjectDossierArgs(
+            subject_id=subject_id,
+            spoiler_level=spoiler_level,
+            include_release=include_release,
+        )
+        with tenant_scope(identity.username, authenticated=identity.authenticated):
+            result = await SubjectDossierTool(client).run(args)
+        return result.model_dump(mode="json", exclude_none=True)
+    finally:
+        await client.aclose()
+
+
 @app.patch("/today/preferences/{subject_id}")
 async def update_today_preference(
     subject_id: int, req: TodayPreferenceRequest, request: Request, response: Response,
@@ -1211,48 +1368,13 @@ async def recommendation_feedback(
 def _record_recommendation_feedback(
     username: str, req: RecommendationFeedbackRequest,
 ) -> dict[str, Any]:
-    try:
-        event = app.state.recommendation_event_store.record(username, req)
-    except PermissionError:
-        raise
-    payload = app.state.recommendation_event_store.item_payload(
-        req.recommendation_set_id, username, req.subject_id,
-    ) or {}
-    signal = None
-    if req.event in {"more", "wishlist"}:
-        signal = "more"
-    elif req.event in {"started", "watched"}:
-        signal = "like"
-    elif req.event == "less":
-        signal = "less"
-    elif req.event == "dismiss" and req.reason in {"not_interested", "genre"}:
-        signal = "dislike"
-    replace_memory = (
-        req.event in {"more", "less", "wishlist", "started", "watched"}
-        or req.event == "dismiss"
+    return record_recommendation_feedback(
+        app.state.recommendation_event_store,
+        app.state.ltm,
+        username,
+        req,
+        channel="web",
     )
-    if event.get("recorded") and replace_memory:
-        with tenant_scope(username, authenticated=True):
-            mem = app.state.ltm.load_user(username)
-            mem.feedback = [
-                item for item in mem.feedback
-                if not (
-                    item.subject_id == req.subject_id
-                    and item.source == "explicit_user"
-                    and item.note.startswith("recommendation_card:")
-                )
-            ]
-            if signal:
-                mem.feedback.append(FeedbackItem(
-                    subject_id=req.subject_id,
-                    name=str(payload.get("name") or ""),
-                    signal=signal,
-                    note=("recommendation_card:" + (req.note or req.reason or req.event))[:500],
-                    source="explicit_user", confidence=0.9, ts=now_iso(),
-                ))
-            mem.feedback = mem.feedback[-100:]
-            app.state.ltm.save_user(mem)
-    return event
 
 
 @app.post("/recommendations/next")

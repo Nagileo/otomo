@@ -51,6 +51,12 @@ from .subscriptions import (
     UpdateSubscriptionRuleRequest,
     default_subscription_title,
 )
+from .recommendation_events import (
+    RecommendationEventStore,
+    RecommendationFeedbackRequest,
+    record_recommendation_feedback,
+)
+from .today import TodayCockpitService, TodayPreferenceStore
 from . import trajectory
 from .tools.bangumi.client import BangumiClient
 from .tools.moegirl.client import MoegirlClient
@@ -66,7 +72,7 @@ def _clean(answer: str) -> str:
 
 # ── Discord embed 卡片(复用证据面板同一份结构化 data)────────────────────
 # 卡片构建器接收 discord 模块作参数(保持模块可在无 discord.py 环境导入)。
-_EMBED_COLOR = 0x7AA2F7
+_EMBED_COLOR = 0x64D8AC
 
 
 def _first(v: object) -> str:
@@ -101,6 +107,30 @@ def _rec_embeds(discord, data: dict) -> list:
             e.add_field(name="⚠️ 注意", value=risk[:200], inline=False)
         out.append(e)
     return out
+
+
+def _today_embeds(discord, data: dict) -> list:
+    rows = list(data.get("today") or [])
+    backlog = list(data.get("backlog") or [])
+    e = discord.Embed(
+        title=f"今日追番 · {data.get('date') or ''}"[:256],
+        description=(
+            f"今天更新 **{len(rows)}** 部 · 落后 **{len(backlog)}** 部\n"
+            "下方可直接选择条目打卡，写回前仍会二次确认。"
+        ),
+        color=_EMBED_COLOR,
+    )
+    for item in rows[:8]:
+        title = str(item.get("name_cn") or item.get("name") or "?")
+        progress = f"看到 {item.get('my_ep') or 0}"
+        if item.get("aired_ep"):
+            progress += f" / 已播 {item['aired_ep']}"
+        if item.get("broadcast"):
+            progress += f" · {item['broadcast']}"
+        e.add_field(name=title[:256], value=progress[:1024], inline=False)
+    if rows and (cover := _cover(rows[0])):
+        e.set_thumbnail(url=cover)
+    return [e]
 
 
 def _review_embeds(discord, data: dict) -> list:
@@ -595,6 +625,7 @@ def build_embeds(discord, name: str, data: dict | None) -> list:
     try:
         return {
             "recommend_subjects": _rec_embeds,
+            "today_cockpit": _today_embeds,
             "review_subject": _review_embeds,
             "anime_omikuji": _omikuji_embeds,
             "where_to_watch": _watch_embeds,
@@ -685,6 +716,8 @@ def run() -> None:
     ltm = LongTermMemory()
     session_store = SessionStore()
     subscription_store = SubscriptionStore()
+    today_store = TodayPreferenceStore()
+    recommendation_event_store = RecommendationEventStore()
     rate_limiter = RateLimiter()
     quota_store = TokenQuotaStore()
     moegirl = MoegirlClient()
@@ -899,6 +932,9 @@ def run() -> None:
             "spoiler": spoiler_snapshot,
             "question": question,
         }
+        recommendation = next((data for name, data in observations if name == "recommend_subjects"), None)
+        if recommendation:
+            interaction_state["recommendation"] = recommendation
         return (
             _clean(result) or "(这次没能整理出回答,换个问法试试?)",
             embeds[:10],
@@ -942,6 +978,30 @@ def run() -> None:
             with tenant_scope(username, authenticated=True):
                 result = await registry.dispatch(tool, json.dumps(payload, ensure_ascii=False), allow_write=True)
             if result.ok:
+                action = result.data.model_dump(mode="json", exclude_none=True).get("action") if result.data else {}
+                set_id = str((action.get("context") or {}).get("recommendation_set_id") or "")
+                if (
+                    kind == "confirm"
+                    and set_id
+                    and action.get("operation") == "set_collection"
+                    and int((action.get("payload") or {}).get("type") or 0) == 1
+                    and action.get("subject_id")
+                ):
+                    try:
+                        record_recommendation_feedback(
+                            recommendation_event_store,
+                            ltm,
+                            username,
+                            RecommendationFeedbackRequest(
+                                recommendation_set_id=set_id,
+                                subject_id=int(action["subject_id"]),
+                                event="wishlist",
+                                note="confirmed_bangumi_write",
+                            ),
+                            channel="discord",
+                        )
+                    except PermissionError:
+                        log.warning("recommendation set expired before Discord write attribution: %s", set_id)
                 return "✅ 已写回 Bangumi(可说'撤销'回滚)。" if kind == "confirm" else "已取消,未写入。"
             return f"⚠️ 执行失败:{(result.error or '未知错误')[:180]}"
         except Exception as e:  # noqa: BLE001
@@ -1076,7 +1136,256 @@ def run() -> None:
                 return False
             return True
 
-    def _continuation_view(requester_id: int, state: dict) -> ContinuationView | None:
+    class RecommendationActionButton(discord.ui.Button):
+        def __init__(self, label: str, event: str, subject_id: int, set_id: str, *, row: int = 0) -> None:
+            style = {
+                "more": discord.ButtonStyle.success,
+                "wishlist": discord.ButtonStyle.primary,
+                "watched": discord.ButtonStyle.secondary,
+            }.get(event, discord.ButtonStyle.secondary)
+            super().__init__(label=label[:80], style=style, row=row)
+            self.event = event
+            self.subject_id = subject_id
+            self.set_id = set_id
+
+        async def callback(self, interaction: "discord.Interaction") -> None:
+            username = auth.username_for_discord(str(interaction.user.id))
+            if not username:
+                await interaction.response.send_message("推荐反馈需要先 `/绑定` Bangumi。", ephemeral=True)
+                return
+            if self.event == "wishlist":
+                payload = recommendation_event_store.item_payload(self.set_id, username, self.subject_id) or {}
+                action, error = await _prepare_recommendation_wishlist(username, payload, self.set_id)
+                if not action:
+                    await interaction.response.send_message(error, ephemeral=True)
+                    return
+                await interaction.response.send_message(
+                    f"待确认：{action.get('summary') or '加入 Bangumi 想看'}",
+                    view=WriteConfirmView(interaction.user.id, username, str(action["id"])),
+                    ephemeral=True,
+                )
+                return
+            try:
+                record_recommendation_feedback(
+                    recommendation_event_store,
+                    ltm,
+                    username,
+                    RecommendationFeedbackRequest(
+                        recommendation_set_id=self.set_id,
+                        subject_id=self.subject_id,
+                        event=self.event,
+                    ),
+                    channel="discord",
+                )
+            except PermissionError:
+                await interaction.response.send_message("这批推荐已经过期，请重新 `/推荐`。", ephemeral=True)
+                return
+            label = {
+                "more": "会多来这种",
+                "less": "会少来这种",
+                "wishlist": "想看",
+                "watched": "已看过",
+            }.get(self.event, "已记录")
+            await interaction.response.send_message(f"已记录：{label}。", ephemeral=True)
+
+    async def _prepare_recommendation_wishlist(
+        username: str,
+        item: dict,
+        recommendation_set_id: str,
+    ) -> tuple[dict | None, str]:
+        tok = await refreshed_token_for_username(auth, username)
+        if not tok or tok.status != "active":
+            return None, "Bangumi 授权已失效，请重新 `/绑定`。"
+        client_ = BangumiClient(token=tok.access_token, user_agent=settings.bangumi_user_agent)
+        try:
+            registry = build_registry(client_, moegirl, ltm)
+            payload = {
+                "operation": "set_collection",
+                "subject_id": int(item["id"]),
+                "subject_name": str(item.get("name") or ""),
+                "collection_type": 1,
+                "reason": "Discord 推荐卡加入想看",
+                "context": {"recommendation_set_id": recommendation_set_id},
+            }
+            with tenant_scope(username, authenticated=True):
+                result = await registry.dispatch(
+                    "prepare_bangumi_write_action",
+                    json.dumps(payload, ensure_ascii=False),
+                    allow_write=False,
+                )
+            if not result.ok or not result.data:
+                return None, result.error or "准备写回失败"
+            action = result.data.model_dump(mode="json", exclude_none=True).get("action")
+            return action, ""
+        finally:
+            await client_.aclose()
+
+    class RecommendationChoiceView(discord.ui.View):
+        def __init__(self, requester_id: int, set_id: str, subject_id: int) -> None:
+            super().__init__(timeout=180)
+            self.requester_id = requester_id
+            self.add_item(RecommendationActionButton("多来这种", "more", subject_id, set_id))
+            self.add_item(RecommendationActionButton("少来这种", "less", subject_id, set_id))
+            self.add_item(RecommendationActionButton("加入想看", "wishlist", subject_id, set_id))
+            self.add_item(RecommendationActionButton("我已看过", "watched", subject_id, set_id))
+
+        async def interaction_check(self, interaction: "discord.Interaction") -> bool:
+            if interaction.user.id != self.requester_id:
+                await interaction.response.send_message("这些推荐反馈只属于原提问者。", ephemeral=True)
+                return False
+            return True
+
+    class RecommendationItemSelect(discord.ui.Select):
+        def __init__(self, set_id: str, items: list[dict]) -> None:
+            self.set_id = set_id
+            self.items = {str(item["id"]): item for item in items if item.get("id")}
+            options = [
+                discord.SelectOption(
+                    label=str(item.get("name") or item["id"])[:100],
+                    value=str(item["id"]),
+                    description="选择后记录多推、少推或已看"[:100],
+                )
+                for item in list(self.items.values())[:5]
+            ]
+            super().__init__(placeholder="选择一个推荐项反馈", options=options, min_values=1, max_values=1)
+
+        async def callback(self, interaction: "discord.Interaction") -> None:
+            view = self.view
+            if not isinstance(view, RecommendationActionView):
+                return
+            item = self.items[self.values[0]]
+            await interaction.response.send_message(
+                f"对 **{item.get('name') or item['id']}** 记录什么？",
+                view=RecommendationChoiceView(view.requester_id, self.set_id, int(item["id"])),
+                ephemeral=True,
+            )
+
+    class RecommendationNextButton(discord.ui.Button):
+        def __init__(self, set_id: str) -> None:
+            super().__init__(label="换一批", style=discord.ButtonStyle.primary, row=1)
+            self.set_id = set_id
+
+        async def callback(self, interaction: "discord.Interaction") -> None:
+            view = self.view
+            if not isinstance(view, RecommendationActionView):
+                return
+            await interaction.response.defer(thinking=True, ephemeral=True)
+            username = auth.username_for_discord(str(interaction.user.id))
+            previous = recommendation_event_store.get_set(self.set_id, username or "") if username else None
+            if not previous:
+                await interaction.followup.send("这批推荐已经过期，请重新 `/推荐`。", ephemeral=True)
+                return
+            names = "、".join(str(item.get("name") or "") for item in previous["items"][:8])
+            question = f"换一批{previous['subject_type']}推荐，不要再出现：{names}"
+            reply, embeds, pending, state = await _answer(
+                interaction.user.id,
+                int(interaction.channel_id or interaction.user.id),
+                interaction.guild_id,
+                question,
+            )
+            await _deliver_interaction(interaction, reply, embeds, pending, state)
+
+    class RecommendationActionView(discord.ui.View):
+        def __init__(self, requester_id: int, data: dict) -> None:
+            super().__init__(timeout=300)
+            self.requester_id = requester_id
+            set_id = str(data.get("recommendation_set_id") or "")
+            items = [item for item in (data.get("items") or [])[:5] if item.get("id")]
+            if set_id and items:
+                self.add_item(RecommendationItemSelect(set_id, items))
+                self.add_item(RecommendationNextButton(set_id))
+
+        async def interaction_check(self, interaction: "discord.Interaction") -> bool:
+            if interaction.user.id != self.requester_id:
+                await interaction.response.send_message("这些推荐反馈只属于原提问者。", ephemeral=True)
+                return False
+            return True
+
+    async def _prepare_today_progress(username: str, item: dict) -> tuple[dict | None, str]:
+        tok = await refreshed_token_for_username(auth, username)
+        if not tok or tok.status != "active":
+            return None, "Bangumi 授权已失效，请重新 `/绑定`。"
+        client_ = BangumiClient(token=tok.access_token, user_agent=settings.bangumi_user_agent)
+        try:
+            registry = build_registry(client_, moegirl, ltm)
+            up_to = max(int(item.get("my_ep") or 0) + 1, 1)
+            payload = {
+                "operation": "mark_episodes_watched",
+                "subject_id": int(item["id"]),
+                "subject_name": str(item.get("name_cn") or item.get("name") or ""),
+                "up_to_episode": up_to,
+                "collection_type": 3,
+                "reason": f"Discord 今日追番标记看到第 {up_to} 集",
+            }
+            with tenant_scope(username, authenticated=True):
+                result = await registry.dispatch(
+                    "prepare_bangumi_write_action",
+                    json.dumps(payload, ensure_ascii=False),
+                    allow_write=False,
+                )
+            if not result.ok or not result.data:
+                return None, result.error or "准备写回失败"
+            action = result.data.model_dump(mode="json", exclude_none=True).get("action")
+            return action, ""
+        finally:
+            await client_.aclose()
+
+    class TodayCheckinSelect(discord.ui.Select):
+        def __init__(self, items: list[dict]) -> None:
+            self.items = {str(item["id"]): item for item in items if item.get("id")}
+            options = []
+            for item in list(self.items.values())[:25]:
+                title = str(item.get("name_cn") or item.get("name") or item["id"])
+                next_ep = max(int(item.get("my_ep") or 0) + 1, 1)
+                options.append(discord.SelectOption(
+                    label=title[:100],
+                    value=str(item["id"]),
+                    description=f"标记看到第 {next_ep} 集"[:100],
+                ))
+            super().__init__(placeholder="选择刚看完的条目", options=options, min_values=1, max_values=1)
+
+        async def callback(self, interaction: "discord.Interaction") -> None:
+            view = self.view
+            if not isinstance(view, TodayCheckinView):
+                return
+            username = auth.username_for_discord(str(interaction.user.id))
+            if not username:
+                await interaction.response.send_message("打卡需要先 `/绑定` Bangumi。", ephemeral=True)
+                return
+            item = self.items[self.values[0]]
+            await interaction.response.defer(thinking=True, ephemeral=True)
+            action, error = await _prepare_today_progress(username, item)
+            if not action:
+                await interaction.followup.send(error, ephemeral=True)
+                return
+            await interaction.followup.send(
+                f"待确认：{action.get('summary') or '写回追番进度'}",
+                view=WriteConfirmView(interaction.user.id, username, str(action["id"])),
+                ephemeral=True,
+            )
+
+    class TodayCheckinView(discord.ui.View):
+        def __init__(self, requester_id: int, items: list[dict]) -> None:
+            super().__init__(timeout=300)
+            self.requester_id = requester_id
+            actionable = [
+                item for item in items
+                if not item.get("aired_ep") or int(item.get("my_ep") or 0) < int(item.get("aired_ep") or 0)
+            ]
+            if actionable:
+                self.add_item(TodayCheckinSelect(actionable))
+
+        async def interaction_check(self, interaction: "discord.Interaction") -> bool:
+            if interaction.user.id != self.requester_id:
+                await interaction.response.send_message("这份今日队列只属于原请求者。", ephemeral=True)
+                return False
+            return True
+
+    def _continuation_view(requester_id: int, state: dict):
+        if state.get("recommendation"):
+            view = RecommendationActionView(requester_id, state["recommendation"])
+            if view.children:
+                return view
         view = ContinuationView(requester_id, state)
         return view if view.children else None
 
@@ -1251,6 +1560,31 @@ def run() -> None:
     )
     async def calendar(interaction: "discord.Interaction", 范围: app_commands.Choice[str]) -> None:
         await _slash_answer(interaction, "今天我在追的番更新什么？" if 范围.value == "today" else "给我本周追番放送日历")
+
+    @tree.command(name="今日", description="打开今日追番队列，并可直接选择条目打卡")
+    async def today(interaction: "discord.Interaction") -> None:
+        username = auth.username_for_discord(str(interaction.user.id))
+        tok = await refreshed_token_for_username(auth, username) if username else None
+        if not username or not tok or tok.status != "active":
+            await interaction.response.send_message("今日追番需要先用 `/绑定` 关联 Bangumi。", ephemeral=True)
+            return
+        await interaction.response.defer(thinking=True)
+        client_ = BangumiClient(token=tok.access_token, user_agent=settings.bangumi_user_agent)
+        try:
+            with tenant_scope(username, authenticated=True):
+                result = await TodayCockpitService(client_, today_store).build(username)
+            data = result.model_dump(mode="json", exclude_none=True)
+            view = TodayCheckinView(interaction.user.id, data.get("today") or [])
+            await interaction.followup.send(
+                embeds=_today_embeds(discord, data),
+                view=view if view.children else None,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except Exception as e:  # noqa: BLE001
+            log.exception("discord today failed")
+            await interaction.followup.send(f"今日队列加载失败：{type(e).__name__}", ephemeral=True)
+        finally:
+            await client_.aclose()
 
     @tree.command(name="打卡", description="把某部作品看到第几集写回 Bangumi（执行前会二次确认）")
     @app_commands.describe(作品="全名或圈内简称，如 恋死 / 绘死", 集数="已经看到的正片集数")
@@ -1437,7 +1771,7 @@ def run() -> None:
         "**怎么用:**\n"
         "• 在频道里 **@我** 提问,或**私信我**(私信不用 @)\n"
         "• **发图给我**能识番(截图/CG/封面都行)\n"
-        "• 斜杠命令:`/推荐` `/评价` `/在哪看` `/新番` `/日历` `/打卡` `/记忆` `/剧透` `/订阅` `/新对话`\n\n"
+        "• 斜杠命令:`/今日` `/推荐` `/评价` `/在哪看` `/新番` `/日历` `/打卡` `/记忆` `/剧透` `/订阅` `/新对话`\n\n"
         "**能问什么(举例):**\n"
         "• 推荐:`推荐几部治愈番` / `类似孤独摇滚的` / `今晚能看完的短番`\n"
         "• 评价:`药屋少女的呢喃口碑怎么样` / `最近什么番崩了`\n"

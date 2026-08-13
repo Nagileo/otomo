@@ -744,7 +744,7 @@ class CollectionDashboardTool(Tool):
             memory_signals={
                 "likes": [x.model_dump(mode="json") for x in mem.likes[:8]] if args.include_memory else [],
                 "dislikes": [x.model_dump(mode="json") for x in mem.dislikes[:8]] if args.include_memory else [],
-                "recent_feedback": [x.model_dump(mode="json") for x in mem.recent_feedback[-8:]] if args.include_memory else [],
+                "recent_feedback": [x.model_dump(mode="json") for x in mem.feedback[-8:]] if args.include_memory else [],
             },
             recommendations_for_next_step=[
                 "用 plan_watch_copilot 把想看/在看/搁置转成本周队列。",

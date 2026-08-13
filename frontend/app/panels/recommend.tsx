@@ -132,11 +132,11 @@ export function RecommendPanel({
           const nextStep = list<string>(item.next_step)[0] || "";
           return (
             <article className="rec-card" key={`${item.id}-${i}`}>
-              <a href={`https://bgm.tv/subject/${item.id}`} target="_blank" rel="noreferrer" onClick={() => void feedback(item, "open")}>
+              <a href={`/subject/${item.id}`} onClick={() => void feedback(item, "open")}>
                 {item.image ? <img src={item.image} alt="" /> : <div className="rec-noimg" />}
               </a>
               <div className="rec-body">
-                <a className="card-title" href={`https://bgm.tv/subject/${item.id}`} target="_blank" rel="noreferrer" onClick={() => void feedback(item, "open")}>{text(item.name)}</a>
+                <a className="card-title" href={`/subject/${item.id}`} onClick={() => void feedback(item, "open")}>{text(item.name)}</a>
                 <div className="card-meta">
                   {item.bangumi_score ? `Bangumi ${item.bangumi_score}` : "评分暂无"}
                   {item.rank ? ` · 全站 #${item.rank}` : ""}
