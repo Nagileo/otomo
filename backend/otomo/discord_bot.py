@@ -743,6 +743,18 @@ def run() -> None:
         session_id = "discord_" + hashlib.sha256(raw.encode()).hexdigest()[:32]
         return session_id, f"discord:{discord_user_id}"
 
+    def _handoff_url(session_id: str, owner: str, username: str, guild_id: int | None) -> str:
+        if not username:
+            return ""
+        label = "Discord 私聊" if guild_id is None else "Discord 频道"
+        code = session_store.create_handoff(
+            session_id,
+            owner,
+            username,
+            source_label=label,
+        )
+        return f"{settings.frontend_base_url.rstrip('/')}/chat?handoff={code}"
+
     async def _answer_locked(
         discord_user_id: int,
         channel_id: int,
@@ -802,7 +814,14 @@ def run() -> None:
 
         try:
             async with lock:
-                session_store.ensure_session(session_id, owner, title="Discord 对话")
+                surface_label = "Discord 私聊" if guild_id is None else "Discord 频道"
+                session_store.ensure_session(
+                    session_id,
+                    owner,
+                    title=question[:40],
+                    source="discord",
+                    source_label=surface_label,
+                )
                 state = session_store.load_state(session_id, owner) or AgentState()
                 identity_marker = active_username or "__guest__"
                 previous_identity = state.short_term.get("discord_identity")
@@ -810,6 +829,8 @@ def run() -> None:
                     # A Discord account can be unlinked/rebound. Never carry the
                     # previous Bangumi identity's transcript into the new one.
                     state = AgentState()
+                    session_store.clear_messages(session_id, owner)
+                    session_store.rename_session(session_id, owner, question[:40])
                 state.short_term["discord_identity"] = identity_marker
                 if spoiler_mode in {"none", "mild", "full"}:
                     spoiler = dict(state.short_term.get("spoiler") or {})
@@ -836,6 +857,24 @@ def run() -> None:
                 turn_id = hashlib.sha256(
                     f"{session_id}:{question}:{len(state.messages)}".encode()
                 ).hexdigest()[:32]
+                stored_attachments = [
+                    {
+                        **item,
+                        "preview_url": (
+                            f"/uploads/{str(item.get('uri', '')).removeprefix('upload://')}/preview"
+                            if str(item.get("uri", "")).startswith("upload://") else ""
+                        ),
+                    }
+                    for item in (attachments or [])[:4]
+                    if isinstance(item, dict)
+                ]
+                session_store.append_message(
+                    session_id,
+                    owner,
+                    role="user",
+                    content=question,
+                    attachments=stored_attachments,
+                )
                 try:
                     with tenant_scope(active_username, authenticated=bool(active_username)):
                         async for ev in traced_stream(
@@ -885,6 +924,18 @@ def run() -> None:
                 finally:
                     state.short_term.pop("attachments", None)
                     if result:
+                        evidence: dict[str, list[dict]] = {}
+                        for name, data in observations:
+                            evidence.setdefault(name, []).append(data)
+                        session_store.append_message(
+                            session_id,
+                            owner,
+                            role="assistant",
+                            content=result,
+                            evidence=evidence,
+                            sources=final_sources,
+                        )
+                    if result:
                         try:
                             await compact_agent_state(
                                 state,
@@ -932,6 +983,13 @@ def run() -> None:
             "spoiler": spoiler_snapshot,
             "question": question,
         }
+        if active_username:
+            try:
+                interaction_state["web_handoff_url"] = _handoff_url(
+                    session_id, owner, active_username, guild_id
+                )
+            except Exception:  # noqa: BLE001 - handoff is optional; never hide the answer
+                log.exception("discord web handoff creation failed")
         recommendation = next((data for name, data in observations if name == "recommend_subjects"), None)
         if recommendation:
             interaction_state["recommendation"] = recommendation
@@ -1129,6 +1187,14 @@ def run() -> None:
                     q = str(followup).strip()
                     if q:
                         self.add_item(ContinuationButton(q, q))
+            web_url = str(state.get("web_handoff_url") or "")
+            if web_url:
+                self.add_item(discord.ui.Button(
+                    label="在网页继续",
+                    style=discord.ButtonStyle.link,
+                    url=web_url,
+                    row=4,
+                ))
 
         async def interaction_check(self, interaction: "discord.Interaction") -> bool:
             if interaction.user.id != self.requester_id:
@@ -1286,7 +1352,7 @@ def run() -> None:
             await _deliver_interaction(interaction, reply, embeds, pending, state)
 
     class RecommendationActionView(discord.ui.View):
-        def __init__(self, requester_id: int, data: dict) -> None:
+        def __init__(self, requester_id: int, data: dict, web_url: str = "") -> None:
             super().__init__(timeout=300)
             self.requester_id = requester_id
             set_id = str(data.get("recommendation_set_id") or "")
@@ -1294,6 +1360,13 @@ def run() -> None:
             if set_id and items:
                 self.add_item(RecommendationItemSelect(set_id, items))
                 self.add_item(RecommendationNextButton(set_id))
+            if web_url:
+                self.add_item(discord.ui.Button(
+                    label="在网页继续",
+                    style=discord.ButtonStyle.link,
+                    url=web_url,
+                    row=4,
+                ))
 
         async def interaction_check(self, interaction: "discord.Interaction") -> bool:
             if interaction.user.id != self.requester_id:
@@ -1383,7 +1456,11 @@ def run() -> None:
 
     def _continuation_view(requester_id: int, state: dict):
         if state.get("recommendation"):
-            view = RecommendationActionView(requester_id, state["recommendation"])
+            view = RecommendationActionView(
+                requester_id,
+                state["recommendation"],
+                str(state.get("web_handoff_url") or ""),
+            )
             if view.children:
                 return view
         view = ContinuationView(requester_id, state)
@@ -1511,6 +1588,40 @@ def run() -> None:
             if not session_lock.locked():
                 _locks.pop(session_id, None)
         await interaction.response.send_message("✨ 已开新对话,之前的上下文清空了。", ephemeral=True)
+
+    @tree.command(name="网页续聊", description="生成一个仅当前 Bangumi 账号可用的网页续聊链接")
+    async def continue_on_web(interaction: "discord.Interaction") -> None:
+        username = auth.username_for_discord(str(interaction.user.id))
+        if not username:
+            await interaction.response.send_message(
+                "需要先用 `/绑定` 关联 Bangumi，续聊链接才可安全绑定到你的网页账号。",
+                ephemeral=True,
+            )
+            return
+        session_id, owner = _conversation(
+            interaction.user.id,
+            int(interaction.channel_id or interaction.user.id),
+            interaction.guild_id,
+        )
+        try:
+            url = _handoff_url(session_id, owner, username, interaction.guild_id)
+        except FileNotFoundError:
+            await interaction.response.send_message(
+                "当前频道还没有可迁移的对话，先问 Otomo 一个问题再试。",
+                ephemeral=True,
+            )
+            return
+        view = discord.ui.View(timeout=900)
+        view.add_item(discord.ui.Button(
+            label="在网页继续",
+            style=discord.ButtonStyle.link,
+            url=url,
+        ))
+        await interaction.response.send_message(
+            "这个一次性链接 15 分钟内有效，只能由同一 Bangumi 账号使用。网页会创建独立副本，不会与 Discord 抢写。",
+            view=view,
+            ephemeral=True,
+        )
 
     @tree.command(name="推荐", description="按你的口味推荐番剧(绑定后更懂你)")
     @app_commands.describe(关键词="想要的题材/心情,如 治愈 / 今晚看完 / 类似孤独摇滚")

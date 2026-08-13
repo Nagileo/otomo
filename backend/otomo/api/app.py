@@ -45,6 +45,7 @@ from ..recommendation_events import (
     record_recommendation_feedback,
 )
 from ..recsys_registry import cf_model_registry
+from ..session_realtime import SessionRealtimeHub
 from ..session_store import SessionStore
 from ..security_context import tenant_scope
 from ..share import CreateShareSnapshotRequest, ShareSnapshot, ShareSnapshotStore
@@ -92,6 +93,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.ltm = LongTermMemory()
     app.state.auth = AuthStore()
     app.state.session_store = SessionStore()
+    app.state.session_realtime = SessionRealtimeHub()
     app.state.share_store = ShareSnapshotStore()
     app.state.subscription_store = SubscriptionStore(cipher=app.state.auth.cipher)
     app.state.today_store = TodayPreferenceStore()
@@ -177,6 +179,7 @@ class ChatRequest(BaseModel):
     spoiler_mode: Literal["none", "mild", "full"] | None = None
     progress_episode: int | None = None
     attachments: list[dict[str, Any]] = Field(default_factory=list)
+    device_id: str = Field("", max_length=96)
 
 
 class UploadImageRequest(BaseModel):
@@ -248,6 +251,10 @@ class RenameSessionRequest(BaseModel):
     title: str
 
 
+class SessionHandoffRequest(BaseModel):
+    code: str = Field(..., min_length=16, max_length=128)
+
+
 class ProductCompareRequest(BaseModel):
     subject_ids: list[int] = Field(..., min_length=2, max_length=3)
 
@@ -285,6 +292,22 @@ def _clear_auth_cookies(response: Response) -> None:
 
 def _auth_session_id(request: Request) -> str:
     return request.cookies.get(settings.session_cookie_name, "") or ""
+
+
+def _safe_return_to(value: str) -> str:
+    value = value.strip()
+    if (
+        not value
+        or not value.startswith("/")
+        or value.startswith("//")
+        or "\\" in value
+        or any(ord(char) < 32 for char in value)
+    ):
+        return ""
+    parsed = urlparse(value)
+    if parsed.scheme or parsed.netloc:
+        return ""
+    return value[:600]
 
 
 def _ensure_auth_session(request: Request, response: Response):
@@ -570,10 +593,15 @@ async def list_subscription_deliveries(
 async def bangumi_login(
     request: Request,
     response: Response,
+    return_to: str = "",
 ) -> dict[str, Any]:
     session = _ensure_auth_session(request, response)
     try:
-        url = build_authorization_url(app.state.auth, session.auth_session_id)
+        url = build_authorization_url(
+            app.state.auth,
+            session.auth_session_id,
+            return_to=_safe_return_to(return_to),
+        )
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     return {"authorization_url": url}
@@ -614,7 +642,12 @@ async def dev_token_login(req: dict[str, str], request: Request, response: Respo
 
 
 @app.get("/auth/bangumi/start")
-async def bangumi_start(request: Request, response: Response, discord_code: str = "") -> RedirectResponse:
+async def bangumi_start(
+    request: Request,
+    response: Response,
+    discord_code: str = "",
+    return_to: str = "",
+) -> RedirectResponse:
     """浏览器可直接打开的登录入口:302 跳 Bangumi 授权。Discord 绑定用——
     bot 的 /绑定 给出一次性短码，授权成功后回调里自动绑定。"""
     session = _ensure_auth_session(request, response)
@@ -624,7 +657,12 @@ async def bangumi_start(request: Request, response: Response, discord_code: str 
         if not discord_user_id:
             raise HTTPException(status_code=400, detail="Discord 绑定链接无效或已过期，请回 Discord 重新生成")
     try:
-        url = build_authorization_url(app.state.auth, session.auth_session_id, discord_user_id or "")
+        url = build_authorization_url(
+            app.state.auth,
+            session.auth_session_id,
+            discord_user_id or "",
+            _safe_return_to(return_to),
+        )
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     redirect = RedirectResponse(url)
@@ -647,7 +685,10 @@ async def bangumi_callback(code: str = "", state: str = "") -> RedirectResponse:
         status = "error"
         params["error"] = f"{type(e).__name__}: {str(e)[:180]}"
     params["bangumi_auth"] = status
-    redirect_to = f"{settings.frontend_base_url.rstrip('/')}?{urlencode(params)}"
+    return_to = _safe_return_to(app.state.auth.pop_oauth_return_to(session_id)) if session_id else ""
+    target = f"{settings.frontend_base_url.rstrip('/')}{return_to}"
+    separator = "&" if "?" in target else "?"
+    redirect_to = f"{target}{separator}{urlencode(params)}"
     response = RedirectResponse(redirect_to)
     if session_id:
         session = app.state.auth.get_or_create_session(session_id)
@@ -694,13 +735,49 @@ async def preview_image(image_id: str) -> Response:
 
 
 @app.get("/sessions")
-async def list_sessions(request: Request, response: Response, limit: int = 40) -> dict[str, Any]:
+async def list_sessions(
+    request: Request,
+    response: Response,
+    limit: int = 40,
+    device_id: str = "",
+) -> dict[str, Any]:
     session = _ensure_auth_session(request, response)
-    return {"ok": True, "sessions": app.state.session_store.list_sessions(_session_owner(session.auth_session_id), limit)}
+    owner = _session_owner(session.auth_session_id)
+    rows = app.state.session_store.list_sessions(owner, limit)
+    rows = await app.state.session_realtime.decorate_sessions(owner, rows, device_id[:96])
+    return {"ok": True, "sessions": rows, "last_active_session": rows[0] if rows else None}
+
+
+@app.get("/sessions/events")
+async def session_events(
+    request: Request,
+    response: Response,
+    device_id: str = "",
+) -> EventSourceResponse:
+    session = _ensure_auth_session(request, response)
+    owner = _session_owner(session.auth_session_id)
+
+    async def event_gen() -> AsyncIterator[dict[str, str]]:
+        async for event in app.state.session_realtime.stream(owner, device_id[:96]):
+            if await request.is_disconnected():
+                break
+            yield {
+                "event": "session",
+                "data": json.dumps(event, ensure_ascii=False),
+            }
+
+    stream = EventSourceResponse(event_gen())
+    _set_auth_cookies(stream, session)
+    return stream
 
 
 @app.get("/sessions/{session_id}/messages")
-async def get_session_messages(session_id: str, request: Request, response: Response) -> dict[str, Any]:
+async def get_session_messages(
+    session_id: str,
+    request: Request,
+    response: Response,
+    device_id: str = "",
+) -> dict[str, Any]:
     session = _ensure_auth_session(request, response)
     try:
         payload = app.state.session_store.load_messages(session_id, _session_owner(session.auth_session_id))
@@ -708,6 +785,11 @@ async def get_session_messages(session_id: str, request: Request, response: Resp
         raise HTTPException(status_code=403, detail="无权访问该会话") from e
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail="会话不存在") from e
+    owner = _session_owner(session.auth_session_id)
+    session_rows = await app.state.session_realtime.decorate_sessions(
+        owner, [payload.get("session") or {}], device_id[:96]
+    )
+    payload["session"] = session_rows[0] if session_rows else payload.get("session")
     return {"ok": True, **payload}
 
 
@@ -726,6 +808,12 @@ async def rename_session(
         raise HTTPException(status_code=403, detail="无权修改该会话") from e
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail="会话不存在") from e
+    await app.state.session_realtime.notify(
+        _session_owner(session.auth_session_id),
+        "session_changed",
+        session_id=session_id,
+        reason="renamed",
+    )
     return {"ok": True, "session": payload}
 
 
@@ -733,14 +821,47 @@ async def rename_session(
 async def delete_session(session_id: str, request: Request, response: Response) -> dict[str, Any]:
     session = _ensure_auth_session(request, response)
     _require_csrf(request, session.auth_session_id)
+    owner = _session_owner(session.auth_session_id)
+    if await app.state.session_realtime.activity(owner, session_id):
+        raise HTTPException(status_code=409, detail="会话正在生成，完成或停止后才能删除")
     try:
-        app.state.session_store.delete_session(session_id, _session_owner(session.auth_session_id))
+        app.state.session_store.delete_session(session_id, owner)
     except PermissionError as e:
         raise HTTPException(status_code=403, detail="无权删除该会话") from e
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail="会话不存在") from e
     app.state.sessions.pop(session_id, None)
+    await app.state.session_realtime.notify(
+        owner,
+        "session_deleted",
+        session_id=session_id,
+    )
     return {"ok": True}
+
+
+@app.post("/sessions/handoff/consume")
+async def consume_session_handoff(
+    req: SessionHandoffRequest,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    identity = _authenticated_identity(session.auth_session_id)
+    owner = _session_owner(session.auth_session_id)
+    try:
+        imported = app.state.session_store.consume_handoff(req.code, identity.username, owner)
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail="该续聊链接不属于当前 Bangumi 账号") from e
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail="续聊链接不存在、已使用或已过期") from e
+    await app.state.session_realtime.notify(
+        owner,
+        "session_changed",
+        session_id=imported["id"],
+        reason="discord_import",
+    )
+    return {"ok": True, "session": imported}
 
 
 def _runner_from_registry(kind: str, registry):
@@ -1048,6 +1169,24 @@ async def chat(req: ChatRequest, request: Request):
     turn_id = uuid.uuid4().hex  # 轨迹/反馈关联键，meta 事件发给前端
     lock_key = f"{session_owner}:{chat_session_id}"
     lock = app.state.session_locks.setdefault(lock_key, asyncio.Lock())
+    claimed, activity = await app.state.session_realtime.claim(
+        session_owner,
+        chat_session_id,
+        turn_id,
+        req.device_id or "web-unknown",
+        surface="web",
+    )
+    if not claimed:
+        await client.aclose()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "session_busy",
+                "message": "这个会话正在另一处生成，请等待完成或新建对话",
+                "surface": activity.surface,
+                "started_at": activity.started_at,
+            },
+        )
 
     async def event_gen() -> AsyncIterator[dict]:
         meta = {
@@ -1107,6 +1246,12 @@ async def chat(req: ChatRequest, request: Request):
                     role="user",
                     content=req.message,
                     attachments=stored_attachments,
+                )
+                await app.state.session_realtime.notify(
+                    session_owner,
+                    "session_changed",
+                    session_id=chat_session_id,
+                    reason="user_message",
                 )
                 yield {"event": "meta", "data": json.dumps({"type": "meta", **meta}, ensure_ascii=False)}
                 try:
@@ -1174,7 +1319,14 @@ async def chat(req: ChatRequest, request: Request):
                         usage_tokens=tokens,
                     )
                     app.state.session_store.save_state(chat_session_id, session_owner, state)
+                    await app.state.session_realtime.notify(
+                        session_owner,
+                        "session_changed",
+                        session_id=chat_session_id,
+                        reason="turn_completed" if final_answer else "state_saved",
+                    )
         finally:
+            await app.state.session_realtime.release(activity)
             await client.aclose()
 
     response = EventSourceResponse(event_gen())

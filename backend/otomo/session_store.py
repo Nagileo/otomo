@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import json
+import secrets
 import sqlite3
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +52,9 @@ class SessionStore:
                     auth_session_id TEXT NOT NULL,
                     title TEXT NOT NULL DEFAULT '',
                     state_json TEXT NOT NULL DEFAULT '{}',
+                    source TEXT NOT NULL DEFAULT 'web',
+                    source_label TEXT NOT NULL DEFAULT '',
+                    revision INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
@@ -70,10 +75,39 @@ class SessionStore:
                 )
                 """
             )
+            columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+            if "source" not in columns:
+                conn.execute("ALTER TABLE sessions ADD COLUMN source TEXT NOT NULL DEFAULT 'web'")
+            if "source_label" not in columns:
+                conn.execute("ALTER TABLE sessions ADD COLUMN source_label TEXT NOT NULL DEFAULT ''")
+            if "revision" not in columns:
+                conn.execute("ALTER TABLE sessions ADD COLUMN revision INTEGER NOT NULL DEFAULT 0")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS session_handoffs (
+                    code TEXT PRIMARY KEY,
+                    username TEXT NOT NULL,
+                    source_session_id TEXT NOT NULL,
+                    source_owner TEXT NOT NULL,
+                    source_label TEXT NOT NULL DEFAULT 'Discord',
+                    created_at REAL NOT NULL,
+                    expires_at REAL NOT NULL
+                )
+                """
+            )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_auth_updated ON sessions(auth_session_id, updated_at DESC)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id, id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_handoffs_expiry ON session_handoffs(expires_at)")
 
-    def ensure_session(self, session_id: str, auth_session_id: str, title: str = "") -> dict[str, Any]:
+    def ensure_session(
+        self,
+        session_id: str,
+        auth_session_id: str,
+        title: str = "",
+        *,
+        source: str = "web",
+        source_label: str = "",
+    ) -> dict[str, Any]:
         # auth_session_id 存的是"归属键"：匿名=cookie 会话 id，OAuth 登录后=user:<username>
         # （登录时由 migrate_owner 迁移，同一账号跨设备可见）。
         now = _now()
@@ -81,8 +115,22 @@ class SessionStore:
         with self._connect() as conn:
             # INSERT OR IGNORE 先行：并发首写同一 session_id 时 SELECT-then-INSERT 会撞 UNIQUE
             conn.execute(
-                "INSERT OR IGNORE INTO sessions(id, auth_session_id, title, state_json, created_at, updated_at) VALUES(?,?,?,?,?,?)",
-                (session_id, auth_session_id, clean_title or "新对话", "{}", now, now),
+                """
+                INSERT OR IGNORE INTO sessions(
+                    id, auth_session_id, title, state_json, source, source_label,
+                    revision, created_at, updated_at
+                ) VALUES(?,?,?,?,?,?,0,?,?)
+                """,
+                (
+                    session_id,
+                    auth_session_id,
+                    clean_title or "新对话",
+                    "{}",
+                    source.strip()[:24] or "web",
+                    source_label.strip()[:80],
+                    now,
+                    now,
+                ),
             )
             row = conn.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
             if row["auth_session_id"] != auth_session_id:
@@ -113,6 +161,7 @@ class SessionStore:
             rows = conn.execute(
                 """
                 SELECT id, title, created_at, updated_at,
+                       source, source_label, revision,
                        (SELECT COUNT(*) FROM messages WHERE session_id=sessions.id) AS message_count
                 FROM sessions
                 WHERE auth_session_id=?
@@ -138,7 +187,7 @@ class SessionStore:
         now = _now()
         with self._connect() as conn:
             conn.execute(
-                "UPDATE sessions SET title=?, updated_at=? WHERE id=? AND auth_session_id=?",
+                "UPDATE sessions SET title=?, updated_at=?, revision=revision+1 WHERE id=? AND auth_session_id=?",
                 (clean, now, session_id, auth_session_id),
             )
         return {"id": session_id, "title": clean, "updated_at": now}
@@ -147,6 +196,15 @@ class SessionStore:
         self._existing_session(session_id, auth_session_id)
         with self._connect() as conn:
             conn.execute("DELETE FROM sessions WHERE id=? AND auth_session_id=?", (session_id, auth_session_id))
+
+    def clear_messages(self, session_id: str, auth_session_id: str) -> None:
+        self._existing_session(session_id, auth_session_id)
+        with self._connect() as conn:
+            conn.execute("DELETE FROM messages WHERE session_id=?", (session_id,))
+            conn.execute(
+                "UPDATE sessions SET revision=revision+1, updated_at=? WHERE id=?",
+                (_now(), session_id),
+            )
 
     def delete_owner_sessions(self, auth_session_id: str) -> int:
         """Delete every short-term conversation owned by one surface identity."""
@@ -163,7 +221,7 @@ class SessionStore:
         payload = state.model_dump(mode="json", exclude_none=True)
         with self._connect() as conn:
             conn.execute(
-                "UPDATE sessions SET state_json=?, updated_at=? WHERE id=? AND auth_session_id=?",
+                "UPDATE sessions SET state_json=?, updated_at=?, revision=revision+1 WHERE id=? AND auth_session_id=?",
                 (_json_dump(payload), _now(), session_id, auth_session_id),
             )
 
@@ -213,7 +271,13 @@ class SessionStore:
                 ),
             )
             conn.execute(
-                "UPDATE sessions SET updated_at=?, title=CASE WHEN title='新对话' AND ?!='' THEN ? ELSE title END WHERE id=?",
+                """
+                UPDATE sessions
+                SET updated_at=?,
+                    title=CASE WHEN title='新对话' AND ?!='' THEN ? ELSE title END,
+                    revision=revision+1
+                WHERE id=?
+                """,
                 (_now(), title, title, session_id),
             )
 
@@ -225,7 +289,11 @@ class SessionStore:
                 (session_id,),
             ).fetchall()
             session = conn.execute(
-                "SELECT id, title, state_json, created_at, updated_at FROM sessions WHERE id=? AND auth_session_id=?",
+                """
+                SELECT id, title, state_json, source, source_label, revision,
+                       created_at, updated_at
+                FROM sessions WHERE id=? AND auth_session_id=?
+                """,
                 (session_id, auth_session_id),
             ).fetchone()
         messages = []
@@ -257,6 +325,140 @@ class SessionStore:
             "sources": sources[-12:],
         }
 
+    def create_handoff(
+        self,
+        source_session_id: str,
+        source_owner: str,
+        username: str,
+        *,
+        source_label: str = "Discord",
+        ttl_seconds: int = 900,
+    ) -> str:
+        """Create a one-use, identity-bound handoff token for a conversation."""
+        self._existing_session(source_session_id, source_owner)
+        code = secrets.token_urlsafe(24)
+        now = time.time()
+        with self._connect() as conn:
+            conn.execute("DELETE FROM session_handoffs WHERE expires_at<?", (now,))
+            conn.execute(
+                """
+                INSERT INTO session_handoffs(
+                    code, username, source_session_id, source_owner,
+                    source_label, created_at, expires_at
+                ) VALUES(?,?,?,?,?,?,?)
+                """,
+                (
+                    code,
+                    username,
+                    source_session_id,
+                    source_owner,
+                    source_label.strip()[:80] or "Discord",
+                    now,
+                    now + max(60, min(ttl_seconds, 3600)),
+                ),
+            )
+        return code
+
+    def consume_handoff(self, code: str, username: str, target_owner: str) -> dict[str, Any]:
+        """Atomically consume a handoff and clone its transcript into web ownership."""
+        now = time.time()
+        target_id = uuid.uuid4().hex
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            handoff = conn.execute(
+                "SELECT * FROM session_handoffs WHERE code=?",
+                (code,),
+            ).fetchone()
+            if not handoff or float(handoff["expires_at"] or 0) < now:
+                if handoff:
+                    conn.execute("DELETE FROM session_handoffs WHERE code=?", (code,))
+                raise FileNotFoundError("handoff not found or expired")
+            if str(handoff["username"]) != username:
+                raise PermissionError("handoff identity mismatch")
+            source = conn.execute(
+                "SELECT * FROM sessions WHERE id=? AND auth_session_id=?",
+                (handoff["source_session_id"], handoff["source_owner"]),
+            ).fetchone()
+            if not source:
+                raise FileNotFoundError("source session not found")
+
+            state = _json_load(source["state_json"], {})
+            if isinstance(state, dict):
+                short_term = state.get("short_term")
+                if isinstance(short_term, dict):
+                    short_term.pop("discord_identity", None)
+                    short_term.pop("attachments", None)
+            created_at = _now()
+            source_label = str(handoff["source_label"] or "Discord")
+            title = f"来自 {source_label} · {str(source['title'] or '对话')}"[:80]
+            conn.execute(
+                """
+                INSERT INTO sessions(
+                    id, auth_session_id, title, state_json, source, source_label,
+                    revision, created_at, updated_at
+                ) VALUES(?,?,?,?,?,?,1,?,?)
+                """,
+                (
+                    target_id,
+                    target_owner,
+                    title,
+                    _json_dump(state if isinstance(state, dict) else {}),
+                    "discord_import",
+                    source_label,
+                    created_at,
+                    created_at,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO messages(
+                    session_id, role, content, attachments_json,
+                    evidence_json, sources_json, created_at
+                )
+                SELECT ?, role, content, attachments_json, evidence_json, sources_json, created_at
+                FROM messages WHERE session_id=? ORDER BY id
+                """,
+                (target_id, source["id"]),
+            )
+            conn.execute("DELETE FROM session_handoffs WHERE code=?", (code,))
+            count = conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE session_id=?",
+                (target_id,),
+            ).fetchone()[0]
+            if not count and isinstance(state, dict):
+                # Pre-handoff Discord sessions persisted AgentState only. Keep
+                # their readable user/assistant turns available after upgrade.
+                for message in state.get("messages") or []:
+                    if not isinstance(message, dict):
+                        continue
+                    role = str(message.get("role") or "")
+                    content = str(message.get("content") or "").strip()
+                    if role not in {"user", "assistant"} or not content:
+                        continue
+                    conn.execute(
+                        """
+                        INSERT INTO messages(
+                            session_id, role, content, attachments_json,
+                            evidence_json, sources_json, created_at
+                        ) VALUES(?,?,?,?,?,?,?)
+                        """,
+                        (target_id, role, content, "[]", "{}", "[]", created_at),
+                    )
+                count = conn.execute(
+                    "SELECT COUNT(*) FROM messages WHERE session_id=?",
+                    (target_id,),
+                ).fetchone()[0]
+        return {
+            "id": target_id,
+            "title": title,
+            "source": "discord_import",
+            "source_label": source_label,
+            "message_count": int(count or 0),
+            "created_at": created_at,
+            "updated_at": created_at,
+            "revision": 1,
+        }
+
     def migrate_owner(self, old_owner: str, new_owner: str) -> int:
         """把匿名归属迁给登录身份（cookie 会话 id → user:<username>）。"""
         if not old_owner or not new_owner or old_owner == new_owner:
@@ -273,4 +475,5 @@ class SessionStore:
         cutoff = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() - max(ttl, 60)))
         with self._connect() as conn:
             cur = conn.execute("DELETE FROM sessions WHERE updated_at < ?", (cutoff,))
+            conn.execute("DELETE FROM session_handoffs WHERE expires_at<?", (time.time(),))
         return int(cur.rowcount or 0)

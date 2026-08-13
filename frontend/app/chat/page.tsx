@@ -173,6 +173,13 @@ type ChatSession = {
   updated_at?: string;
   created_at?: string;
   message_count?: number;
+  source?: string;
+  source_label?: string;
+  revision?: number;
+  running?: boolean;
+  activity_surface?: string;
+  activity_started_at?: number;
+  activity_is_current_device?: boolean;
 };
 
 const MAX_IMAGES = 4;
@@ -188,6 +195,12 @@ function sourceHost(url: string) {
   } catch {
     return "";
   }
+}
+
+function sessionActivityLabel(session: ChatSession) {
+  const source = session.source_label || (session.source === "discord_import" ? "Discord 续聊" : "网页");
+  const updated = String(session.updated_at || "").replace("T", " ").slice(5, 16);
+  return updated ? `${source} · ${updated}` : source;
 }
 
 function evidenceSummary(evidence: EvidenceMap) {
@@ -407,6 +420,7 @@ export default function Home() {
   const [shareNotice, setShareNotice] = useState<AuthNotice | null>(null);
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState("");
+  const [resumeCandidate, setResumeCandidate] = useState<ChatSession | null>(null);
   const [busy, setBusy] = useState(false);
   const answerRef = useRef("");
   const evidenceRef = useRef<EvidenceMap>({});  // finally 定型消息时读（state 闭包会是旧值）
@@ -422,6 +436,10 @@ export default function Home() {
   const turnIdRef = useRef("");  // 本轮 turn_id（meta 事件下发，👍👎 反馈按它关联轨迹）
   const abortRef = useRef<AbortController | null>(null);
   const receivedFinalRef = useRef(false);
+  const busyRef = useRef(false);
+  const deviceIdRef = useRef("");
+  const realtimeRefreshRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const realtimeChangedSessionsRef = useRef<Set<string>>(new Set());
 
   // 新问题锚顶：发出消息后把该条用户消息滚到视口顶部，流式回答在其下方展开——
   // 否则长对话里视口停在旧位置，正在生成的内容整个在屏幕外（用户实测痛点）。
@@ -438,6 +456,10 @@ export default function Home() {
     if (!busy) return;
     const t = setInterval(() => setClockTick((x) => x + 1), 1000);  // 驱动等待秒表
     return () => clearInterval(t);
+  }, [busy]);
+
+  useEffect(() => {
+    busyRef.current = busy;
   }, [busy]);
 
   useEffect(() => {
@@ -458,8 +480,57 @@ export default function Home() {
       const cleanUrl = `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`;
       window.history.replaceState(null, "", cleanUrl);
     }
-    void refreshAuthSession().then(() => restoreLastSession());
+    // Per-page writer id: another tab in the same browser is still a distinct
+    // writer and must not silently submit into a running conversation.
+    deviceIdRef.current ||= crypto.randomUUID();
+    void (async () => {
+      const identity = await refreshAuthSession();
+      const rows = await loadSessions();
+      const handoff = params.get("handoff") || window.sessionStorage.getItem("otomo.pendingHandoff") || "";
+      if (handoff) {
+        window.sessionStorage.setItem("otomo.pendingHandoff", handoff);
+        const clean = new URLSearchParams(window.location.search);
+        clean.delete("handoff");
+        window.history.replaceState(null, "", `${window.location.pathname}${clean.size ? `?${clean}` : ""}`);
+        if (identity?.authenticated) await consumeHandoff(handoff);
+        else setAuthNotice({ tone: "warn", text: "请先绑定同一个 Bangumi 账号，再接续这段 Discord 对话。" });
+        return;
+      }
+      await restoreLastSession(rows);
+    })();
   }, []);
+
+  useEffect(() => {
+    if (auth === null || !deviceIdRef.current) return;
+    const source = new EventSource(
+      `${BACKEND}/sessions/events?device_id=${encodeURIComponent(deviceIdRef.current)}`,
+      { withCredentials: true },
+    );
+    const refresh = (raw: Event) => {
+      const message = raw as MessageEvent;
+      let event: Record<string, any> = {};
+      try { event = JSON.parse(String(message.data || "{}")); } catch { return; }
+      if (event.type === "ping") return;
+      if (event.type === "session_changed" && event.session_id) {
+        realtimeChangedSessionsRef.current.add(String(event.session_id));
+      }
+      if (realtimeRefreshRef.current) clearTimeout(realtimeRefreshRef.current);
+      realtimeRefreshRef.current = setTimeout(async () => {
+        const changed = new Set(realtimeChangedSessionsRef.current);
+        realtimeChangedSessionsRef.current.clear();
+        await loadSessions();
+        if (
+          changed.has(sessionId.current) &&
+          !busyRef.current
+        ) await loadSession(sessionId.current, true);
+      }, 90);
+    };
+    source.addEventListener("session", refresh);
+    return () => {
+      source.close();
+      if (realtimeRefreshRef.current) clearTimeout(realtimeRefreshRef.current);
+    };
+  }, [auth?.authenticated, auth?.username]);
 
   function csrfHeaders(extra?: Record<string, string>) {
     return {
@@ -473,38 +544,53 @@ export default function Home() {
     const suffix = retryAfter ? `（${retryAfter} 秒后可重试）` : "";
     const payload = await res.clone().json().catch(() => null);
     const detail = payload?.detail || payload?.error;
-    if (detail) return `${detail}${suffix}`;
+    if (detail) {
+      const message = typeof detail === "string" ? detail : detail.message || JSON.stringify(detail);
+      return `${message}${suffix}`;
+    }
     const text = await res.text().catch(() => "");
     return `${res.status} ${res.statusText || "request failed"}${text ? `: ${text.slice(0, 160)}` : ""}${suffix}`;
   }
 
-  async function refreshAuthSession() {
+  async function refreshAuthSession(): Promise<AuthState | null> {
     try {
       const res = await fetch(`${BACKEND}/auth/session`, { credentials: "include" });
       if (res.ok) {
         const payload = await res.json();
         csrfToken.current = payload.csrf_token || "";
         setAuth(payload);
-        await loadSessions();
+        return payload;
       }
     } catch {
       setAuth({ authenticated: false });
     }
+    return null;
   }
 
-  async function loadSessions() {
+  async function loadSessions(): Promise<ChatSession[]> {
     try {
-      const res = await fetch(`${BACKEND}/sessions`, { credentials: "include" });
+      const query = deviceIdRef.current
+        ? `?device_id=${encodeURIComponent(deviceIdRef.current)}`
+        : "";
+      const res = await fetch(`${BACKEND}/sessions${query}`, { credentials: "include" });
       const payload = await res.json().catch(() => ({}));
-      if (res.ok && payload.ok) setSessions(list(payload.sessions));
+      if (res.ok && payload.ok) {
+        const rows = list(payload.sessions) as ChatSession[];
+        setSessions(rows);
+        return rows;
+      }
     } catch {
       /* 历史会话不是主流程，失败静默降级 */
     }
+    return [];
   }
 
-  async function restoreLastSession() {
+  async function restoreLastSession(rows: ChatSession[] = []) {
     const saved = window.localStorage.getItem("otomo.activeSessionId") || "";
-    if (saved) await loadSession(saved);
+    if (saved) {
+      if (await loadSession(saved)) return;
+    }
+    setResumeCandidate(rows.find((row) => Number(row.message_count || 0) > 0) || null);
   }
 
   function normalizeRestoredMessages(rows: any[]): Msg[] {
@@ -520,18 +606,21 @@ export default function Home() {
     }));
   }
 
-  async function loadSession(id: string) {
-    if (!id || busy) return;
+  async function loadSession(id: string, force = false): Promise<boolean> {
+    if (!id || (busyRef.current && !force)) return false;
     try {
-      const res = await fetch(`${BACKEND}/sessions/${encodeURIComponent(id)}/messages`, { credentials: "include" });
+      const deviceQuery = deviceIdRef.current
+        ? `?device_id=${encodeURIComponent(deviceIdRef.current)}`
+        : "";
+      const res = await fetch(`${BACKEND}/sessions/${encodeURIComponent(id)}/messages${deviceQuery}`, { credentials: "include" });
       const payload = await res.json().catch(() => ({}));
       if (!res.ok || !payload.ok) {
-        if (res.status === 404 && window.localStorage.getItem("otomo.activeSessionId") === id) {
+        if ([403, 404].includes(res.status) && window.localStorage.getItem("otomo.activeSessionId") === id) {
           sessionId.current = "";
           setActiveSessionId("");
           window.localStorage.removeItem("otomo.activeSessionId");
         }
-        return;
+        return false;
       }
       sessionId.current = id;
       setActiveSessionId(id);
@@ -546,8 +635,11 @@ export default function Home() {
       setFollowups([]);
       setAnswer("");
       answerRef.current = "";
+      setResumeCandidate(null);
+      return true;
     } catch {
       /* ignore */
+      return false;
     }
   }
 
@@ -686,7 +778,8 @@ export default function Home() {
     if (!q && shouldUseImage) {
       q = pendingImages.length > 1 ? "请综合识别这些截图，并回锚 Bangumi 候选。" : "请识别这张截图，并回锚 Bangumi 候选。";
     }
-    if (!q || busy) return;
+    const active = sessions.find((row) => row.id === sessionId.current);
+    if (!q || busy || (active?.running && !active.activity_is_current_device)) return;
     lastQ.current = q;
     setInput("");
     setTrace([]);
@@ -700,6 +793,7 @@ export default function Home() {
     liveStepsRef.current = [];
     setLiveSteps([]);
     turnStartRef.current = Date.now();
+    busyRef.current = true;
     setBusy(true);
     const controller = new AbortController();
     abortRef.current = controller;
@@ -722,12 +816,21 @@ export default function Home() {
         body: JSON.stringify({
           message: q,
           session_id: sessionId.current,
+          device_id: deviceIdRef.current,
           attachments,
           ...(spoilerMode ? { spoiler_mode: spoilerMode } : {}),
         }),
         signal: controller.signal,
       });
-      if (!res.ok) throw new Error(await httpErrorMessage(res));
+      if (!res.ok) {
+        if (res.status === 409 && userMessageAdded) {
+          setMessages((rows) => rows.slice(0, -1));
+          userMessageAdded = false;
+          await loadSessions();
+          await loadSession(sessionId.current, true);
+        }
+        throw new Error(await httpErrorMessage(res));
+      }
       if (!res.body) throw new Error("no response body");
 
       const reader = res.body.getReader();
@@ -780,9 +883,35 @@ export default function Home() {
       liveStepsRef.current = [];
       setLiveSteps([]);
       setAnswer("");
+      busyRef.current = false;
       setBusy(false);
       if (abortRef.current === controller) abortRef.current = null;
       void loadSessions();
+    }
+  }
+
+  async function consumeHandoff(code: string) {
+    try {
+      const res = await fetch(`${BACKEND}/sessions/handoff/consume`, {
+        method: "POST",
+        credentials: "include",
+        headers: csrfHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ code }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok || !payload.ok) {
+        const detail = typeof payload.detail === "string" ? payload.detail : payload.detail?.message;
+        if (res.status === 404) window.sessionStorage.removeItem("otomo.pendingHandoff");
+        setAuthNotice({ tone: "bad", text: detail || "Discord 续聊链接无效或已过期。" });
+        return;
+      }
+      const id = String(payload.session?.id || "");
+      window.sessionStorage.removeItem("otomo.pendingHandoff");
+      await loadSessions();
+      await loadSession(id);
+      setAuthNotice({ tone: "good", text: "Discord 对话已安全复制到网页，可以从这里继续。" });
+    } catch (e) {
+      setAuthNotice({ tone: "bad", text: `接续 Discord 对话失败：${String(e)}` });
     }
   }
 
@@ -1123,7 +1252,11 @@ export default function Home() {
       });
       return;
     }
-    const res = await fetch(`${BACKEND}/auth/bangumi/login`, { credentials: "include" });
+    const returnTo = "/chat";
+    const res = await fetch(
+      `${BACKEND}/auth/bangumi/login?return_to=${encodeURIComponent(returnTo)}`,
+      { credentials: "include" },
+    );
     const payload = await res.json().catch(() => ({}));
     if (payload.authorization_url) window.location.href = payload.authorization_url;
     else {
@@ -1150,6 +1283,8 @@ export default function Home() {
       setAuth(payload.identity);
       csrfToken.current = payload.identity?.csrf_token || csrfToken.current;
       setAuthNotice({ tone: "good", text: `已使用本地 BANGUMI_TOKEN 绑定：@${payload.identity?.username || "unknown"}` });
+      const rows = await loadSessions();
+      await restoreLastSession(rows);
     } catch (e) {
       setAuthNotice({ tone: "bad", text: `本地 Token 绑定失败：${String(e)}` });
     }
@@ -1166,6 +1301,9 @@ export default function Home() {
     setAuth({ authenticated: false });
     setAuthNotice({ tone: "warn", text: "已退出当前浏览器会话的 Bangumi 绑定" });
     setMemory(null);
+    newChat();
+    setSessions([]);
+    setResumeCandidate(null);
   }
 
   async function createShareSnapshot(req: Record<string, any>) {
@@ -1221,6 +1359,9 @@ export default function Home() {
     onVisualCorrectionSearch: searchVisualCorrection,
   };
   const panelHandlers: PanelHandlers = { ...panelHandlerProps, devMode: evidenceMode === "dev" };
+  const activeSession = sessions.find((row) => row.id === activeSessionId);
+  const remoteBusy = Boolean(activeSession?.running && !activeSession.activity_is_current_device);
+  const surfaceName = activeSession?.activity_surface === "discord" ? "Discord" : "另一个页面或设备";
 
   return (
     <main className={`page-frame chat-page mode-${evidenceMode}`}>
@@ -1267,19 +1408,24 @@ export default function Home() {
                 className={`session-chip ${activeSessionId === s.id ? "active" : ""}`}
                 onClick={() => loadSession(s.id)}
                 disabled={busy}
-                title={`${s.title || "新对话"} · ${s.updated_at || ""}`}
+                title={`${sessionActivityLabel(s)}${s.running ? " · 正在生成" : ""}`}
               >
+                <i className={`session-source source-${s.source || "web"}`} aria-hidden="true">
+                  {s.source === "discord_import" ? "D" : "W"}
+                </i>
                 <span>{s.title || "新对话"}</span>
                 <small>{s.message_count ?? 0}</small>
+                {s.running && <em className="session-running" title="正在生成" />}
                 <b
                   role="button"
                   tabIndex={0}
                   onClick={(e) => {
                     e.stopPropagation();
+                    if (s.running) return;
                     void deleteSession(s.id);
                   }}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter") {
+                    if (e.key === "Enter" && !s.running) {
                       e.stopPropagation();
                       void deleteSession(s.id);
                     }
@@ -1292,8 +1438,27 @@ export default function Home() {
             ))}
       </div>
 
+      {resumeCandidate && !activeSessionId && (
+        <div className="resume-session-banner">
+          <div>
+            <strong>继续上次对话</strong>
+            <span>{resumeCandidate.title || "新对话"} · {sessionActivityLabel(resumeCandidate)} · {resumeCandidate.message_count || 0} 条消息</span>
+          </div>
+          <div>
+            <button className="button-primary" onClick={() => loadSession(resumeCandidate.id)}>继续</button>
+            <button className="button-secondary" onClick={() => setResumeCandidate(null)}>暂不</button>
+          </div>
+        </div>
+      )}
+
       <div className={`chat-layout ${contextOpen ? "with-context" : ""}`}>
         <section className="chat-surface">
+          {remoteBusy && (
+            <div className="session-activity-banner" role="status">
+              <span className="activity-pulse" />
+              <div><strong>{surfaceName}正在生成这段对话</strong><span>完成后消息会自动同步；你也可以新建独立对话。</span></div>
+            </div>
+          )}
           {messages.length === 0 && !answer && (
             <div className="welcome">
               <div className="welcome-title">你的 ACGN 生活助手</div>
@@ -1424,7 +1589,7 @@ export default function Home() {
               className="composer-icon"
               title={`上传截图（最多 ${MAX_IMAGES} 张）`}
               onClick={() => fileInputRef.current?.click()}
-              disabled={busy || pendingImages.length >= MAX_IMAGES}
+              disabled={busy || remoteBusy || pendingImages.length >= MAX_IMAGES}
             >
               <ImagePlus size={19} />
             </button>
@@ -1434,12 +1599,12 @@ export default function Home() {
               placeholder="例：白色相簿2 里 冬马和纱 的声优还配过哪些番？"
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && send()}
-              disabled={busy}
+              disabled={busy || remoteBusy}
             />
             {busy ? (
               <button className="composer-send stop-button" onClick={stopGeneration} title="停止本轮生成"><Square size={17} /></button>
             ) : (
-              <button className="composer-send" onClick={() => send()} title="发送"><Send size={18} /></button>
+              <button className="composer-send" onClick={() => send()} title="发送" disabled={remoteBusy}><Send size={18} /></button>
             )}
           </div>
           {uploadNotice && (

@@ -33,6 +33,7 @@ class OAuthState(BaseModel):
     state: str
     auth_session_id: str
     discord_user_id: str = ""   # 非空=这是一次 Discord 绑定登录，回调成功后绑定
+    return_to: str = ""
     created_at: float = Field(default_factory=time.time)
 
 
@@ -280,14 +281,29 @@ class AuthStore:
             self.save_token(token)
         return token
 
-    def create_oauth_state(self, auth_session_id: str, discord_user_id: str = "") -> OAuthState:
+    def create_oauth_state(
+        self,
+        auth_session_id: str,
+        discord_user_id: str = "",
+        return_to: str = "",
+    ) -> OAuthState:
         state = OAuthState(
             state=secrets.token_urlsafe(24),
             auth_session_id=auth_session_id,
             discord_user_id=discord_user_id,
+            return_to=return_to,
         )
         self._write("oauth_state", state.state, state.model_dump(mode="json"))
         return state
+
+    def save_oauth_return_to(self, auth_session_id: str, return_to: str) -> None:
+        if return_to:
+            self._write("oauth_return_to", auth_session_id, {"return_to": return_to})
+
+    def pop_oauth_return_to(self, auth_session_id: str) -> str:
+        raw = self._read("oauth_return_to", auth_session_id) or {}
+        self._delete("oauth_return_to", auth_session_id)
+        return str(raw.get("return_to") or "")
 
     def create_discord_link_code(self, discord_user_id: str) -> str:
         """生成短码(8 位 hex,URL 无特殊字符)存服务器,替代把加密串塞进 URL——
@@ -423,10 +439,15 @@ class AuthStore:
         self.delete_token(auth_session_id)
 
 
-def build_authorization_url(auth_store: AuthStore, auth_session_id: str, discord_user_id: str = "") -> str:
+def build_authorization_url(
+    auth_store: AuthStore,
+    auth_session_id: str,
+    discord_user_id: str = "",
+    return_to: str = "",
+) -> str:
     if not settings.bangumi_oauth_client_id:
         raise RuntimeError("未配置 BANGUMI_OAUTH_CLIENT_ID")
-    state = auth_store.create_oauth_state(auth_session_id, discord_user_id)
+    state = auth_store.create_oauth_state(auth_session_id, discord_user_id, return_to)
     query = {
         "client_id": settings.bangumi_oauth_client_id,
         "response_type": "code",
@@ -469,6 +490,7 @@ async def exchange_oauth_code(auth_store: AuthStore, code: str, state_value: str
     if me.get("id") is not None:
         token.user_id = int(me["id"])
     auth_store.save_token(token)
+    auth_store.save_oauth_return_to(state.auth_session_id, state.return_to)
     if state.discord_user_id and token.username:  # 这次是 Discord 绑定登录
         auth_store.set_discord_link(state.discord_user_id, token.username)
         logging.getLogger("otomo.auth").warning(  # warning 级=确保在 uvicorn 默认日志里可见

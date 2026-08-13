@@ -26,6 +26,21 @@ def test_auth_store_oauth_state_roundtrip(tmp_path, monkeypatch):
     assert state.auth_session_id == "auth-session"
 
 
+def test_oauth_state_preserves_safe_frontend_return_target(tmp_path, monkeypatch):
+    monkeypatch.setattr(config.settings, "bangumi_oauth_client_id", "app-id")
+    monkeypatch.setattr(config.settings, "bangumi_oauth_redirect_uri", "http://localhost/cb")
+    store = AuthStore(tmp_path)
+
+    url = build_authorization_url(
+        store,
+        "auth-session",
+        return_to="/chat?handoff=one-use-code",
+    )
+    state_value = url.split("state=", 1)[1]
+    state = store.consume_oauth_state(state_value)
+    assert state.return_to == "/chat?handoff=one-use-code"
+
+
 def test_auth_identity_from_saved_token(tmp_path):
     store = AuthStore(tmp_path)
     store.save_token(
