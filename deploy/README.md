@@ -76,6 +76,7 @@ Caddy 自动为 `1-2-3-4.nip.io` 申请证书，几秒后 `https://1-2-3-4.nip.i
 - [ ] `AUTH_ENCRYPTION_KEY` 固定（换了全员登录失效）
 - [ ] `COOKIE_SECURE=true` + `CORS_ALLOWED_ORIGINS` 收敛到你的公网 URL
 - [ ] Bangumi OAuth 回调地址 = `FRONTEND_BASE_URL/auth/bangumi/callback`
+- [ ] 如需浏览器推送，用 `npx --yes web-push generate-vapid-keys --json` 生成一次性长期密钥，填入 `WEBPUSH_VAPID_PUBLIC_KEY/PRIVATE_KEY`，设置 `WEBPUSH_ENABLED=true`；不要在仍有活跃订阅时轮换，否则所有浏览器都要重新授权
 - [ ] `DAILY_TOKEN_BUDGET_*` 按预算设（防爬虫刷爆 LLM 账单）
 - [ ] LLM/VLM provider 后台设月度充值上限（第二道熔断）
 - [ ] 备份 cache/（auth/sessions/share/subscriptions/ltm）：`deploy/backup_cache.sh` 挂 cron，可选传 OSS
@@ -88,4 +89,5 @@ Caddy 自动为 `1-2-3-4.nip.io` 申请证书，几秒后 `https://1-2-3-4.nip.i
 - **分享页服务端报 fetch failed**：确认 frontend 服务有 `INTERNAL_BACKEND=http://backend:8000`（SSR 不能用浏览器相对 `/api`）。
 - **`NEXT_PUBLIC_BACKEND` 改了不生效**：它是 build 期内联的，改了要 `--build` 重建 frontend 镜像。
 - **证书申请失败**：确认 80/443 放行、`OTOMO_DOMAIN` 是能解析到本机的名字（nip.io 需公网 IP 可达）。
+- **浏览器推送按钮不可用**：确认公网 HTTPS、backend 与 scheduler 都读取同一份 `backend/.env`，且 VAPID 公私钥及 `WEBPUSH_VAPID_SUBJECT` 配置完整；授权后还需在具体规则里勾选“浏览器推送”。
 - **pixiv/B站 ASR 用不了**：国内 IP 直连 pixiv 不可达（选海外节点或挂代理）；B站 ASR 需 cookies（见 ASR_COOKIES_*）。

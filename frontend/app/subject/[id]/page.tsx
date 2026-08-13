@@ -7,6 +7,7 @@ import { useEffect, useState } from "react";
 import { PageHeader } from "../../../components/page-header";
 import { authSession, createShareSnapshot, productFetch } from "../../../lib/api";
 import { SubjectDossierPanel } from "../../panels/product";
+import { SubjectActions } from "../../../components/subject-actions";
 
 export default function SubjectPage({ params }: { params: { id: string } }) {
   const [data, setData] = useState<any>(null);
@@ -45,6 +46,7 @@ export default function SubjectPage({ params }: { params: { id: string } }) {
       {error ? <div className="surface-error">{error}</div> : null}
       {!data && !error ? <div className="surface-loading">正在汇总无剧透评价、系列关系、音乐与观看入口…</div> : null}
       {share ? <div className="inline-notice">分享页已生成：<a href={share} target="_blank" rel="noreferrer">打开公开快照</a></div> : null}
+      {data ? <SubjectActions subject={subject} /> : null}
       {data ? <SubjectDossierPanel data={data} productView onShareSnapshot={authenticated ? (request) => void shareSnapshot(request) : undefined} /> : null}
     </main>
   );

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 from calendar import monthrange
 from datetime import datetime, timedelta
+import hashlib
 import json
 import secrets
 import sqlite3
@@ -18,7 +19,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, Field, model_validator
 
-from .auth import AuthStore, refreshed_token_for_username
+from .auth import AuthStore, TokenCipher, refreshed_token_for_username
 from .config import settings
 from .memory import LongTermMemory
 from .memory.consolidate import now_iso
@@ -45,7 +46,7 @@ SubscriptionKind = Literal[
     "friends_activity",
     "episode_buzz",
 ]
-SubscriptionChannel = Literal["inbox", "email", "webhook", "discord_dm"]
+SubscriptionChannel = Literal["inbox", "email", "webhook", "discord_dm", "webpush"]
 SubscriptionTemplate = Literal["brief", "normal", "detailed"]
 DeliveryStatus = Literal["pending", "sent", "skipped", "failed"]
 WebhookFormat = Literal["generic", "serverchan", "telegram", "discord", "feishu"]
@@ -92,7 +93,7 @@ class CreateSubscriptionRuleRequest(BaseModel):
     enabled: bool = True
     filters: dict[str, Any] = Field(default_factory=dict)
     schedule: SubscriptionSchedule = Field(default_factory=SubscriptionSchedule)
-    channels: list[SubscriptionChannel] = Field(default_factory=lambda: ["inbox"], max_length=4)
+    channels: list[SubscriptionChannel] = Field(default_factory=lambda: ["inbox"], max_length=5)
     template: SubscriptionTemplate = "normal"
     webhook_format: WebhookFormat = "generic"
     webhook_url: str = Field("", max_length=2048)
@@ -111,7 +112,7 @@ class UpdateSubscriptionRuleRequest(BaseModel):
     title: str | None = Field(None, max_length=160)
     filters: dict[str, Any] | None = None
     schedule: SubscriptionSchedule | None = None
-    channels: list[SubscriptionChannel] | None = Field(None, max_length=4)
+    channels: list[SubscriptionChannel] | None = Field(None, max_length=5)
     template: SubscriptionTemplate | None = None
     webhook_format: WebhookFormat | None = None
     webhook_url: str | None = Field(None, max_length=2048)
@@ -139,10 +140,34 @@ class DeliveryRecord(BaseModel):
     created_at: str = ""
 
 
+class WebPushKeys(BaseModel):
+    p256dh: str = Field(min_length=20, max_length=512)
+    auth: str = Field(min_length=8, max_length=256)
+
+
+class WebPushSubscriptionRequest(BaseModel):
+    endpoint: str = Field(min_length=12, max_length=2048)
+    expiration_time: int | None = Field(None, ge=0)
+    keys: WebPushKeys
+
+
+class WebPushDevice(BaseModel):
+    id: str
+    owner_key: str
+    user_agent: str = ""
+    created_at: str
+    updated_at: str
+
+
+def webpush_device_id(endpoint: str) -> str:
+    return "push_" + hashlib.sha256(endpoint.strip().encode("utf-8")).hexdigest()[:32]
+
+
 class SubscriptionStore:
-    def __init__(self, path: str | None = None) -> None:
+    def __init__(self, path: str | None = None, *, cipher: TokenCipher | None = None) -> None:
         self.path = Path(path or settings.subscription_store_path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.cipher = cipher or TokenCipher(Path(settings.auth_store_path).parent)
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
@@ -179,6 +204,21 @@ class SubscriptionStore:
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS webpush_subscriptions (
+                    id TEXT PRIMARY KEY,
+                    owner_key TEXT NOT NULL,
+                    endpoint TEXT NOT NULL UNIQUE,
+                    p256dh TEXT NOT NULL,
+                    auth TEXT NOT NULL,
+                    expiration_time INTEGER,
+                    user_agent TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS subscription_deliveries (
                     id TEXT PRIMARY KEY,
                     rule_id TEXT NOT NULL,
@@ -197,6 +237,116 @@ class SubscriptionStore:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_sub_rules_owner ON subscription_rules(owner_key, updated_at DESC)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_sub_rules_enabled ON subscription_rules(enabled, kind)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_sub_deliveries_rule ON subscription_deliveries(rule_id, created_at DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_webpush_owner ON webpush_subscriptions(owner_key, updated_at DESC)")
+
+    def upsert_webpush(
+        self,
+        owner_key: str,
+        req: WebPushSubscriptionRequest,
+        *,
+        user_agent: str = "",
+    ) -> WebPushDevice:
+        now = now_iso()
+        endpoint = req.endpoint.strip()
+        device_id = webpush_device_id(endpoint)
+        with self._connect() as conn:
+            existing = conn.execute(
+                "SELECT owner_key FROM webpush_subscriptions WHERE id=?",
+                (device_id,),
+            ).fetchone()
+            if existing and existing["owner_key"] != owner_key:
+                raise ValueError("该浏览器订阅已绑定到另一个账户，请先在原账户解绑")
+            conn.execute(
+                """
+                INSERT INTO webpush_subscriptions(
+                    id,owner_key,endpoint,p256dh,auth,expiration_time,user_agent,created_at,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(id) DO UPDATE SET
+                    owner_key=excluded.owner_key,
+                    p256dh=excluded.p256dh,
+                    auth=excluded.auth,
+                    expiration_time=excluded.expiration_time,
+                    user_agent=excluded.user_agent,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    device_id,
+                    owner_key,
+                    self.cipher.encrypt(endpoint),
+                    self.cipher.encrypt(req.keys.p256dh),
+                    self.cipher.encrypt(req.keys.auth),
+                    req.expiration_time,
+                    user_agent[:240],
+                    now,
+                    now,
+                ),
+            )
+            row = conn.execute("SELECT * FROM webpush_subscriptions WHERE id=?", (device_id,)).fetchone()
+        assert row is not None
+        return _row_to_webpush_device(row)
+
+    def list_webpush_devices(self, owner_key: str) -> list[WebPushDevice]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM webpush_subscriptions WHERE owner_key=? ORDER BY updated_at DESC",
+                (owner_key,),
+            ).fetchall()
+        return [_row_to_webpush_device(row) for row in rows]
+
+    def webpush_targets(self, owner_key: str) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id,endpoint,p256dh,auth FROM webpush_subscriptions WHERE owner_key=?",
+                (owner_key,),
+            ).fetchall()
+        targets: list[dict[str, Any]] = []
+        migrations: list[tuple[str, str, str, str]] = []
+        for row in rows:
+            endpoint = self.cipher.decrypt(str(row["endpoint"]))
+            p256dh = self.cipher.decrypt(str(row["p256dh"]))
+            auth = self.cipher.decrypt(str(row["auth"]))
+            targets.append({
+                "id": row["id"],
+                "endpoint": endpoint,
+                "keys": {"p256dh": p256dh, "auth": auth},
+            })
+            if not str(row["endpoint"]).startswith("fernet:"):
+                migrations.append((
+                    self.cipher.encrypt(endpoint),
+                    self.cipher.encrypt(p256dh),
+                    self.cipher.encrypt(auth),
+                    row["id"],
+                ))
+        if migrations:
+            with self._connect() as conn:
+                conn.executemany(
+                    "UPDATE webpush_subscriptions SET endpoint=?,p256dh=?,auth=? WHERE id=?",
+                    migrations,
+                )
+        return targets
+
+    def delete_webpush(self, owner_key: str, *, device_id: str = "", endpoint: str = "") -> bool:
+        if not device_id and not endpoint:
+            return False
+        field, value = ("id", device_id) if device_id else ("id", webpush_device_id(endpoint))
+        with self._connect() as conn:
+            cur = conn.execute(
+                f"DELETE FROM webpush_subscriptions WHERE owner_key=? AND {field}=?",  # noqa: S608 - fixed field names
+                (owner_key, value),
+            )
+        return bool(cur.rowcount)
+
+    def delete_webpush_ids(self, owner_key: str, device_ids: list[str]) -> int:
+        ids = [value for value in dict.fromkeys(device_ids) if value.startswith("push_")]
+        if not ids:
+            return 0
+        marks = ",".join("?" for _ in ids)
+        with self._connect() as conn:
+            cur = conn.execute(
+                f"DELETE FROM webpush_subscriptions WHERE owner_key=? AND id IN ({marks})",  # noqa: S608
+                (owner_key, *ids),
+            )
+        return int(cur.rowcount)
 
     def create(self, req: CreateSubscriptionRuleRequest, *, owner_key: str, username: str = "") -> SubscriptionRule:
         now = now_iso()
@@ -408,11 +558,20 @@ class SubscriptionService:
                 created_at=now_iso(),
             )
             target = notification_target_from_rule(rule)
+            if "webpush" in target.channels:
+                target.webpush_subscriptions = self.store.webpush_targets(rule.owner_key)
             if test:
                 target.channels = [c for c in target.channels if c != "inbox"]
             external_channels = [c for c in target.channels if c != "inbox"]
             target.channels = external_channels
             deliveries = await dispatch_notifications(rule.username or rule.owner_key, target, item) if external_channels else []
+            expired_push_ids = [
+                str(device_id)
+                for row in deliveries
+                for device_id in (row.get("expired_device_ids") or [])
+            ]
+            if expired_push_ids:
+                self.store.delete_webpush_ids(rule.owner_key, expired_push_ids)
             if "inbox" in rule.channels and rule.username and not test:
                 try:
                     with tenant_scope(rule.username, authenticated=True):
@@ -1045,7 +1204,7 @@ def notification_target_from_rule(rule: SubscriptionRule) -> NotificationTarget:
 
 
 def _normalize_channels(channels: list[str]) -> list[SubscriptionChannel]:
-    allowed = {"inbox", "email", "webhook", "discord_dm"}
+    allowed = {"inbox", "email", "webhook", "discord_dm", "webpush"}
     out = [c for c in dict.fromkeys(channels or ["inbox"]) if c in allowed]
     return out or ["inbox"]
 
@@ -1136,6 +1295,16 @@ def _row_to_delivery(row: sqlite3.Row) -> DeliveryRecord:
         deliveries=_load(row["deliveries_json"], []),
         error=row["error"],
         created_at=row["created_at"],
+    )
+
+
+def _row_to_webpush_device(row: sqlite3.Row) -> WebPushDevice:
+    return WebPushDevice(
+        id=row["id"],
+        owner_key=row["owner_key"],
+        user_agent=row["user_agent"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
     )
 
 

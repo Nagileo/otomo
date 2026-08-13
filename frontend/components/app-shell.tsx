@@ -3,12 +3,14 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
-  Bell, BookOpen, CalendarDays, Compass, LogIn, LogOut, MessageCircle,
-  Sparkles,
+  Bell, BookOpen, CalendarDays, Command, Compass, ListChecks, LogIn, LogOut,
+  MessageCircle, MonitorCog, Palette, Sparkles,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { BACKEND } from "../lib/api";
+import { useExperience } from "../lib/experience";
+import { ExperienceOverlays } from "./experience-overlays";
 
 type AuthState = {
   authenticated?: boolean;
@@ -22,7 +24,7 @@ const primary = [
   { href: "/chat", label: "对话", icon: MessageCircle },
   { href: "/discover", label: "发现", icon: Compass },
   { href: "/library", label: "收藏", icon: BookOpen },
-  { href: "/settings/subscriptions", label: "订阅", icon: Bell },
+  { href: "/workspace", label: "清单", icon: ListChecks },
 ];
 
 function active(pathname: string, href: string) {
@@ -32,6 +34,7 @@ function active(pathname: string, href: string) {
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const exp = useExperience();
   const [auth, setAuth] = useState<AuthState | null>(null);
 
   useEffect(() => {
@@ -68,6 +71,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           ))}
         </nav>
         <div className="sidebar-spacer" />
+        <button className="secondary-nav" onClick={() => exp.setCommandOpen(true)}><Command size={17} /><span>搜索</span><kbd>Ctrl K</kbd></button>
+        <button className="secondary-nav" onClick={() => exp.setWatchOpen(true)}><CalendarDays size={17} /><span>快捷追番</span></button>
+        <button className="secondary-nav" onClick={() => exp.setNotificationOpen(true)}><Bell size={17} /><span>通知</span>{exp.unread ? <b className="nav-count">{exp.unread > 99 ? "99+" : exp.unread}</b> : null}</button>
+        <button className="secondary-nav" onClick={() => exp.setCompareOpen(true)}><ListChecks size={17} /><span>作品对比</span>{exp.compareItems.length ? <b className="nav-count">{exp.compareItems.length}</b> : null}</button>
+        <button className="secondary-nav" onClick={() => exp.setSettingsOpen(true)}><Palette size={17} /><span>外观</span></button>
+        <Link className="secondary-nav" href="/settings/subscriptions"><MonitorCog size={17} /><span>订阅设置</span></Link>
         <Link className="secondary-nav" href="/share/mine"><Sparkles size={17} /><span>我的分享</span></Link>
         <div className="account-block">
           {auth?.authenticated ? (
@@ -86,7 +95,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <div className="app-main">
         <header className="mobile-header">
           <Link className="mobile-brand" href="/"><Sparkles size={18} /> Otomo</Link>
-          <span>{primary.find((item) => active(pathname, item.href))?.label || "作品"}</span>
+          <div><button className="icon-plain" onClick={() => exp.setCommandOpen(true)} title="搜索"><Command size={17} /></button><button className="icon-plain" onClick={() => exp.setNotificationOpen(true)} title="通知"><Bell size={17} />{exp.unread ? <i /> : null}</button></div>
         </header>
         {children}
       </div>
@@ -97,6 +106,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </Link>
         ))}
       </nav>
+      {!exp.online ? <div className="offline-bar">当前离线：可以浏览已缓存页面，本轮账户操作将在联网后恢复。</div> : null}
+      <ExperienceOverlays />
     </div>
   );
 }

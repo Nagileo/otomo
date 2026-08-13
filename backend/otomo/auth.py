@@ -74,7 +74,7 @@ class AuthSession(BaseModel):
         return bool(self.expires_at) and time.time() > self.expires_at
 
 
-class _TokenCipher:
+class TokenCipher:
     def __init__(self, base_dir: Path) -> None:
         key = settings.auth_encryption_key.strip()
         if not key:
@@ -109,7 +109,7 @@ class _TokenCipher:
         try:
             return self.fernet.decrypt(value.removeprefix("fernet:").encode("ascii")).decode("utf-8")
         except InvalidToken as e:
-            raise ValueError("auth token decrypt failed; check AUTH_ENCRYPTION_KEY") from e
+            raise ValueError("credential decrypt failed; check AUTH_ENCRYPTION_KEY") from e
 
 
 class AuthStore:
@@ -118,7 +118,7 @@ class AuthStore:
         self.base = base_dir or _DEFAULT_DIR
         self.base.mkdir(parents=True, exist_ok=True)
         self.backend = (backend or settings.auth_store_backend or "sqlite").lower()
-        self.cipher = _TokenCipher(self.base)
+        self.cipher = TokenCipher(self.base)
         self.sqlite_path = self._resolve_sqlite_path()
         if self.backend == "sqlite":
             self.sqlite_path.parent.mkdir(parents=True, exist_ok=True)

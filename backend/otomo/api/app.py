@@ -10,7 +10,7 @@ import json
 import logging
 import uuid
 from typing import Any, AsyncIterator, Literal
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -52,6 +52,7 @@ from ..subscriptions import (
     SubscriptionService,
     SubscriptionStore,
     UpdateSubscriptionRuleRequest,
+    WebPushSubscriptionRequest,
 )
 from ..today import TodayCockpitService, TodayPreferenceStore
 from ..uploads import upload_store
@@ -59,6 +60,8 @@ from .. import trajectory
 from ..agent.plan_execute import PlanExecuteRunner
 from ..agent.react import ReActRunner
 from ..tools.bangumi.client import SUBJECT_TYPE, BangumiClient
+from ..tools.bangumi.tools import SearchSubjectsArgs, SearchSubjectsTool
+from ..tools.discovery.tool import CompareSubjectsArgs, CompareSubjectsTool
 from ..tools.moegirl.client import MoegirlClient
 from ..tools.recommend.tool import RecommendArgs, RecommendTool
 from ..tools.product_loop.tool import (
@@ -69,6 +72,12 @@ from ..tools.product_loop.tool import (
 )
 from ..tools.profile.tool import CollectionDashboardArgs, CollectionDashboardTool
 from ..tools.season.tool import SeasonGuideBriefArgs, SeasonGuideBriefTool
+from ..workspace import (
+    SavedViewCreate,
+    WorkspaceListCreate,
+    WorkspaceListItemRequest,
+    WorkspaceStore,
+)
 
 log = logging.getLogger("otomo.api")
 
@@ -81,9 +90,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.auth = AuthStore()
     app.state.session_store = SessionStore()
     app.state.share_store = ShareSnapshotStore()
-    app.state.subscription_store = SubscriptionStore()
+    app.state.subscription_store = SubscriptionStore(cipher=app.state.auth.cipher)
     app.state.today_store = TodayPreferenceStore()
     app.state.recommendation_event_store = RecommendationEventStore()
+    app.state.workspace_store = WorkspaceStore()
     app.state.subscription_service = SubscriptionService(
         app.state.subscription_store,
         app.state.ltm,
@@ -233,6 +243,14 @@ class VisualFeedbackSearchRequest(BaseModel):
 
 class RenameSessionRequest(BaseModel):
     title: str
+
+
+class ProductCompareRequest(BaseModel):
+    subject_ids: list[int] = Field(..., min_length=2, max_length=3)
+
+
+class InboxReadRequest(BaseModel):
+    unread: bool = False
 
 
 def _set_auth_cookies(response: Response, session) -> None:
@@ -466,6 +484,8 @@ async def create_subscription_rule(
     _require_csrf(request, session.auth_session_id)
     owner, username = _subscription_owner(session.auth_session_id)
     _check_subscription_limits(request, username)
+    if "webpush" in req.channels and not _webpush_ready():
+        raise HTTPException(status_code=400, detail="启用浏览器推送前必须先配置 VAPID")
     if req.webhook_url:
         try:
             await validate_webhook_url(req.webhook_url, req.webhook_format)
@@ -489,6 +509,8 @@ async def update_subscription_rule(
     existing = app.state.subscription_store.get(rule_id, owner)
     if not existing:
         raise HTTPException(status_code=404, detail="订阅不存在或无权修改")
+    if req.channels is not None and "webpush" in req.channels and not _webpush_ready():
+        raise HTTPException(status_code=400, detail="启用浏览器推送前必须先配置 VAPID")
     if req.webhook_url is not None or req.webhook_format is not None:
         final_url = req.webhook_url if req.webhook_url is not None else existing.webhook_url
         fmt = req.webhook_format or existing.webhook_format
@@ -1325,6 +1347,246 @@ async def product_subject_dossier(
         return result.model_dump(mode="json", exclude_none=True)
     finally:
         await client.aclose()
+
+
+@app.get("/product/search")
+async def product_search(
+    request: Request,
+    response: Response,
+    q: str,
+    subject_type: Literal["anime", "book", "music", "game", "real"] | None = None,
+    limit: int = 8,
+) -> dict[str, Any]:
+    """Fast, structured search used by command palette and picker surfaces."""
+    session = _ensure_auth_session(request, response)
+    _product_rate_limit(request, session.auth_session_id, "search")
+    query = q.strip()
+    if not query:
+        raise HTTPException(status_code=422, detail="搜索词不能为空")
+    client = await _request_client(app, session.auth_session_id)
+    try:
+        result = await SearchSubjectsTool(client).run(SearchSubjectsArgs(
+            keyword=query, type=subject_type, limit=min(max(limit, 1), 12),
+        ))
+        return result.model_dump(mode="json", exclude_none=True)
+    finally:
+        await client.aclose()
+
+
+@app.post("/product/compare")
+async def product_compare(
+    req: ProductCompareRequest, request: Request, response: Response,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    _product_rate_limit(request, session.auth_session_id, "compare")
+    client = await _request_client(app, session.auth_session_id)
+    try:
+        result = await CompareSubjectsTool(client).run(CompareSubjectsArgs(
+            subject_ids=list(dict.fromkeys(req.subject_ids)),
+        ))
+        return result.model_dump(mode="json", exclude_none=True)
+    finally:
+        await client.aclose()
+
+
+@app.get("/product/inbox")
+async def product_inbox(request: Request, response: Response, limit: int = 60) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    identity = _authenticated_identity(session.auth_session_id)
+    with tenant_scope(identity.username, authenticated=True):
+        mem = app.state.ltm.load_user(identity.username)
+    items = list(reversed(mem.inbox[-min(max(limit, 1), 100):]))
+    return {
+        "ok": True,
+        "data": {
+            "items": [x.model_dump(mode="json", exclude_none=True) for x in items],
+            "unread": sum(1 for x in mem.inbox if x.unread),
+        },
+    }
+
+
+def _webpush_ready() -> bool:
+    return bool(
+        settings.webpush_enabled
+        and settings.webpush_vapid_public_key
+        and settings.webpush_vapid_private_key
+        and settings.webpush_vapid_subject
+    )
+
+
+@app.get("/subscriptions/webpush/config")
+async def webpush_config(request: Request, response: Response) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    owner, _ = _subscription_owner(session.auth_session_id)
+    devices = app.state.subscription_store.list_webpush_devices(owner)
+    return {
+        "ok": True,
+        "enabled": _webpush_ready(),
+        "public_key": settings.webpush_vapid_public_key if _webpush_ready() else "",
+        "devices": [device.model_dump(mode="json", exclude={"owner_key"}) for device in devices],
+    }
+
+
+@app.post("/subscriptions/webpush")
+async def subscribe_webpush(
+    req: WebPushSubscriptionRequest,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    owner, username = _subscription_owner(session.auth_session_id)
+    _check_subscription_limits(request, username)
+    if not _webpush_ready():
+        raise HTTPException(status_code=503, detail="服务器尚未配置 Web Push / VAPID")
+    parsed = urlparse(req.endpoint.strip())
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+        raise HTTPException(status_code=400, detail="Push endpoint 必须是无账号信息的公网 HTTPS URL")
+    try:
+        await validate_webhook_url(req.endpoint, "generic")
+    except (ValueError, OSError) as e:
+        raise HTTPException(status_code=400, detail=f"Push endpoint 不可用：{e}") from e
+    try:
+        device = app.state.subscription_store.upsert_webpush(
+            owner,
+            req,
+            user_agent=request.headers.get("user-agent", ""),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    return {"ok": True, "device": device.model_dump(mode="json", exclude={"owner_key"})}
+
+
+@app.delete("/subscriptions/webpush/{device_id}")
+async def unsubscribe_webpush(
+    device_id: str,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    owner, username = _subscription_owner(session.auth_session_id)
+    _check_subscription_limits(request, username)
+    if not device_id.startswith("push_"):
+        raise HTTPException(status_code=400, detail="无效的设备 ID")
+    ok = app.state.subscription_store.delete_webpush(owner, device_id=device_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="浏览器订阅不存在或无权删除")
+    return {"ok": True, "id": device_id}
+
+
+@app.patch("/product/inbox/{item_id}")
+async def update_product_inbox(
+    item_id: str, req: InboxReadRequest, request: Request, response: Response,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    identity = _authenticated_identity(session.auth_session_id)
+    with tenant_scope(identity.username, authenticated=True):
+        mem = app.state.ltm.load_user(identity.username)
+        item = next((x for x in mem.inbox if x.id == item_id), None)
+        if not item:
+            raise HTTPException(status_code=404, detail="通知不存在")
+        item.unread = req.unread
+        app.state.ltm.save_user(mem)
+    return {"ok": True, "data": item.model_dump(mode="json", exclude_none=True)}
+
+
+@app.post("/product/inbox/read-all")
+async def read_all_product_inbox(request: Request, response: Response) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    identity = _authenticated_identity(session.auth_session_id)
+    with tenant_scope(identity.username, authenticated=True):
+        mem = app.state.ltm.load_user(identity.username)
+        changed = sum(1 for x in mem.inbox if x.unread)
+        for item in mem.inbox:
+            item.unread = False
+        app.state.ltm.save_user(mem)
+    return {"ok": True, "data": {"updated": changed}}
+
+
+def _workspace_owner(session_id: str) -> str:
+    identity = _authenticated_identity(session_id)
+    return f"user:{identity.username or identity.user_id}"
+
+
+@app.get("/workspace/views")
+async def list_workspace_views(request: Request, response: Response) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    rows = app.state.workspace_store.list_views(_workspace_owner(session.auth_session_id))
+    return {"ok": True, "data": [x.model_dump(mode="json") for x in rows]}
+
+
+@app.post("/workspace/views")
+async def create_workspace_view(
+    req: SavedViewCreate, request: Request, response: Response,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    row = app.state.workspace_store.create_view(_workspace_owner(session.auth_session_id), req)
+    return {"ok": True, "data": row.model_dump(mode="json")}
+
+
+@app.delete("/workspace/views/{view_id}")
+async def delete_workspace_view(view_id: str, request: Request, response: Response) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    if not app.state.workspace_store.delete_view(_workspace_owner(session.auth_session_id), view_id):
+        raise HTTPException(status_code=404, detail="保存视图不存在")
+    return {"ok": True, "id": view_id}
+
+
+@app.get("/workspace/lists")
+async def list_workspace_lists(request: Request, response: Response) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    rows = app.state.workspace_store.list_lists(_workspace_owner(session.auth_session_id))
+    return {"ok": True, "data": [x.model_dump(mode="json") for x in rows]}
+
+
+@app.post("/workspace/lists")
+async def create_workspace_list(
+    req: WorkspaceListCreate, request: Request, response: Response,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    row = app.state.workspace_store.create_list(_workspace_owner(session.auth_session_id), req)
+    return {"ok": True, "data": row.model_dump(mode="json")}
+
+
+@app.delete("/workspace/lists/{list_id}")
+async def delete_workspace_list(list_id: str, request: Request, response: Response) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    if not app.state.workspace_store.delete_list(_workspace_owner(session.auth_session_id), list_id):
+        raise HTTPException(status_code=404, detail="清单不存在")
+    return {"ok": True, "id": list_id}
+
+
+@app.put("/workspace/lists/{list_id}/items")
+async def upsert_workspace_list_item(
+    list_id: str, req: WorkspaceListItemRequest, request: Request, response: Response,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    row = app.state.workspace_store.upsert_item(_workspace_owner(session.auth_session_id), list_id, req)
+    if not row:
+        raise HTTPException(status_code=404, detail="清单不存在")
+    return {"ok": True, "data": row.model_dump(mode="json")}
+
+
+@app.delete("/workspace/lists/{list_id}/items/{subject_id}")
+async def delete_workspace_list_item(
+    list_id: str, subject_id: int, request: Request, response: Response,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    if not app.state.workspace_store.delete_item(
+        _workspace_owner(session.auth_session_id), list_id, subject_id,
+    ):
+        raise HTTPException(status_code=404, detail="清单或条目不存在")
+    return {"ok": True, "subject_id": subject_id}
 
 
 @app.patch("/today/preferences/{subject_id}")

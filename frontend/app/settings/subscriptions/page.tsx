@@ -23,6 +23,7 @@ const CHANNELS = [
   ["email", "Email"],
   ["webhook", "Webhook"],
   ["discord_dm", "Discord 私信（需 /绑定）"],
+  ["webpush", "浏览器推送"],
 ] as const;
 
 function list(value: any): AnyRecord[] {
@@ -36,6 +37,8 @@ export default function SubscriptionSettingsPage() {
   const [deliveries, setDeliveries] = useState<AnyRecord[]>([]);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [busy, setBusy] = useState(false);
+  const [pushBusy, setPushBusy] = useState(false);
+  const [pushConfig, setPushConfig] = useState<AnyRecord>({ enabled: false, devices: [] });
   const [draft, setDraft] = useState({
     kind: "weekly_digest",
     title: "",
@@ -64,7 +67,91 @@ export default function SubscriptionSettingsPage() {
     const payload = await res.json().catch(() => ({}));
     setAuth(payload);
     setCsrf(payload.csrf_token || "");
-    if (payload.authenticated) await loadRules(payload.csrf_token || "");
+    if (payload.authenticated) {
+      await Promise.all([loadRules(payload.csrf_token || ""), loadWebpush()]);
+    }
+  }
+
+  async function loadWebpush() {
+    const res = await fetch(`${BACKEND}/subscriptions/webpush/config`, { credentials: "include" });
+    const payload = await res.json().catch(() => ({}));
+    if (res.ok && payload.ok) setPushConfig(payload);
+  }
+
+  function vapidKey(value: string) {
+    const padding = "=".repeat((4 - (value.length % 4)) % 4);
+    const base64 = (value + padding).replace(/-/g, "+").replace(/_/g, "/");
+    const raw = window.atob(base64);
+    return Uint8Array.from(Array.from(raw).map((char) => char.charCodeAt(0)));
+  }
+
+  async function pushDeviceId(endpoint: string) {
+    const bytes = new TextEncoder().encode(endpoint.trim());
+    const hash = await crypto.subtle.digest("SHA-256", bytes);
+    const hex = Array.from(new Uint8Array(hash)).map((x) => x.toString(16).padStart(2, "0")).join("");
+    return `push_${hex.slice(0, 32)}`;
+  }
+
+  async function enableBrowserPush() {
+    setPushBusy(true);
+    try {
+      if (!pushConfig.enabled || !pushConfig.public_key) throw new Error("服务器尚未配置 VAPID 密钥。");
+      if (!("serviceWorker" in navigator) || !("PushManager" in window)) throw new Error("当前浏览器不支持 Web Push。");
+      if (!window.isSecureContext) throw new Error("Web Push 只允许 HTTPS 或 localhost。");
+      const permission = await Notification.requestPermission();
+      if (permission !== "granted") throw new Error("浏览器通知权限未授予。");
+      await navigator.serviceWorker.register("/sw.js");
+      const registration = await navigator.serviceWorker.ready;
+      const subscription = await registration.pushManager.getSubscription() || await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: vapidKey(pushConfig.public_key),
+      });
+      const json = subscription.toJSON();
+      if (!json.endpoint || !json.keys?.p256dh || !json.keys?.auth) throw new Error("浏览器没有返回完整 PushSubscription。");
+      const res = await fetch(`${BACKEND}/subscriptions/webpush`, {
+        method: "POST",
+        credentials: "include",
+        headers: headers({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ endpoint: json.endpoint, expiration_time: subscription.expirationTime, keys: json.keys }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok || !payload.ok) throw new Error(payload.detail || `绑定失败：HTTP ${res.status}`);
+      setNotice({ tone: "good", text: "当前浏览器已允许接收 Otomo 推送。现在可在规则中勾选“浏览器推送”。" });
+      await loadWebpush();
+    } catch (error) {
+      setNotice({ tone: "bad", text: error instanceof Error ? error.message : "浏览器推送授权失败。" });
+    } finally {
+      setPushBusy(false);
+    }
+  }
+
+  async function disableBrowserPush() {
+    setPushBusy(true);
+    try {
+      const registration = await navigator.serviceWorker.getRegistration();
+      const subscription = await registration?.pushManager.getSubscription();
+      if (!subscription) {
+        setNotice({ tone: "warn", text: "当前浏览器没有活动的推送授权。" });
+        return;
+      }
+      const deviceId = await pushDeviceId(subscription.endpoint);
+      const res = await fetch(`${BACKEND}/subscriptions/webpush/${deviceId}`, {
+        method: "DELETE",
+        credentials: "include",
+        headers: headers(),
+      });
+      if (!res.ok && res.status !== 404) {
+        const payload = await res.json().catch(() => ({}));
+        throw new Error(payload.detail || `解绑失败：HTTP ${res.status}`);
+      }
+      await subscription.unsubscribe();
+      setNotice({ tone: "good", text: "当前浏览器已停止接收 Otomo 推送。" });
+      await loadWebpush();
+    } catch (error) {
+      setNotice({ tone: "bad", text: error instanceof Error ? error.message : "浏览器推送解绑失败。" });
+    } finally {
+      setPushBusy(false);
+    }
   }
 
   function headers(extra?: Record<string, string>) {
@@ -235,6 +322,32 @@ export default function SubscriptionSettingsPage() {
       ) : (
         <>
           <section className="share-section">
+            <div className="section-heading-row">
+              <div>
+                <h2>浏览器设备</h2>
+                <p>授权后，即使没有打开 Otomo 页面，服务器上的订阅调度器也能向这台设备推送。生产环境需要 HTTPS。</p>
+              </div>
+              <span className={`badge ${pushConfig.enabled ? "good" : "warn"}`}>
+                {pushConfig.enabled ? `${list(pushConfig.devices).length} 台已绑定` : "服务器未配置 VAPID"}
+              </span>
+            </div>
+            <div className="settings-actions">
+              <button className="inline-action primary" onClick={enableBrowserPush} disabled={pushBusy || !pushConfig.enabled}>
+                允许当前浏览器
+              </button>
+              <button className="inline-action" onClick={disableBrowserPush} disabled={pushBusy}>
+                停止当前浏览器
+              </button>
+            </div>
+            {list(pushConfig.devices).length ? (
+              <div className="compact-list">
+                {list(pushConfig.devices).map((device) => (
+                  <span key={device.id}>{device.user_agent || "浏览器设备"} · {device.updated_at}</span>
+                ))}
+              </div>
+            ) : null}
+          </section>
+          <section className="share-section">
             <h2>新建订阅</h2>
             <div className="settings-grid">
               <label className="setting-field">
@@ -313,7 +426,12 @@ export default function SubscriptionSettingsPage() {
             <div className="settings-options">
               {CHANNELS.map(([value, label]) => (
                 <label className="settings-check" key={value}>
-                  <input type="checkbox" checked={draft.channels.includes(value)} onChange={() => toggleDraftChannel(value)} />
+                  <input
+                    type="checkbox"
+                    checked={draft.channels.includes(value)}
+                    onChange={() => toggleDraftChannel(value)}
+                    disabled={value === "webpush" && !pushConfig.enabled}
+                  />
                   <span>{label}</span>
                 </label>
               ))}

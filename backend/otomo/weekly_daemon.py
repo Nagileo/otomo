@@ -24,7 +24,7 @@ async def main() -> None:
 
     ltm = LongTermMemory()
     auth = AuthStore()
-    services = [SubscriptionService(SubscriptionStore(), ltm, auth)]
+    services = [SubscriptionService(SubscriptionStore(cipher=auth.cipher), ltm, auth)]
     tasks = [asyncio.create_task(service.run_forever()) for service in services]
     try:
         await stop.wait()

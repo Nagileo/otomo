@@ -3,9 +3,18 @@
   "short_name": "Otomo",
   "description": "ACGN 知识图谱 Agent — 追番、口碑、推荐、圣地巡礼",
   "start_url": "/",
+  "id": "/",
+  "scope": "/",
   "display": "standalone",
-  "background_color": "#0f1116",
-  "theme_color": "#171a21",
+  "background_color": "#0d100f",
+  "theme_color": "#0d100f",
+  "categories": ["entertainment", "lifestyle"],
+  "shortcuts": [
+    { "name": "今天看什么", "short_name": "今日", "url": "/" },
+    { "name": "和 Otomo 对话", "short_name": "对话", "url": "/chat" },
+    { "name": "发现作品", "short_name": "发现", "url": "/discover" },
+    { "name": "我的收藏", "short_name": "收藏", "url": "/library" }
+  ],
   "icons": [
     { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
     { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },

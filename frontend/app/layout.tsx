@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { AppShell } from "../components/app-shell";
+import { ExperienceProvider } from "../lib/experience";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -21,7 +22,10 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  themeColor: "#0d100f",
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#f4f6f3" },
+    { media: "(prefers-color-scheme: dark)", color: "#0d100f" },
+  ],
   width: "device-width",
   initialScale: 1,
   // 移动端不自动放大输入框（配合全局 16px 字号），但不禁用用户缩放
@@ -29,9 +33,11 @@ export const viewport: Viewport = {
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
+  const appearanceScript = `(function(){try{var a=JSON.parse(localStorage.getItem('otomo:appearance:v1')||'{}');var d=document.documentElement;d.dataset.theme=a.theme||'system';d.dataset.density=a.density||'comfortable';d.dataset.contrast=a.highContrast?'high':'normal';d.dataset.motion=a.reduceMotion?'reduced':'normal'}catch(e){}})()`;
   return (
-    <html lang="zh">
-      <body><AppShell>{children}</AppShell></body>
+    <html lang="zh" suppressHydrationWarning>
+      <head><script dangerouslySetInnerHTML={{ __html: appearanceScript }} /></head>
+      <body><ExperienceProvider><AppShell>{children}</AppShell></ExperienceProvider></body>
     </html>
   );
 }

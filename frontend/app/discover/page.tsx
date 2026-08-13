@@ -1,6 +1,6 @@
 "use client";
 
-import { Compass, RefreshCw, SlidersHorizontal, Sparkles } from "lucide-react";
+import { BookmarkPlus, Compass, RefreshCw, SlidersHorizontal, Sparkles } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { PageHeader } from "../../components/page-header";
@@ -41,6 +41,14 @@ export default function DiscoverPage() {
   const [share, setShare] = useState("");
 
   useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const savedMedia = params.get("media") as MediaType | null;
+    const savedScenario = params.get("scenario") as Scenario | null;
+    if (mediaOptions.some(([value]) => value === savedMedia)) setMedia(savedMedia as MediaType);
+    if (["general", "tonight", "season", "backlog", "gal_intro", "cross_media"].includes(savedScenario || "")) setScenario(savedScenario as Scenario);
+    setTags(params.get("tags") || "");
+    setNiche(params.get("niche") === "true");
+    setExplore(params.get("explore") === "true");
     authSession().then((auth) => {
       setCsrf(auth.csrf_token || "");
       setAuthenticated(Boolean(auth.authenticated));
@@ -103,11 +111,23 @@ export default function DiscoverPage() {
     } catch (e) { setError(String(e)); }
   }
 
+  async function saveView() {
+    const name = window.prompt("给这个发现视图起个名字", tags ? `${tags} · ${media}` : `${media} · ${scenario}`);
+    if (!name?.trim()) return;
+    try {
+      await productFetch("/workspace/views", {
+        method: "POST", headers: { "Content-Type": "application/json", ...(csrf ? { "x-otomo-csrf": csrf } : {}) },
+        body: JSON.stringify({ name: name.trim(), surface: "discover", params: { media, scenario, tags, niche, explore } }),
+      });
+      setShare("saved-view");
+    } catch (e) { setError(String(e)); }
+  }
+
   return (
     <main className="page-frame discover-page">
       <PageHeader eyebrow="Discover" title="发现下一部作品" description="季番追更与跨媒介推荐共用你的口味画像，但把当下心境留给这一轮决定。" />
       {error ? <div className="surface-error">{error}</div> : null}
-      {share ? <div className="inline-notice">导视分享页已生成：<a href={share} target="_blank" rel="noreferrer">打开公开快照</a></div> : null}
+      {share ? <div className="inline-notice">{share === "saved-view" ? <>发现条件已保存到 <a href="/workspace">我的工作区</a>。</> : <>导视分享页已生成：<a href={share} target="_blank" rel="noreferrer">打开公开快照</a></>}</div> : null}
 
       <section className="workspace-section">
         <div className="section-heading">
@@ -126,7 +146,7 @@ export default function DiscoverPage() {
       </section>
 
       <section className="workspace-section">
-        <div className="section-heading"><div><span className="section-kicker">FOR YOU</span><h2>个性化推荐</h2></div><SlidersHorizontal size={19} /></div>
+        <div className="section-heading"><div><span className="section-kicker">FOR YOU</span><h2>个性化推荐</h2></div><div className="page-actions">{authenticated ? <button className="button-secondary" onClick={() => void saveView()}><BookmarkPlus size={16} />保存视图</button> : null}<SlidersHorizontal size={19} /></div></div>
         <div className="recommend-controls">
           <div className="media-switch">
             {mediaOptions.map(([value, label]) => <button key={value} className={media === value ? "active" : ""} onClick={() => setMedia(value)}>{label}</button>)}

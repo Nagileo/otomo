@@ -13,8 +13,17 @@ export async function authSession() {
 }
 
 export async function productFetch(path: string, init?: RequestInit) {
-  const response = await fetch(`${BACKEND}${path}`, { credentials: "include", ...init });
-  return readJson(response);
+  const taskId = typeof window !== "undefined" ? crypto.randomUUID() : "";
+  if (taskId) window.dispatchEvent(new CustomEvent("otomo:task-start", { detail: { id: taskId, path } }));
+  try {
+    const response = await fetch(`${BACKEND}${path}`, { credentials: "include", ...init });
+    const result = await readJson(response);
+    if (taskId) window.dispatchEvent(new CustomEvent("otomo:task-finish", { detail: { id: taskId } }));
+    return result;
+  } catch (error) {
+    if (taskId) window.dispatchEvent(new CustomEvent("otomo:task-finish", { detail: { id: taskId, error: String(error) } }));
+    throw error;
+  }
 }
 
 export async function createShareSnapshot(

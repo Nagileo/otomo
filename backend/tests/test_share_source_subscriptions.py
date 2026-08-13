@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+import sqlite3
 
+from otomo import config
 from otomo.auth import AuthStore
 from otomo.factory import build_registry
 from otomo.memory import LongTermMemory
@@ -12,6 +14,8 @@ from otomo.subscriptions import (
     SubscriptionSchedule,
     SubscriptionService,
     SubscriptionStore,
+    WebPushKeys,
+    WebPushSubscriptionRequest,
     due_hit_key,
     is_rule_due,
 )
@@ -101,6 +105,67 @@ def test_subscription_store_crud_and_due_logic(tmp_path):
     assert not is_rule_due(rule, now=datetime(2026, 7, 6, 9, 50))
     assert not is_rule_due(rule, now=datetime(2026, 7, 7, 9, 30))
     assert store.delete(rule.id, "user:nagi")
+
+
+def test_webpush_devices_are_tenant_scoped_and_expired_targets_can_be_removed(tmp_path):
+    store = SubscriptionStore(str(tmp_path / "subs.sqlite3"))
+    req = WebPushSubscriptionRequest(
+        endpoint="https://push.example.test/subscription/device-a",
+        keys=WebPushKeys(p256dh="p" * 65, auth="a" * 24),
+    )
+    device = store.upsert_webpush("user:alice", req, user_agent="Test Browser")
+    repeated = store.upsert_webpush("user:alice", req, user_agent="Updated Browser")
+    assert device.id.startswith("push_")
+    assert repeated.id == device.id
+    assert repeated.user_agent == "Updated Browser"
+    assert store.list_webpush_devices("user:bob") == []
+    assert len(store.list_webpush_devices("user:alice")) == 1
+    targets = store.webpush_targets("user:alice")
+    assert targets[0]["endpoint"] == req.endpoint
+    assert targets[0]["keys"]["auth"] == "a" * 24
+    with sqlite3.connect(tmp_path / "subs.sqlite3") as conn:
+        encrypted = conn.execute(
+            "SELECT endpoint,p256dh,auth FROM webpush_subscriptions WHERE id=?", (device.id,)
+        ).fetchone()
+    assert encrypted is not None
+    assert all(str(value).startswith("fernet:") for value in encrypted)
+    assert req.endpoint not in "".join(str(value) for value in encrypted)
+    assert store.delete_webpush_ids("user:bob", [device.id]) == 0
+    assert store.delete_webpush_ids("user:alice", [device.id]) == 1
+    assert store.webpush_targets("user:alice") == []
+
+
+def test_webpush_delivery_keeps_success_and_reports_expired_devices(monkeypatch):
+    from otomo import notifications
+    from otomo.memory.models import InboxItem
+
+    class Gone(Exception):
+        response = type("Response", (), {"status_code": 410})()
+
+    def fake_webpush(*, subscription_info, **_kwargs):
+        if subscription_info["endpoint"].endswith("gone"):
+            raise Gone("expired")
+
+    monkeypatch.setattr("pywebpush.webpush", fake_webpush)
+    monkeypatch.setattr(config.settings, "webpush_enabled", True)
+    monkeypatch.setattr(config.settings, "webpush_vapid_public_key", "public")
+    monkeypatch.setattr(config.settings, "webpush_vapid_private_key", "private")
+    target = notifications.NotificationTarget(
+        channels=["webpush"],
+        webpush_subscriptions=[
+            {"id": "push_ok", "endpoint": "https://push.example.test/ok", "keys": {"p256dh": "p", "auth": "a"}},
+            {"id": "push_gone", "endpoint": "https://push.example.test/gone", "keys": {"p256dh": "p", "auth": "a"}},
+        ],
+    )
+    rows = asyncio.run(notifications.dispatch_notifications(
+        "alice",
+        target,
+        InboxItem(id="notice", title="测试推送"),
+    ))
+    assert rows[0]["ok"] is True
+    assert rows[0]["sent"] == 1
+    assert rows[0]["failed"] == 1
+    assert rows[0]["expired_device_ids"] == ["push_gone"]
 
 
 def test_subscription_interval_and_test_push_have_no_state_side_effects(monkeypatch, tmp_path):

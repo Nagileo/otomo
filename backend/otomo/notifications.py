@@ -32,6 +32,7 @@ class NotificationTarget(BaseModel):
     email: str = ""
     webhook_url: str = ""
     webhook_format: str = "generic"
+    webpush_subscriptions: list[dict[str, Any]] = Field(default_factory=list)
 
 
 _WEBHOOK_HOSTS = {
@@ -320,6 +321,74 @@ async def _send_discord_dm(username: str, item: InboxItem) -> dict[str, Any]:
         return {"channel": "discord_dm", "ok": False, "error": f"{type(e).__name__}: {str(e)[:200]}", "ts": now_iso()}
 
 
+def _send_webpush_one(target: dict[str, Any], item: InboxItem) -> dict[str, Any]:
+    device_id = str(target.get("id") or "")
+    try:
+        from pywebpush import webpush
+
+        body_lines = [line for line in digest_text(item).splitlines() if line.strip()]
+        body = " · ".join(body_lines[1:4])[:220] or "Otomo 有一条新的订阅更新"
+        payload = json.dumps(
+            {
+                "title": item.title or "Otomo 更新",
+                "body": body,
+                "url": "/settings/subscriptions",
+                "tag": f"otomo-{item.kind}",
+                "icon": "/icon-192.png",
+                "badge": "/icon-192.png",
+            },
+            ensure_ascii=False,
+        )
+        webpush(
+            subscription_info={
+                "endpoint": target["endpoint"],
+                "keys": target["keys"],
+            },
+            data=payload,
+            vapid_private_key=settings.webpush_vapid_private_key,
+            vapid_claims={"sub": settings.webpush_vapid_subject},
+            ttl=6 * 60 * 60,
+            timeout=settings.weekly_webhook_timeout,
+        )
+        return {"device_id": device_id, "ok": True}
+    except Exception as e:  # noqa: BLE001 - provider response must become delivery state
+        status = None
+        response = getattr(e, "response", None)
+        if response is not None:
+            status = getattr(response, "status_code", None) or getattr(response, "status", None)
+        return {
+            "device_id": device_id,
+            "ok": False,
+            "expired": status in {404, 410},
+            "status_code": status,
+            "error": f"{type(e).__name__}: {str(e)[:180]}",
+        }
+
+
+async def _send_webpush(sub: NotificationTarget, item: InboxItem) -> dict[str, Any]:
+    if not settings.webpush_enabled:
+        return {"channel": "webpush", "ok": False, "error": "Web Push 未启用", "ts": now_iso()}
+    if not settings.webpush_vapid_private_key or not settings.webpush_vapid_public_key:
+        return {"channel": "webpush", "ok": False, "error": "VAPID 密钥未配置完整", "ts": now_iso()}
+    if not sub.webpush_subscriptions:
+        return {"channel": "webpush", "ok": False, "error": "没有已授权的浏览器", "ts": now_iso()}
+    results = await asyncio.gather(
+        *(asyncio.to_thread(_send_webpush_one, target, item) for target in sub.webpush_subscriptions),
+    )
+    sent = sum(1 for row in results if row.get("ok"))
+    expired = [str(row.get("device_id")) for row in results if row.get("expired") and row.get("device_id")]
+    errors = [str(row.get("error")) for row in results if not row.get("ok")]
+    return {
+        "channel": "webpush",
+        "ok": sent > 0,
+        "sent": sent,
+        "failed": len(results) - sent,
+        "expired_device_ids": expired,
+        "error": "; ".join(errors[:3]) if sent == 0 else "",
+        "ts": now_iso(),
+    }
+
+
 async def dispatch_notifications(
     username: str,
     sub: NotificationTarget,
@@ -334,6 +403,8 @@ async def dispatch_notifications(
         tasks.append(_send_email(username, sub, item))
     if "discord_dm" in channels:
         tasks.append(_send_discord_dm(username, item))
+    if "webpush" in channels:
+        tasks.append(_send_webpush(sub, item))
     if tasks:
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for result in results:

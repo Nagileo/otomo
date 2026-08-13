@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     subscription_store_path: str = "cache/subscriptions.sqlite3"
     today_store_path: str = "cache/today_preferences.sqlite3"
     recommendation_event_store_path: str = "cache/recommendation_events.sqlite3"
+    workspace_store_path: str = "cache/workspace.sqlite3"
     ltm_store_path: str = "cache/ltm/ltm.sqlite3"
     upload_store_path: str = "cache/uploads"
     observation_dir: str = "cache/observations"
@@ -119,6 +120,10 @@ class Settings(BaseSettings):
     smtp_username: str = ""
     smtp_password: str = ""
     smtp_from: str = ""
+    webpush_enabled: bool = False
+    webpush_vapid_public_key: str = ""
+    webpush_vapid_private_key: str = ""
+    webpush_vapid_subject: str = "mailto:admin@example.com"
 
     # ---- Discord bot（可选；填 token 才启用 discord 服务，见 docker-compose）----
     discord_bot_token: str = ""
