@@ -83,7 +83,7 @@ bash deploy/configure_webpush.sh 你的邮箱@example.com
 bash deploy.sh
 ```
 
-脚本会使用 CI 发布的 backend 镜像生成公私钥，并写入服务器本地的 `backend/.env`：
+脚本会等待并使用当前 Git commit 对应的 CI backend 镜像生成公私钥，再写入服务器本地的 `backend/.env`。默认最多等待 15 分钟；构建尚未完成时不会误用旧 `latest`：
 
 ```dotenv
 WEBPUSH_ENABLED=true
@@ -105,6 +105,12 @@ bash deploy.sh
 ```
 
 要求：公网 HTTPS、浏览器允许通知、scheduler 常驻。电脑关闭不影响服务器产生推送，但接收设备需要联网。
+
+生产 Compose 使用不可变的 commit SHA 镜像。日常更新只运行 `bash deploy.sh`；如需手动执行 Compose，先设置：
+
+```bash
+export OTOMO_IMAGE_TAG="$(git rev-parse HEAD)"
+```
 
 ---
 

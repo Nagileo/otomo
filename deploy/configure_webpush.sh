@@ -33,6 +33,9 @@ if [[ -n "$current_private" && "$rotate" != true ]]; then
 fi
 
 COMPOSE=(docker compose -f docker-compose.yml -f docker-compose.prod.yml)
+source deploy/release_image.sh
+otomo_export_release_tag
+otomo_wait_for_release_images backend
 echo "==> 使用 backend 镜像生成 VAPID 密钥"
 mapfile -t keys < <("${COMPOSE[@]}" run --rm --no-deps -T backend python -c '
 import base64

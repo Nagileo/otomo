@@ -81,10 +81,10 @@ cd frontend && npm install && npm run dev    # http://localhost:3000
 ```bash
 git clone https://github.com/Nagileo/otomo && cd otomo
 cp deploy/production.env.example backend/.env   # 填密钥；OTOMO_DOMAIN 会从 FRONTEND_BASE_URL 派生
-bash deploy.sh    # 校验配置 → 拉镜像 → 起服务(backend/scheduler/frontend/caddy[/discord]) → 健康检查
+bash deploy.sh    # 等待当前 commit 的 CI 镜像 → 起服务(backend/scheduler/frontend/caddy[/discord]) → 健康检查
 ```
 
-推送流水线：push → GitHub Actions 跑测试 → **测试通过才**构建镜像发布 ghcr（坏提交永远进不了 `latest`）→ 服务器 `bash deploy.sh` 秒级更新。
+推送流水线：push → GitHub Actions 跑测试 → **测试通过才**构建带 commit SHA 的 GHCR 镜像 → 服务器 `bash deploy.sh` 等待并部署该 SHA。源码和容器使用同一个不可变版本；构建失败或超时会保留旧容器，不会悄悄运行旧 `latest`。
 
 ## 技术选型（简述）
 

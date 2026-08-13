@@ -25,8 +25,20 @@ if [[ -n "$(env_value DISCORD_BOT_TOKEN)" ]]; then
   COMPOSE+=(--profile discord)
 fi
 
+before_pull_sha="$(git rev-parse --verify HEAD)"
 echo "==> git pull --ff-only"
 git pull --ff-only
+after_pull_sha="$(git rev-parse --verify HEAD)"
+if [[ "$before_pull_sha" != "$after_pull_sha" && "${OTOMO_DEPLOY_REEXEC:-0}" != "1" ]]; then
+  echo "==> 部署脚本已更新，使用新版本重新执行"
+  exec env OTOMO_DEPLOY_REEXEC=1 bash "$0"
+fi
+
+# Source and containers must represent the same immutable commit. `latest`
+# allowed a successful git pull to silently keep running an older image while
+# the asynchronous build-images workflow was still publishing.
+source deploy/release_image.sh
+otomo_export_release_tag
 
 frontend_url="$(env_value FRONTEND_BASE_URL)"
 frontend_url="${frontend_url%/}"
@@ -82,7 +94,12 @@ echo "==> 部署域名: ${OTOMO_DOMAIN}"
 echo "==> 校验 Compose 配置"
 "${COMPOSE[@]}" config --quiet
 
-echo "==> 拉取最新镜像"
+# CI runs before build-images, so a deployment may begin a few minutes before
+# the SHA-tagged images exist. Wait without touching the currently running
+# containers; a failed/timeout build therefore cannot replace production.
+otomo_wait_for_release_images backend frontend
+
+echo "==> 拉取其余基础镜像"
 "${COMPOSE[@]}" pull
 
 echo "==> 重启服务"
@@ -94,6 +111,7 @@ if [[ -z "$backend_id" ]]; then
   echo "ERROR: backend 容器未创建" >&2
   exit 1
 fi
+
 healthy=false
 for _ in $(seq 1 60); do
   status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$backend_id")"
@@ -111,6 +129,31 @@ if [[ "$healthy" != "true" ]]; then
   "${COMPOSE[@]}" ps
   "${COMPOSE[@]}" logs --tail=120 backend
   exit 1
+fi
+
+verify_service_image() {
+  local service="$1"
+  local expected_image="$2"
+  local container_id actual_image
+  container_id="$("${COMPOSE[@]}" ps -q "$service")"
+  if [[ -z "$container_id" ]]; then
+    echo "ERROR: ${service} 容器未创建" >&2
+    return 1
+  fi
+  actual_image="$(docker inspect --format '{{.Config.Image}}' "$container_id")"
+  if [[ "$actual_image" != "$expected_image" ]]; then
+    echo "ERROR: ${service} 镜像版本不一致: expected=${expected_image}, actual=${actual_image}" >&2
+    return 1
+  fi
+}
+
+echo "==> 校验运行版本"
+expected_backend_image="ghcr.io/nagileo/otomo-backend:${OTOMO_IMAGE_TAG}"
+verify_service_image backend "$expected_backend_image"
+verify_service_image scheduler "$expected_backend_image"
+verify_service_image frontend "ghcr.io/nagileo/otomo-frontend:${OTOMO_IMAGE_TAG}"
+if [[ -n "$(env_value DISCORD_BOT_TOKEN)" ]]; then
+  verify_service_image discord "$expected_backend_image"
 fi
 
 echo "==> 状态"
