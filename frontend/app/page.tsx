@@ -812,7 +812,16 @@ export default function Home() {
     }
   }
 
-  async function postPrepareWrite(subjectId: number, subjectName: string, collectionType = 1) {
+  async function postPrepareWrite(
+    subjectId: number,
+    subjectName: string,
+    collectionType = 1,
+    options?: {
+      operation?: "set_collection" | "mark_episodes_watched";
+      upToEpisode?: number;
+      recommendationSetId?: string;
+    },
+  ) {
     try {
       const res = await fetch(`${BACKEND}/actions/prepare-write`, {
         method: "POST",
@@ -822,7 +831,12 @@ export default function Home() {
           subject_id: subjectId,
           subject_name: subjectName,
           collection_type: collectionType,
-          reason: "从前端推荐/日历卡片一键加入想看",
+          operation: options?.operation || "set_collection",
+          up_to_episode: options?.upToEpisode,
+          recommendation_set_id: options?.recommendationSetId,
+          reason: options?.operation === "mark_episodes_watched"
+            ? `从今日追番卡片标记看到第 ${options.upToEpisode} 集`
+            : "从前端推荐/日历卡片一键加入想看",
         }),
       });
       const payload = await res.json().catch(() => ({}));
@@ -849,6 +863,47 @@ export default function Home() {
       ]);
     } catch (e) {
       setTrace((t) => [...t, { kind: "obs", name: "prepare_write", ok: false, summary: String(e) }]);
+    }
+  }
+
+  async function postRecommendationFeedback(payloadIn: Record<string, any>) {
+    try {
+      const res = await fetch(`${BACKEND}/feedback/recommendation`, {
+        method: "POST",
+        credentials: "include",
+        headers: csrfHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify(payloadIn),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok || !payload.ok) {
+        setTrace((rows) => [...rows, { kind: "obs", name: "recommendation_feedback", ok: false, summary: payload.detail || `HTTP ${res.status}` }]);
+        return false;
+      }
+      return true;
+    } catch (error) {
+      setTrace((rows) => [...rows, { kind: "obs", name: "recommendation_feedback", ok: false, summary: String(error) }]);
+      return false;
+    }
+  }
+
+  async function nextRecommendationBatch(setId: string) {
+    try {
+      const res = await fetch(`${BACKEND}/recommendations/next`, {
+        method: "POST",
+        credentials: "include",
+        headers: csrfHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ recommendation_set_id: setId }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok || !payload.ok || !payload.data) {
+        setTrace((rows) => [...rows, { kind: "obs", name: "recommendations_next", ok: false, summary: payload.detail || payload.error || `HTTP ${res.status}` }]);
+        return null;
+      }
+      setTrace((rows) => [...rows, { kind: "obs", name: "recommendations_next", ok: true, summary: `已换一批：${payload.data.items?.length ?? 0} 个候选` }]);
+      return payload.data;
+    } catch (error) {
+      setTrace((rows) => [...rows, { kind: "obs", name: "recommendations_next", ok: false, summary: String(error) }]);
+      return null;
     }
   }
 
@@ -1154,6 +1209,8 @@ export default function Home() {
     onCancelAction: (id: string) => postAction("cancel", id),
     onUndoAction: (id: string) => postAction("undo", id),
     onPrepareWrite: postPrepareWrite,
+    onRecommendationFeedback: postRecommendationFeedback,
+    onNextRecommendationBatch: nextRecommendationBatch,
     onPrepareDownloaderPush: postPrepareDownloaderPush,
     onVisualFeedback: postVisualFeedback,
     onVisualCorrectionSearch: searchVisualCorrection,
@@ -1172,6 +1229,7 @@ export default function Home() {
             {auth?.authenticated ? (
               <>
                 <span className="badge good">Bangumi @{auth.username}</span>
+                <a className="inline-action" href="/today">今日追番</a>
                 <a className="inline-action" href="/share/mine">我的分享</a>
                 <a className="inline-action" href="/settings/subscriptions">订阅中心</a>
                 <button className="inline-action" onClick={logoutBangumi} disabled={busy}>退出</button>

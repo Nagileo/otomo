@@ -10,7 +10,7 @@
 合规：仅个人研究、非商业；只取公开收藏；原始 user-item 数据本地训练用、不发布、已 gitignore；
   对外/上线只发布聚合的 item-item 相似度表（不含用户隐私）。
 
-落地：data/bangumi/collections_{stype}.csv   表头 user_id,subject_id,ctype,rate
+落地：data/bangumi/collections_{stype}.csv   表头 user_id,subject_id,ctype,rate,updated_at
 续传：data/bangumi/_done_{stype}.txt          每行一个已采 uid（重跑自动跳过）
 
     python -m recsys_offline.bangumi_collect --start 1 --end 50000 --stype anime
@@ -38,6 +38,7 @@ USER_AGENT = "otomo-recsys/0.1 (https://github.com/otomo; personal research, non
 _BASE = "https://api.bgm.tv"
 _RETRY_STATUS = {429, 500, 502, 503, 504}
 _PAGE = 50
+_SCHEMA_VERSION = 2
 
 
 async def _fetch_page(
@@ -66,9 +67,9 @@ async def _fetch_page(
 
 async def fetch_user(
     client: httpx.AsyncClient, uid: int, stype: int, max_items: int = 400
-) -> list[tuple[int, int, int, int]]:
-    """某 uid 的全部公开收藏 → [(uid, subject_id, ctype, rate)]。私有/空/不存在→[]。"""
-    rows: list[tuple[int, int, int, int]] = []
+) -> list[tuple[int, int, int, int, str]]:
+    """某 uid 的全部公开收藏。私有/空/不存在→[]。"""
+    rows: list[tuple[int, int, int, int, str]] = []
     offset = 0
     while offset < max_items:
         data, exists = await _fetch_page(client, uid, stype, offset)
@@ -78,7 +79,10 @@ async def fetch_user(
             subj = it.get("subject") or {}
             sid = subj.get("id")
             if sid:
-                rows.append((uid, int(sid), int(it.get("type") or 0), int(it.get("rate") or 0)))
+                rows.append((
+                    uid, int(sid), int(it.get("type") or 0), int(it.get("rate") or 0),
+                    str(it.get("updated_at") or ""),
+                ))
         if len(data) < _PAGE:
             break
         offset += _PAGE
@@ -93,22 +97,46 @@ def _load_done(path: str) -> set[int]:
         return {int(line) for line in f if line.strip().isdigit()}
 
 
+def _ensure_timestamp_column(path: str) -> None:
+    """One-time in-place schema migration for pre-temporal four-column CSVs."""
+    if not os.path.exists(path):
+        return
+    with open(path, encoding="utf-8", newline="") as source:
+        reader = csv.reader(source)
+        header = next(reader, [])
+        if "updated_at" in header:
+            return
+    temp = path + ".migrating"
+    with open(path, encoding="utf-8", newline="") as source, open(
+        temp, "w", encoding="utf-8", newline="",
+    ) as target:
+        reader = csv.reader(source)
+        header = next(reader, [])
+        writer = csv.writer(target)
+        writer.writerow([*header, "updated_at"])
+        for row in reader:
+            writer.writerow([*row, ""])
+    os.replace(temp, path)
+
+
 async def collect(start: int, end: int, stype: int, outdir: str, concurrency: int, delay: float) -> None:
     os.makedirs(outdir, exist_ok=True)
     stype_name = next(k for k, v in SUBJECT_TYPE.items() if v == stype)
     csv_path = os.path.join(outdir, f"collections_{stype_name}.csv")
-    done_path = os.path.join(outdir, f"_done_{stype_name}.txt")
+    # v2 re-fetches users once so pre-temporal rows receive real updated_at.
+    done_path = os.path.join(outdir, f"_done_v{_SCHEMA_VERSION}_{stype_name}.txt")
 
     done = _load_done(done_path)
     todo = [u for u in range(start, end) if u not in done]
     print(f"采集 uid [{start},{end})  stype={stype_name}  待采 {len(todo)}（跳过已采 {len(done)}）")
 
+    _ensure_timestamp_column(csv_path)
     new_csv = not os.path.exists(csv_path)
     csv_f = open(csv_path, "a", newline="", encoding="utf-8")
     done_f = open(done_path, "a", encoding="utf-8")
     writer = csv.writer(csv_f)
     if new_csv:
-        writer.writerow(["user_id", "subject_id", "ctype", "rate"])
+        writer.writerow(["user_id", "subject_id", "ctype", "rate", "updated_at"])
 
     sem = asyncio.Semaphore(concurrency)
     hit = inter = 0
@@ -118,7 +146,7 @@ async def collect(start: int, end: int, stype: int, outdir: str, concurrency: in
         base_url=_BASE, headers={"User-Agent": USER_AGENT, "Accept": "application/json"}, timeout=20.0
     ) as client:
 
-        async def work(uid: int) -> tuple[int, list[tuple[int, int, int, int]]]:
+        async def work(uid: int) -> tuple[int, list[tuple[int, int, int, int, str]]]:
             async with sem:
                 rows = await fetch_user(client, uid, stype)
                 await asyncio.sleep(delay)  # 礼貌限流

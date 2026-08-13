@@ -28,6 +28,8 @@ class Settings(BaseSettings):
     session_store_path: str = "cache/sessions.sqlite3"
     share_store_path: str = "cache/share_snapshots.sqlite3"
     subscription_store_path: str = "cache/subscriptions.sqlite3"
+    today_store_path: str = "cache/today_preferences.sqlite3"
+    recommendation_event_store_path: str = "cache/recommendation_events.sqlite3"
     ltm_store_path: str = "cache/ltm/ltm.sqlite3"
     upload_store_path: str = "cache/uploads"
     observation_dir: str = "cache/observations"
@@ -80,6 +82,7 @@ class Settings(BaseSettings):
     # （看过 X 的人也看 Y，补在线天生缺失的协同信号）。按 i2i_{subject_type}.json 加载；
     # 文件缺失则该路召回静默跳过（优雅降级，不影响标签/图谱召回）。
     cf_i2i_dir: str = "otomo/data"
+    cf_model_max_age_days: int = 45
 
     # ---- 可观测（可选 Langfuse；不配则只用本地 trace JSONL，见 obs.py）----
     langfuse_enabled: bool = False
@@ -100,6 +103,9 @@ class Settings(BaseSettings):
     rate_limit_share_user_per_hour: int = 20
     rate_limit_subscription_mutations_per_hour: int = 40
     rate_limit_subscription_tests_per_hour: int = 10
+    rate_limit_today_per_hour: int = 120
+    rate_limit_recommendation_feedback_per_hour: int = 300
+    rate_limit_recommendation_batches_per_hour: int = 40
     anonymous_session_turn_limit: int = 8
     # 真实 usage 计量（llm.py 代理逐次累加，DeepSeek cache hit 按 1/10 折算）。
     # 参考量级：一次复杂查询（推荐/资源聚合）约 1~4 万折算 token。

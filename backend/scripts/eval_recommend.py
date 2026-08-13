@@ -51,6 +51,24 @@ CONFIGS: dict[str, dict[str, Any]] = {
 }
 
 
+def _holdout(pool: list[dict], count: int, rng: random.Random, split: str) -> list[dict]:
+    if split == "random":
+        return rng.sample(pool, count)
+    dated = [item for item in pool if str(item.get("updated_at") or "").strip()]
+    if len(dated) >= count:
+        return sorted(dated, key=lambda item: str(item.get("updated_at") or ""), reverse=True)[:count]
+    # Old/public responses may omit timestamps. Keep the run possible but make
+    # the fallback deterministic rather than silently pretending it is temporal.
+    return sorted(
+        pool,
+        key=lambda item: (
+            str(item.get("updated_at") or ""),
+            int((item.get("subject") or {}).get("id") or 0),
+        ),
+        reverse=True,
+    )[:count]
+
+
 class HoldoutClient:
     """包装真实 client：收藏读取里滤掉 hold-out 作品，其余方法透传。
     这让画像构建与 seen 过滤同时"看不见"被藏作品——它们才可能被召回。"""
@@ -141,7 +159,7 @@ async def eval_user(
         return {}
     scores: dict[str, list[tuple[float, float, float]]] = {name: [] for name in configs}
     for _trial in range(args.trials):
-        held = rng.sample(pool, args.holdout)
+        held = _holdout(pool, args.holdout, rng, args.split)
         held_ids = {int(it["subject"]["id"]) for it in held}
         held_names = {int(it["subject"]["id"]): (it["subject"].get("name_cn") or it["subject"].get("name") or "?")
                       for it in held}
@@ -239,11 +257,15 @@ async def main() -> None:
     ap.add_argument("--trials", type=int, default=3)
     ap.add_argument("--k", type=int, default=10, help="top-K（受工具 limit<=20 约束）")
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--split", choices=["temporal", "random"], default="temporal")
     ap.add_argument("--json-report", default="")
     ap.add_argument("--users-file", default="", help="多用户评测：scripts.build_eval_users 产出的 json")
     ap.add_argument("--max-eval-users", type=int, default=12)
     ap.add_argument("--search", type=int, default=0, help="随机搜索 N 组 rerank 权重（另含默认基线，需 --users-file）")
     args = ap.parse_args()
+    if args.split == "temporal" and args.trials != 1:
+        print("temporal split 固定评估每位用户最后一个时间窗口；已将 --trials 设为 1。")
+        args.trials = 1
     k = min(args.k, 20)
 
     if args.users_file:
@@ -269,7 +291,7 @@ async def main() -> None:
         scores: dict[str, list[tuple[float, float, float]]] = {name: [] for name in CONFIGS}
 
         for trial in range(1, args.trials + 1):
-            held = rng.sample(pool, args.holdout)
+            held = _holdout(pool, args.holdout, rng, args.split)
             held_ids = {int(it["subject"]["id"]) for it in held}
             held_names = {int(it["subject"]["id"]): (it["subject"].get("name_cn") or it["subject"].get("name") or "?")
                           for it in held}

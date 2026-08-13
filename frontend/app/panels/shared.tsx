@@ -180,7 +180,16 @@ export function ShareSnapshotButton({
 }
 
 
-export type PrepareWriteHandler = (subjectId: number, subjectName: string, collectionType?: number) => void;
+export type PrepareWriteHandler = (
+  subjectId: number,
+  subjectName: string,
+  collectionType?: number,
+  options?: {
+    operation?: "set_collection" | "mark_episodes_watched";
+    upToEpisode?: number;
+    recommendationSetId?: string;
+  },
+) => void;
 export type PrepareDownloaderHandler = (payload: AnyRecord) => void;
 
 

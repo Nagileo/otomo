@@ -12,7 +12,7 @@ import { PixivPanel } from "./panels/visual";
 type EvidenceMap = Record<string, AnyRecord[]>;
 type EvidenceMode = "user" | "dev";
 
-import { ReviewEvidencePanel, SourceRoutingPanel, TasteAffinityPanel, WhereToWatchPanel, ReleaseFeedsPanel, BangumiIndexPanel, SeasonGuidePanel, BroadcastCalendarPanel, AiringProgressPanel, EpisodeRadarPanel, ExplorerPanel } from "./panels/media";
+import { ReviewEvidencePanel, SourceRoutingPanel, TasteAffinityPanel, WhereToWatchPanel, ReleaseFeedsPanel, BangumiIndexPanel, SeasonGuidePanel, BroadcastCalendarPanel, AiringProgressPanel, EpisodeRadarPanel, ExplorerPanel, TodayCockpitPanel } from "./panels/media";
 import { AspectProfilePanel, RecommendPanel, WatchCopilotPanel, WatchOrderPanel } from "./panels/recommend";
 import { MonthlyWatchReportPanel, ProductSectionsPanel, SubjectDossierPanel, AnimeMusicThemesPanel, AnimeThemesPanel, WeeklyDigestPanel } from "./panels/product";
 import { VisualTextPanel, VisualStylePanel, ImageSourcePanel, RouteImageSourcePanel, BiliVideoContentPanel, VideoFramePanel } from "./panels/visual";
@@ -32,6 +32,8 @@ export type PanelHandlers = {
   onCancelAction?: (id: string) => void;
   onUndoAction?: (id: string) => void;
   onPrepareWrite?: PrepareWriteHandler;
+  onRecommendationFeedback?: (payload: AnyRecord) => Promise<boolean>;
+  onNextRecommendationBatch?: (setId: string) => Promise<AnyRecord | null>;
   onPrepareDownloaderPush?: PrepareDownloaderHandler;
   onVisualFeedback?: (payload: AnyRecord) => void;
   onVisualCorrectionSearch?: (query: string, subjectType?: string) => Promise<AnyRecord[]>;
@@ -56,6 +58,7 @@ export const PANEL_LABELS: Record<string, string> = {
   plan_pilgrimage_trip: "巡礼行程",
   list_weekly_digest_inbox: "收件箱",
   get_broadcast_calendar: "放送日历",
+  today_cockpit: "今日追番",
   get_airing_progress: "追番进度",
   watch_cockpit: "追番驾驶舱",
   subject_dossier: "作品档案",
@@ -130,6 +133,7 @@ export function renderPanelByName(name: string, rows: AnyRecord[], h: PanelHandl
     case "plan_pilgrimage_trip": return render((d, i) => <PilgrimageTripPanel data={d} key={`${name}-${i}`} />);
     case "list_weekly_digest_inbox": return render((d, i) => <InboxPanel data={d} key={`${name}-${i}`} />);
     case "get_broadcast_calendar": return render((d, i) => <BroadcastCalendarPanel data={d} onPrepareWrite={h.onPrepareWrite} key={`${name}-${i}`} />);
+    case "today_cockpit": return render((d, i) => <TodayCockpitPanel data={d} onPrepareWrite={h.onPrepareWrite} key={`${name}-${i}`} />);
     case "get_airing_progress": return render((d, i) => <AiringProgressPanel data={d} key={`${name}-${i}`} />);
     case "watch_cockpit": return render((d, i) => <ProductSectionsPanel data={d} title="追番驾驶舱" shareType="watch_cockpit" onShareSnapshot={h.onShareSnapshot} key={`${name}-${i}`} />);
     case "subject_dossier": return render((d, i) => <SubjectDossierPanel data={d} onShareSnapshot={h.onShareSnapshot} key={`${name}-${i}`} />);
@@ -139,7 +143,7 @@ export function renderPanelByName(name: string, rows: AnyRecord[], h: PanelHandl
     case "where_to_watch": return render((d, i) => <WhereToWatchPanel data={d} key={`${name}-${i}`} />);
     case "get_anime_release_feeds": return render((d, i) => <ReleaseFeedsPanel data={d} onPrepareDownloaderPush={h.onPrepareDownloaderPush} key={`${name}-${i}`} />);
     case "get_bangumi_index": return render((d, i) => <BangumiIndexPanel data={d} onPrepareWrite={h.onPrepareWrite} key={`${name}-${i}`} />);
-    case "recommend_subjects": return render((d, i) => <RecommendPanel data={d} onCritique={h.onCritique} onPrepareWrite={h.onPrepareWrite} key={`${name}-${i}`} />);
+    case "recommend_subjects": return render((d, i) => <RecommendPanel data={d} onCritique={h.onCritique} onPrepareWrite={h.onPrepareWrite} onFeedback={h.onRecommendationFeedback} onNextBatch={h.onNextRecommendationBatch} key={`${name}-${i}`} />);
     case "season_guide_brief": return render((d, i) => <SeasonGuidePanel data={d} onPrepareWrite={h.onPrepareWrite} onShareSnapshot={h.onShareSnapshot} anchor={anchor} key={`${name}-${anchor || "all"}-${i}`} />);
     case "review_subject": return render((d, i) => <ReviewEvidencePanel data={d} key={`${name}-${i}`} />);
     case "route_subject_sources": return render((d, i) => <SourceRoutingPanel data={d} key={`${name}-${i}`} />);
@@ -178,6 +182,8 @@ export function EvidencePanels({
   onCancelAction,
   onUndoAction,
   onPrepareWrite,
+  onRecommendationFeedback,
+  onNextRecommendationBatch,
   onPrepareDownloaderPush,
   onVisualFeedback,
   onVisualCorrectionSearch,
@@ -191,6 +197,8 @@ export function EvidencePanels({
   onCancelAction?: (id: string) => void;
   onUndoAction?: (id: string) => void;
   onPrepareWrite?: PrepareWriteHandler;
+  onRecommendationFeedback?: (payload: AnyRecord) => Promise<boolean>;
+  onNextRecommendationBatch?: (setId: string) => Promise<AnyRecord | null>;
   onPrepareDownloaderPush?: PrepareDownloaderHandler;
   onVisualFeedback?: (payload: AnyRecord) => void;
   onVisualCorrectionSearch?: (query: string, subjectType?: string) => Promise<AnyRecord[]>;
@@ -200,7 +208,8 @@ export function EvidencePanels({
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const handlers: PanelHandlers = {
     devMode, onShareSnapshot, onCritique, onConfirmAction, onCancelAction, onUndoAction,
-    onPrepareWrite, onPrepareDownloaderPush, onVisualFeedback, onVisualCorrectionSearch,
+    onPrepareWrite, onRecommendationFeedback, onNextRecommendationBatch,
+    onPrepareDownloaderPush, onVisualFeedback, onVisualCorrectionSearch,
   };
   const exclude = new Set(excludeNames);
   const names = availablePanelNames(evidence, devMode).filter((n) => !exclude.has(n));

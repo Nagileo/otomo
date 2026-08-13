@@ -27,7 +27,7 @@ from .notifications import NotificationTarget, dispatch_notifications
 from .security_context import tenant_scope
 from .tools._concurrency import gather_limited
 from .tools.bangumi.client import BangumiClient
-from .tools.calendar.tool import AiringProgressArgs, AiringProgressTool
+from .today import TodayCockpitService, TodayPreferenceStore
 from .tools.discovery.tool import BirthdayArgs, EpisodeBuzzRadarTool, EpisodeRadarArgs, GetCharacterBirthdaysTool
 from .tools.product_loop.tool import MonthlyWatchReportArgs, MonthlyWatchReportTool
 from .tools.release.tool import fetch_release_items_from_url
@@ -674,11 +674,13 @@ class SubscriptionService:
         include_birthday = bool(rule.filters.get("include_birthday", True))
         airing_items: list[Any] = []
         radar_section: dict[str, Any] | None = None
-        res = await AiringProgressTool(client).run(
-            AiringProgressArgs(username=rule.username, include_wishlist=include_wishlist, limit=max(limit, 8))
+        cockpit = await TodayCockpitService(client, TodayPreferenceStore()).build(
+            rule.username,
+            include_wishlist=include_wishlist,
+            include_hidden=False,
+            limit=max(limit, 8),
         )
-        if res.ok and res.data:
-            airing_items = res.data.items
+        airing_items = cockpit.today
         if include_radar and airing_items:
             radar_section = await self._daily_episode_radar_section(client, airing_items)
         rss_updates = await self._watch_plan_rss_updates(rule.username, mutate=mutate) if include_rss else []
@@ -687,7 +689,7 @@ class SubscriptionService:
             {
                 "title": "今日追番进度",
                 "items": [x.model_dump(mode="json", exclude_none=True) for x in airing_items[:limit]],
-                "notes": ["基于 Bangumi 正片 airdate 与 ep_status；国内平台上架可能有时差。"],
+                "notes": ["仅展示用户收藏与今日 Bangumi 放送日历的交集；国内平台上架可能有时差。"],
             },
             *([radar_section] if radar_section else []),
             {

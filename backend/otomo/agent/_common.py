@@ -580,6 +580,7 @@ _PANEL_TOOLS = {
     "season_guide_brief",
     "recommend_subjects",
     "get_broadcast_calendar",
+    "today_cockpit",
     "get_airing_progress",
     "watch_cockpit",
     "subject_dossier",
@@ -1046,6 +1047,34 @@ def _safe_memory_payload(data: dict[str, Any], *, include_action: bool = True) -
     return safe
 
 
+def _safe_today_cockpit_payload(data: dict[str, Any]) -> dict[str, Any]:
+    def items(key: str, limit: int) -> list[dict[str, Any]]:
+        rows = []
+        for item in _trim_dicts(data.get(key), limit=limit):
+            copied = dict(item)
+            copied["action"] = _trim_text(copied.get("action"), 120)
+            rows.append(copied)
+        return rows
+
+    week = []
+    for day in _trim_dicts(data.get("week"), limit=7):
+        copied = dict(day)
+        copied["items"] = _trim_dicts(copied.get("items"), limit=24)
+        week.append(copied)
+    return {
+        "username": data.get("username"),
+        "date": data.get("date"),
+        "timezone": data.get("timezone"),
+        "today": items("today", 24),
+        "yesterday": items("yesterday", 24),
+        "week": week,
+        "hidden": items("hidden", 40),
+        "backlog": items("backlog", 20),
+        "counts": data.get("counts") or {},
+        "notes": _trim_strings(data.get("notes"), limit=6, text_limit=180),
+    }
+
+
 def _safe_rating_movers_payload(data: dict[str, Any]) -> dict[str, Any]:
     analysis = data.get("season_analysis") if isinstance(data.get("season_analysis"), dict) else {}
     return {
@@ -1364,6 +1393,8 @@ def panel_data_from_payload(name: str, payload: dict[str, Any] | None) -> dict[s
         return _safe_broadcast_calendar_payload(data)
     if name == "get_airing_progress":
         return _safe_airing_progress_payload(data)
+    if name == "today_cockpit":
+        return _safe_today_cockpit_payload(data)
     if name in {"watch_cockpit", "subject_dossier", "monthly_watch_report"}:
         return _safe_product_sections_payload(data)
     if name == "franchise_map":
@@ -1835,7 +1866,7 @@ _ANCHOR_PANEL_TOOLS = {
     "summarize_bilibili_video_content", "analyze_video_frames", "get_pixiv_ranking",
     "search_pixiv_illusts", "get_pixiv_artist_portfolio", "get_trending_subjects",
     "get_character_birthdays", "compare_subjects", "get_pilgrimage_map", "plan_pilgrimage_trip",
-    "list_weekly_digest_inbox", "get_broadcast_calendar", "get_airing_progress", "watch_cockpit",
+    "list_weekly_digest_inbox", "get_broadcast_calendar", "get_airing_progress", "today_cockpit", "watch_cockpit",
     "subject_dossier", "franchise_map", "monthly_watch_report", "get_subject_trend",
     "get_rating_movers", "anime_omikuji", "generate_acgn_quiz", "get_my_episode_progress",
     "export_my_collections_csv", "scan_my_episode_buzz", "anime_music_themes", "where_to_watch",

@@ -25,7 +25,7 @@ from ..auth import AuthStore, BangumiToken, build_authorization_url, exchange_oa
 from ..config import settings
 from ..memory import LongTermMemory
 from ..memory.consolidate import now_iso
-from ..memory.models import VisualFeedbackItem, VisualFeedbackSignal, memory_summary
+from ..memory.models import FeedbackItem, VisualFeedbackItem, VisualFeedbackSignal, memory_summary
 from ..memory.runtime import attach_memory_state
 from ..notifications import validate_webhook_url
 from ..obs import append_visual_feedback, traced_stream
@@ -38,6 +38,8 @@ from ..quota import (
     collected_usage,
     estimate_tokens,
 )
+from ..recommendation_events import RecommendationEventStore, RecommendationFeedbackRequest
+from ..recsys_registry import cf_model_registry
 from ..session_store import SessionStore
 from ..security_context import tenant_scope
 from ..share import CreateShareSnapshotRequest, ShareSnapshot, ShareSnapshotStore
@@ -47,12 +49,14 @@ from ..subscriptions import (
     SubscriptionStore,
     UpdateSubscriptionRuleRequest,
 )
+from ..today import TodayCockpitService, TodayPreferenceStore
 from ..uploads import upload_store
 from .. import trajectory
 from ..agent.plan_execute import PlanExecuteRunner
 from ..agent.react import ReActRunner
 from ..tools.bangumi.client import SUBJECT_TYPE, BangumiClient
 from ..tools.moegirl.client import MoegirlClient
+from ..tools.recommend.tool import RecommendArgs, RecommendTool
 
 log = logging.getLogger("otomo.api")
 
@@ -66,6 +70,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.session_store = SessionStore()
     app.state.share_store = ShareSnapshotStore()
     app.state.subscription_store = SubscriptionStore()
+    app.state.today_store = TodayPreferenceStore()
+    app.state.recommendation_event_store = RecommendationEventStore()
     app.state.subscription_service = SubscriptionService(
         app.state.subscription_store,
         app.state.ltm,
@@ -163,10 +169,22 @@ class UndoActionRequest(BaseModel):
 
 
 class PrepareWriteRequest(BaseModel):
+    operation: Literal["set_collection", "mark_episodes_watched"] = "set_collection"
     subject_id: int = Field(..., ge=1)
     subject_name: str = ""
     collection_type: int = Field(1, ge=1, le=5)
+    up_to_episode: int | None = Field(None, ge=1)
+    recommendation_set_id: str | None = Field(None, min_length=8, max_length=64)
     reason: str = "前端卡片一键写回"
+
+
+class TodayPreferenceRequest(BaseModel):
+    hidden_this_season: bool | None = None
+    pinned: bool | None = None
+
+
+class RecommendationNextRequest(BaseModel):
+    recommendation_set_id: str = Field(..., min_length=8, max_length=64)
 
 
 class PrepareDownloaderPushRequest(BaseModel):
@@ -749,13 +767,32 @@ async def _dispatch_action(
 async def confirm_action(req: ActionRequest, request: Request, response: Response) -> dict[str, Any]:
     session = _ensure_auth_session(request, response)
     _require_csrf(request, session.auth_session_id)
-    return await _dispatch_action(
+    result = await _dispatch_action(
         app,
         "execute_bangumi_write_action",
         {"action_id": req.action_id, "confirmed": True},
         allow_write=True,
         auth_session_id=session.auth_session_id,
     )
+    action = ((result.get("data") or {}).get("action") or {}) if result.get("ok") else {}
+    set_id = str((action.get("context") or {}).get("recommendation_set_id") or "")
+    if (
+        set_id
+        and action.get("operation") == "set_collection"
+        and int((action.get("payload") or {}).get("type") or 0) == 1
+        and action.get("subject_id")
+    ):
+        identity = _authenticated_identity(session.auth_session_id)
+        try:
+            _record_recommendation_feedback(identity.username, RecommendationFeedbackRequest(
+                recommendation_set_id=set_id,
+                subject_id=int(action["subject_id"]),
+                event="wishlist",
+                note="confirmed_bangumi_write",
+            ))
+        except PermissionError:
+            log.warning("recommendation set expired before confirmed write attribution: %s", set_id)
+    return result
 
 
 @app.post("/actions/cancel")
@@ -793,11 +830,16 @@ async def prepare_write_action(req: PrepareWriteRequest, request: Request, respo
         app,
         "prepare_bangumi_write_action",
         {
-            "operation": "set_collection",
+            "operation": req.operation,
             "subject_id": req.subject_id,
             "subject_name": req.subject_name,
             "collection_type": req.collection_type,
+            "up_to_episode": req.up_to_episode,
             "reason": req.reason,
+            "context": (
+                {"recommendation_set_id": req.recommendation_set_id}
+                if req.recommendation_set_id else {}
+            ),
         },
         allow_write=False,
         auth_session_id=session.auth_session_id,
@@ -1101,3 +1143,164 @@ async def chat(req: ChatRequest, request: Request):
     response = EventSourceResponse(event_gen())
     _set_auth_cookies(response, session)
     return response
+
+
+@app.get("/today")
+async def get_today(
+    request: Request, response: Response,
+    include_wishlist: bool = True, include_hidden: bool = True,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    app.state.rate_limiter.check(
+        f"today:{_quota_key(session.auth_session_id, request)}",
+        limit=settings.rate_limit_today_per_hour,
+        window_seconds=3600,
+    )
+    identity = _authenticated_identity(session.auth_session_id)
+    client = await _request_client(app, session.auth_session_id)
+    try:
+        with tenant_scope(identity.username, authenticated=True):
+            data = await TodayCockpitService(client, app.state.today_store).build(
+                identity.username,
+                include_wishlist=include_wishlist,
+                include_hidden=include_hidden,
+            )
+        return {"ok": True, "data": data.model_dump(mode="json", exclude_none=True)}
+    finally:
+        await client.aclose()
+
+
+@app.patch("/today/preferences/{subject_id}")
+async def update_today_preference(
+    subject_id: int, req: TodayPreferenceRequest, request: Request, response: Response,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    app.state.rate_limiter.check(
+        f"today:{_quota_key(session.auth_session_id, request)}",
+        limit=settings.rate_limit_today_per_hour,
+        window_seconds=3600,
+    )
+    identity = _authenticated_identity(session.auth_session_id)
+    pref = app.state.today_store.update(
+        identity.username, subject_id,
+        hidden_this_season=req.hidden_this_season, pinned=req.pinned,
+    )
+    return {"ok": True, "data": pref.model_dump(mode="json", exclude_none=True)}
+
+
+@app.post("/feedback/recommendation")
+async def recommendation_feedback(
+    req: RecommendationFeedbackRequest, request: Request, response: Response,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    app.state.rate_limiter.check(
+        f"recommendation-feedback:{_quota_key(session.auth_session_id, request)}",
+        limit=settings.rate_limit_recommendation_feedback_per_hour,
+        window_seconds=3600,
+    )
+    identity = _authenticated_identity(session.auth_session_id)
+    try:
+        event = _record_recommendation_feedback(identity.username, req)
+    except PermissionError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"ok": True, "data": event}
+
+
+def _record_recommendation_feedback(
+    username: str, req: RecommendationFeedbackRequest,
+) -> dict[str, Any]:
+    try:
+        event = app.state.recommendation_event_store.record(username, req)
+    except PermissionError:
+        raise
+    payload = app.state.recommendation_event_store.item_payload(
+        req.recommendation_set_id, username, req.subject_id,
+    ) or {}
+    signal = None
+    if req.event in {"more", "wishlist"}:
+        signal = "more"
+    elif req.event in {"started", "watched"}:
+        signal = "like"
+    elif req.event == "less":
+        signal = "less"
+    elif req.event == "dismiss" and req.reason in {"not_interested", "genre"}:
+        signal = "dislike"
+    replace_memory = (
+        req.event in {"more", "less", "wishlist", "started", "watched"}
+        or req.event == "dismiss"
+    )
+    if event.get("recorded") and replace_memory:
+        with tenant_scope(username, authenticated=True):
+            mem = app.state.ltm.load_user(username)
+            mem.feedback = [
+                item for item in mem.feedback
+                if not (
+                    item.subject_id == req.subject_id
+                    and item.source == "explicit_user"
+                    and item.note.startswith("recommendation_card:")
+                )
+            ]
+            if signal:
+                mem.feedback.append(FeedbackItem(
+                    subject_id=req.subject_id,
+                    name=str(payload.get("name") or ""),
+                    signal=signal,
+                    note=("recommendation_card:" + (req.note or req.reason or req.event))[:500],
+                    source="explicit_user", confidence=0.9, ts=now_iso(),
+                ))
+            mem.feedback = mem.feedback[-100:]
+            app.state.ltm.save_user(mem)
+    return event
+
+
+@app.post("/recommendations/next")
+async def next_recommendation_batch(
+    req: RecommendationNextRequest, request: Request, response: Response,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    app.state.rate_limiter.check(
+        f"recommendation-batch:{_quota_key(session.auth_session_id, request)}",
+        limit=settings.rate_limit_recommendation_batches_per_hour,
+        window_seconds=3600,
+    )
+    identity = _authenticated_identity(session.auth_session_id)
+    previous = app.state.recommendation_event_store.get_set(req.recommendation_set_id, identity.username)
+    if not previous:
+        raise HTTPException(status_code=404, detail="推荐批次不存在或不属于当前用户")
+    args_raw = dict(previous["request"])
+    args_raw["username"] = identity.username
+    args_raw["exclude_ids"] = list(dict.fromkeys(
+        [int(item["id"]) for item in previous["items"]]
+        + list(args_raw.get("exclude_ids") or [])
+        + list(app.state.recommendation_event_store.recent_excluded_ids(identity.username))
+    ))[:80]
+    client = await _request_client(app, session.auth_session_id)
+    try:
+        with tenant_scope(identity.username, authenticated=True):
+            result = await RecommendTool(
+                client, app.state.ltm, event_store=app.state.recommendation_event_store,
+            ).run(RecommendArgs.model_validate(args_raw))
+        return result.model_dump(mode="json", exclude_none=True)
+    finally:
+        await client.aclose()
+
+
+@app.get("/recommendations/metrics")
+async def recommendation_metrics(
+    request: Request, response: Response, days: int = 30,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    identity = _authenticated_identity(session.auth_session_id)
+    bounded_days = min(max(days, 1), 365)
+    return {"ok": True, "data": app.state.recommendation_event_store.metrics(identity.username, bounded_days)}
+
+
+@app.get("/recommendations/models")
+async def recommendation_models() -> dict[str, Any]:
+    return {
+        "ok": True,
+        "data": [status.model_dump(mode="json", exclude_none=True) for status in cf_model_registry.statuses()],
+    }

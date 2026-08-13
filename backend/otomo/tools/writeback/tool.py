@@ -65,6 +65,10 @@ class PrepareBangumiWriteArgs(BaseModel):
     episode_id: int | None = Field(None, description="单集 episode_id")
     episode_collection_type: int | None = Field(None, ge=1, le=3, description="单集状态：1想看/2看过/3抛弃")
     reason: str = Field("", description="为什么准备这个动作，会写入决策日志/确认说明")
+    context: dict[str, Any] = Field(
+        default_factory=dict,
+        description="产品侧动作上下文，不会发送给 Bangumi；用于确认后的指标归因。",
+    )
 
 
 class BangumiWriteActionResult(BaseModel):
@@ -377,6 +381,9 @@ class PrepareBangumiWriteActionTool(Tool):
             None,
         )
         if dup is not None:
+            if args.context:
+                dup.context = args.context
+                self.ltm.save_user(mem)
             return ToolResult(
                 ok=True,
                 data=BangumiWriteActionResult(
@@ -394,6 +401,7 @@ class PrepareBangumiWriteActionTool(Tool):
             subject_name=name,
             episode_id=episode_id,
             payload=payload,
+            context=args.context,
             before=before,
             status="pending",
             created_at=now_iso(),

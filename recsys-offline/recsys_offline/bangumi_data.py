@@ -1,6 +1,6 @@
 """Bangumi 原生收藏数据加载（自采，见 bangumi_collect.py）。
 
-collections_{stype}.csv: user_id, subject_id, ctype, rate
+collections_{stype}.csv: user_id, subject_id, ctype, rate, updated_at
 ctype(收藏状态): 1想看 2看过 3在看 4搁置 5抛弃。
 
 正反馈默认取 看过(2)+在看(3)：已消费/在消费才反映真实口味；想看(1)是意图非消费、抛弃(5)是负反馈，均排除。
@@ -23,11 +23,16 @@ def load_bangumi_positive(
 
     min_rate>0 时只保留 rate>=min_rate（注意会滤掉未评分 rate=0 的交互）。
     """
-    df = pd.read_csv(path, usecols=["user_id", "subject_id", "ctype", "rate"])
+    columns = pd.read_csv(path, nrows=0).columns
+    usecols = ["user_id", "subject_id", "ctype", "rate"]
+    if "updated_at" in columns:
+        usecols.append("updated_at")
+    df = pd.read_csv(path, usecols=usecols)
     df = df[df["ctype"].isin(collection_types)]
     if min_rate > 0:
         df = df[df["rate"] >= min_rate]
-    return df[["user_id", "subject_id"]].drop_duplicates()
+    keep = ["user_id", "subject_id"] + (["updated_at"] if "updated_at" in df.columns else [])
+    return df[keep].drop_duplicates(subset=["user_id", "subject_id"], keep="last")
 
 
 def filter_active(

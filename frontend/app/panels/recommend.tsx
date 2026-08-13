@@ -2,6 +2,8 @@
 
 // 推荐域面板：口味画像、推荐清单、观看副驾、补番顺序。
 
+import { useEffect, useRef, useState } from "react";
+
 import { type AnyRecord, type ShareSnapshotHandler, type PrepareWriteHandler, list, text, pct, Badge, Panel, EmptyHint, Meta, ShareSnapshotButton } from "./shared";
 
 const SCENARIO_LABEL: Record<string, string> = {
@@ -59,16 +61,57 @@ export function RecommendPanel({
   data,
   onCritique,
   onPrepareWrite,
+  onFeedback,
+  onNextBatch,
 }: {
   data: AnyRecord;
   onCritique?: (q: string) => void;
   onPrepareWrite?: PrepareWriteHandler;
+  onFeedback?: (payload: AnyRecord) => Promise<boolean>;
+  onNextBatch?: (setId: string) => Promise<AnyRecord | null>;
 }) {
-  const items = list(data.items);
-  const aspectProfile = data.aspect_profile_summary || {};
-  const mediaStrategy = data.media_strategy || {};
-  const scenarioText = SCENARIO_LABEL[String(data.scenario || "general")] || "按你的口味";
-  const fb = data.feedback_policy;
+  const [current, setCurrent] = useState(data);
+  const [dismissed, setDismissed] = useState<number[]>([]);
+  const [reasons, setReasons] = useState<Record<number, string>>({});
+  const [loadingNext, setLoadingNext] = useState(false);
+  const reportedImpressions = useRef(new Set<string>());
+  useEffect(() => { setCurrent(data); setDismissed([]); }, [data]);
+  const items = list(current.items).filter((item) => !dismissed.includes(Number(item.id)));
+  const setId = String(current.recommendation_set_id || "");
+  const aspectProfile = current.aspect_profile_summary || {};
+  const mediaStrategy = current.media_strategy || {};
+  const scenarioText = SCENARIO_LABEL[String(current.scenario || "general")] || "按你的口味";
+  const fb = current.feedback_policy;
+
+  useEffect(() => {
+    if (!onFeedback || !setId) return;
+    list(current.items).forEach((item) => {
+      const key = `${setId}:${Number(item.id)}`;
+      if (reportedImpressions.current.has(key)) return;
+      reportedImpressions.current.add(key);
+      void onFeedback({ recommendation_set_id: setId, subject_id: Number(item.id), event: "impression" });
+    });
+  }, [current, onFeedback, setId]);
+
+  async function feedback(item: AnyRecord, event: string, reason?: string) {
+    if (!onFeedback || !setId) return false;
+    const ok = await onFeedback({
+      recommendation_set_id: setId,
+      subject_id: Number(item.id),
+      event,
+      ...(reason ? { reason } : {}),
+    });
+    if (ok && event === "dismiss") setDismissed((ids) => [...ids, Number(item.id)]);
+    return ok;
+  }
+
+  async function nextBatch() {
+    if (!onNextBatch || !setId || loadingNext) return;
+    setLoadingNext(true);
+    const next = await onNextBatch(setId);
+    if (next) { setCurrent(next); setDismissed([]); }
+    setLoadingNext(false);
+  }
   return (
     <Panel
       title="为你推荐"
@@ -88,10 +131,12 @@ export function RecommendPanel({
           const recall = list<string>(item.why_recalled)[0] || "";
           const nextStep = list<string>(item.next_step)[0] || "";
           return (
-            <a className="rec-card" href={`https://bgm.tv/subject/${item.id}`} target="_blank" rel="noreferrer" key={`${item.id}-${i}`}>
-              {item.image ? <img src={item.image} alt="" /> : <div className="rec-noimg" />}
+            <article className="rec-card" key={`${item.id}-${i}`}>
+              <a href={`https://bgm.tv/subject/${item.id}`} target="_blank" rel="noreferrer" onClick={() => void feedback(item, "open")}>
+                {item.image ? <img src={item.image} alt="" /> : <div className="rec-noimg" />}
+              </a>
               <div className="rec-body">
-                <div className="card-title">{text(item.name)}</div>
+                <a className="card-title" href={`https://bgm.tv/subject/${item.id}`} target="_blank" rel="noreferrer" onClick={() => void feedback(item, "open")}>{text(item.name)}</a>
                 <div className="card-meta">
                   {item.bangumi_score ? `Bangumi ${item.bangumi_score}` : "评分暂无"}
                   {item.rank ? ` · 全站 #${item.rank}` : ""}
@@ -106,22 +151,45 @@ export function RecommendPanel({
                     <button
                       type="button"
                       className="inline-action card-action"
-                      onClick={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        onPrepareWrite(Number(item.id), text(item.name), 1);
+                      onClick={() => {
+                        onPrepareWrite(Number(item.id), text(item.name), 1, {
+                          recommendationSetId: setId,
+                        });
                       }}
                     >
                       想看
                     </button>
                   )}
+                  {onFeedback && setId && <button type="button" className="inline-action card-action" onClick={() => void feedback(item, "more")}>多来这种</button>}
+                  {onFeedback && setId && <button type="button" className="inline-action card-action" onClick={() => void feedback(item, "less")}>少来这种</button>}
                 </div>
+                {onFeedback && setId && (
+                  <div className="rec-dismiss-row">
+                    <select
+                      aria-label={`不推荐《${text(item.name)}》的原因`}
+                      value={reasons[Number(item.id)] || "not_interested"}
+                      onChange={(event) => setReasons((prev) => ({ ...prev, [Number(item.id)]: event.target.value }))}
+                    >
+                      <option value="not_interested">不感兴趣</option>
+                      <option value="already_seen">其实看过了</option>
+                      <option value="genre">题材不合</option>
+                      <option value="visual">画风不合</option>
+                      <option value="pace">节奏不合</option>
+                      <option value="length">太长</option>
+                      <option value="temporary">这次暂时不要</option>
+                    </select>
+                    <button type="button" className="inline-action card-action" onClick={() => void feedback(item, "dismiss", reasons[Number(item.id)] || "not_interested")}>移除</button>
+                  </div>
+                )}
                 {nextStep && <div className="compact-list inline next-step"><span>{nextStep}</span></div>}
               </div>
-            </a>
+            </article>
           );
         })}
       </div>
+      {onNextBatch && setId && (
+        <div className="panel-actions"><button type="button" className="ghost" disabled={loadingNext} onClick={() => void nextBatch()}>{loadingNext ? "正在重排…" : "换一批"}</button></div>
+      )}
       {onCritique && (list<string>(data.critique_chips).length > 0 || list<string>(data.cold_start_questions).length > 0) && (
         <div className="followups">
           {[...list<string>(data.critique_chips), ...list<string>(data.cold_start_questions)].map((q, i) => (
@@ -134,10 +202,11 @@ export function RecommendPanel({
       <Meta
         notes={[
           mediaStrategy.policy,
-          ...list<string>(data.applied_constraints).map((x) => `约束：${x}`),
+          ...list<string>(current.applied_constraints).map((x) => `约束：${x}`),
           fb ? `反馈闭环：正向 ${fb.positive ?? 0} / 负向 ${fb.negative ?? 0}${list<string>(fb.negative_tags).length ? `（避雷 ${list<string>(fb.negative_tags).slice(0, 4).join("、")}）` : ""}` : null,
-          ...list<string>(data.mapping_warnings).map((w) => `映射告警：${w}`),
-          ...list<string>(data.notes),
+          current.diversity?.method ? `多样性：${current.diversity.method} · ILD ${current.diversity.intra_list_diversity ?? "-"} · 系列策略 ${current.diversity.series_policy}` : null,
+          ...list<string>(current.mapping_warnings).map((w) => `映射告警：${w}`),
+          ...list<string>(current.notes),
         ]}
       />
     </Panel>

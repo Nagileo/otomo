@@ -1,7 +1,7 @@
 """数据集划分。
 
-本数据集无时间戳 → 用 **leave-one-out**（每个用户随机留出 1 个正反馈作测试）。
-（docs/05 偏好时间分割以防未来泄漏；有时间戳的数据集再换。）固定 seed 保证可复现。
+新采集数据带 updated_at，默认应使用 temporal leave-one-out，避免未来交互泄漏。
+旧 CSV 没有时间戳时保留确定性的随机 leave-one-out 兼容路径，并明确报告降级。
 """
 from __future__ import annotations
 
@@ -29,4 +29,25 @@ def leave_one_out(
         held = items[rng.randrange(len(items))]
         test[uid] = {held}
         train.extend((uid, it) for it in items if it != held)
+    return train, test
+
+
+def temporal_leave_one_out(
+    df: pd.DataFrame, min_items: int = 2, item_col: str = "subject_id",
+) -> tuple[list[tuple[int, int]], dict[int, set[int]]]:
+    if "updated_at" not in df.columns:
+        raise ValueError("temporal split requires updated_at")
+    frame = df.copy()
+    frame["_ts"] = pd.to_datetime(frame["updated_at"], utc=True, errors="coerce")
+    train: list[tuple[int, int]] = []
+    test: dict[int, set[int]] = {}
+    for uid, group in frame.groupby("user_id"):
+        group = group.sort_values(["_ts", item_col], na_position="first")
+        items = group[item_col].tolist()
+        if len(items) < min_items:
+            train.extend((uid, item) for item in items)
+            continue
+        held = items[-1]
+        test[int(uid)] = {int(held)}
+        train.extend((int(uid), int(item)) for item in items[:-1])
     return train, test

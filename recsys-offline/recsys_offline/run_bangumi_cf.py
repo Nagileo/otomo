@@ -28,7 +28,7 @@ from implicit.nearest_neighbours import BM25Recommender
 from .bangumi_data import filter_active, load_bangumi_positive
 from .baseline import PopularityRecommender
 from .metrics import evaluate
-from .split import leave_one_out
+from .split import leave_one_out, temporal_leave_one_out
 
 for _s in (sys.stdout, sys.stderr):
     try:
@@ -54,6 +54,7 @@ def main() -> None:
     ap.add_argument("--export-model", choices=["bm25", "als"], default="bm25",
                     help="导出 i2i 用的模型：小数据 bm25 更稳，数据够大可切 als")
     ap.add_argument("--out", default="", help="i2i JSON 输出路径（默认与 data 同目录 i2i_<stype>.json）")
+    ap.add_argument("--split", choices=["temporal", "random"], default="temporal")
     args = ap.parse_args()
 
     df = load_bangumi_positive(args.data)
@@ -75,7 +76,14 @@ def main() -> None:
     idx2item = sids
 
     # ---------- 1) 评测：leave-one-out ---------- #
-    train, test = leave_one_out(df, item_col="subject_id")
+    split_used = args.split
+    if args.split == "temporal" and "updated_at" in df.columns:
+        train, test = temporal_leave_one_out(df, item_col="subject_id")
+    else:
+        if args.split == "temporal":
+            print("⚠ CSV 没有 updated_at，评测降级为固定随机 leave-one-out；新采集任务会写入时间戳。")
+            split_used = "random_fallback"
+        train, test = leave_one_out(df, item_col="subject_id")
     mat = _csr(train, u2idx, i2idx, len(uids), len(sids))
     seen: dict[int, set[int]] = defaultdict(set)
     for u, i in train:
@@ -107,7 +115,7 @@ def main() -> None:
         recs = {users[k]: [int(idx2item[j]) for j in ids[k]] for k in range(len(users))}
         results[name] = (evaluate(recs, truth, ks=(10,)), time.monotonic() - t0)
 
-    print(f"\n== Bangumi 原生 CF 评测（{len(users):,} 用户 leave-one-out）==")
+    print(f"\n== Bangumi 原生 CF 评测（{len(users):,} 用户 {split_used} leave-one-out）==")
     print(f"  {'模型':<16}{'NDCG@10':>10}{'Recall@10':>11}{'HitRate@10':>12}{'MRR':>9}{'耗时s':>8}")
     base = results["流行度baseline"][0]["ndcg@10"]
     for name, (m, dt) in results.items():
@@ -163,6 +171,9 @@ def main() -> None:
             "n_interactions": int(len(df)),
             "n_users": int(len(uids)),
             "built_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "version": time.strftime("%Y%m%d-%H%M%S"),
+            "eval_split": split_used,
+            "subject_type": os.path.basename(args.data).removeprefix("collections_").removesuffix(".csv"),
             "popular": [int(idx2item[k]) for k in np.argsort(-item_counts)[:200]],  # 热度兜底
         },
         "items": i2i,

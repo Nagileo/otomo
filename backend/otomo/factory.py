@@ -39,6 +39,7 @@ from .tools.netabare import build_netabare_tools
 from .tools.source_router import build_source_router_tools
 from .tools.spoiler import build_spoiler_tools
 from .tools.user_analysis import build_user_analysis_tools
+from .tools.today import build_today_tools
 from .tools.videos import build_video_tools
 from .tools.vndb import build_vndb_tools
 from .tools.watch import build_watch_tools
@@ -102,6 +103,8 @@ def build_registry(
     for tool in build_aspect_profile_tools(client, shared_ltm):
         registry.register(tool)
     for tool in build_calendar_tools(client):
+        registry.register(tool)
+    for tool in build_today_tools(client):
         registry.register(tool)
     for tool in build_profile_tools(client, shared_ltm):
         registry.register(tool)

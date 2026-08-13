@@ -69,6 +69,7 @@ class PendingWriteAction(BaseModel):
     subject_name: str = ""
     episode_id: int | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
+    context: dict[str, Any] = Field(default_factory=dict)
     before: dict[str, Any] | None = None
     after: dict[str, Any] | None = None
     status: WriteActionStatus = "pending"

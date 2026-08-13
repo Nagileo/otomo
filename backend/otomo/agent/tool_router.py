@@ -31,7 +31,7 @@ CORE_TOOLS: set[str] = {
     "get_subject_episodes", "get_character_persons", "get_person_subjects", "check_subjects",
     # 顶层高频意图入口
     "recommend_subjects", "review_subject", "season_guide_brief",
-    "where_to_watch", "get_broadcast_calendar",
+    "where_to_watch", "today_cockpit", "get_broadcast_calendar",
     # 记忆读 + 反馈（便宜且频繁相关）
     "get_user_memory", "remember_user_preference", "record_recommendation_feedback",
     # 剧透护栏（触碰剧情前应随时可用）

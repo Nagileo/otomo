@@ -14,8 +14,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import os
 import re
 from pathlib import Path
 from typing import Any, Literal
@@ -24,9 +22,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ...agent._common import emit_tool_progress
 from ...agent.contracts import Citation, Tool, ToolResult
-from ...config import settings
 from ...memory import LongTermMemory
 from ...memory.models import UserAspectProfile
+from ...recommendation_events import RecommendationEventStore
+from ...recsys_registry import CFModelStatus, cf_model_registry
 from ...security_context import can_access_private_user
 from ...profile import compute_taste_profile
 from .._concurrency import gather_limited
@@ -82,24 +81,6 @@ _MUSIC_SUBTYPE_LABEL = {
     "music": "音乐",
 }
 
-_I2I_CACHE: dict[str, dict] = {}
-
-
-def _load_i2i(subject_type: str) -> dict:
-    """加载 recsys-offline 导出的 item-item 相似度表（离线 CF 反哺在线的产物）。
-
-    按 i2i_{subject_type}.json 找；缺失/损坏→空表，使协同召回这一路静默跳过（优雅降级）。
-    进程内缓存，避免每次请求重读。
-    """
-    if subject_type not in _I2I_CACHE:
-        path = os.path.join(settings.cf_i2i_dir, f"i2i_{subject_type}.json")
-        try:
-            with open(path, encoding="utf-8") as f:
-                _I2I_CACHE[subject_type] = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            _I2I_CACHE[subject_type] = {"items": {}, "meta": {}}
-    return _I2I_CACHE[subject_type]
-
 _MOOD_TAG_MAP: dict[str, list[str]] = {
     "不费脑": ["日常", "治愈", "轻松"], "轻松": ["日常", "治愈", "搞笑"],
     "治愈": ["治愈", "日常"], "催泪": ["催泪", "感动"], "感动": ["催泪", "感动"],
@@ -126,6 +107,65 @@ def _norm_title(value: str | None) -> str:
 
 def _unique(values: list[str]) -> list[str]:
     return [v for v in dict.fromkeys(str(x).strip() for x in values if str(x).strip())]
+
+
+def _candidate_similarity(left: dict, right: dict) -> float:
+    left_name = _series_key(str(left.get("name") or ""))
+    right_name = _series_key(str(right.get("name") or ""))
+    if left_name and left_name == right_name:
+        return 1.0
+    left_tags, right_tags = set(left.get("tags") or ()), set(right.get("tags") or ())
+    tag_sim = len(left_tags & right_tags) / max(len(left_tags | right_tags), 1)
+    left_graph, right_graph = set(left.get("graph") or ()), set(right.get("graph") or ())
+    graph_sim = len(left_graph & right_graph) / max(len(left_graph | right_graph), 1)
+    return min(0.8 * tag_sim + 0.2 * graph_sim, 1.0)
+
+
+def _mmr_rerank(
+    ranked: list[tuple[int, dict]], score_fn, strength: float, *, pool_size: int = 100,
+) -> list[tuple[int, dict]]:
+    """Diversify the competitive head while preserving the long tail order."""
+    if strength <= 0 or len(ranked) < 2:
+        return ranked
+    pool, tail = ranked[:pool_size], ranked[pool_size:]
+    raw = [float(score_fn(sid, item)) for sid, item in pool]
+    lo, hi = min(raw), max(raw)
+    # Keep a relevance floor: min-max alone turns the weakest item in a strong,
+    # tightly packed pool into zero and makes MMR incapable of promoting a
+    # genuinely different candidate.
+    relevance = [
+        0.5 + 0.5 * ((value - lo) / (hi - lo)) if hi > lo else 1.0
+        for value in raw
+    ]
+    remaining = list(range(len(pool)))
+    selected: list[int] = []
+    while remaining:
+        def mmr(index: int) -> float:
+            redundancy = max(
+                (_candidate_similarity(pool[index][1], pool[other][1]) for other in selected),
+                default=0.0,
+            )
+            return (1.0 - strength) * relevance[index] - strength * redundancy
+
+        best = max(remaining, key=lambda index: (mmr(index), relevance[index], -index))
+        selected.append(best)
+        remaining.remove(best)
+    return [pool[index] for index in selected] + tail
+
+
+def _intra_list_diversity(items: list["RecItem"]) -> float:
+    if len(items) < 2:
+        return 1.0 if items else 0.0
+    pairs = 0
+    distance = 0.0
+    for idx, left in enumerate(items):
+        for right in items[idx + 1:]:
+            ltags = set(left.diversity_tags)
+            rtags = set(right.diversity_tags)
+            similarity = len(ltags & rtags) / max(len(ltags | rtags), 1) if ltags or rtags else 0.0
+            distance += 1.0 - similarity
+            pairs += 1
+    return round(distance / max(pairs, 1), 3)
 
 
 _SAFE_EDITION_TOKENS = (
@@ -398,6 +438,14 @@ class RecommendArgs(BaseModel):
     use_graph: bool = Field(True, description="图谱召回：从你最爱作品的监督/制作组找其未看的其他作品")
     use_cf: bool = Field(True, description="协同召回：看过你爱的作品的人还看了啥（离线 CF，需 i2i 表；无表则自动跳过）")
     use_series: bool = Field(True, description="系列入口回溯：若推荐项是续集而你没看前作，自动换成入口作（别莫名其妙推你第二季）")
+    series_policy: Literal["auto", "discover", "continue", "entry_only", "allow"] = Field(
+        "auto",
+        description="系列策略：discover 不把已看系列续作混入新坑；continue/allow 可推荐续作；entry_only 始终回到入口。auto 按场景决定。",
+    )
+    diversity_strength: float = Field(
+        0.22, ge=0.0, le=0.8,
+        description="MMR 多样性强度；0 保持纯相关性排序，越高越减少同质题材/同系列扎堆。",
+    )
     use_external_recall: bool = Field(True, description="game/galgame 推荐时，是否用批判空间排行做前置召回并映射回 Bangumi")
     use_curation: bool = Field(True, description="是否用精选 Bangumi 目录作为低权重策展召回")
     use_semantic: bool = Field(True, description="bge 语义相似特征：候选与你高分作品的标签语义距离进重排（已验证 +7.5% NDCG；模型缺失自动跳过）")
@@ -462,6 +510,7 @@ class RecItem(BaseModel):
     source_routes: list[str] = Field(default_factory=list)
     media_subtype: str | None = None
     media_notes: list[str] = Field(default_factory=list)
+    diversity_tags: list[str] = Field(default_factory=list)
     features: dict[str, float] | None = None  # export_features=True 时填；LTR 训练用
 
 
@@ -479,6 +528,9 @@ class RecommendResult(BaseModel):
     media_strategy: dict = Field(default_factory=dict)
     scenario: str = "general"
     feedback_policy: dict = Field(default_factory=dict)
+    recommendation_set_id: str = ""
+    model_metadata: dict = Field(default_factory=dict)
+    diversity: dict = Field(default_factory=dict)
 
 
 class RerankWeights(BaseModel):
@@ -515,10 +567,15 @@ class RecommendTool(Tool):
         client: BangumiClient,
         ltm: LongTermMemory | None = None,
         rerank_weights: RerankWeights | None = None,
+        event_store: RecommendationEventStore | None = None,
     ) -> None:
         self.client = client
         self.ltm = ltm
         self.w = rerank_weights or RerankWeights()
+        # Agent/API instances have LTM and capture online recommendation events.
+        # Offline evaluators construct the tool without LTM; they must not
+        # contaminate production impression metrics.
+        self.event_store = event_store or (RecommendationEventStore() if ltm is not None else None)
         self.reviewer = ReviewSubjectTool(client)
         self.egs_rank = RankErogameScapeTool()
 
@@ -756,9 +813,8 @@ class RecommendTool(Tool):
     async def _series_context(self, sid: int, stype: int, seen: set[int]):
         """一次查 relations，同时拿：①续集→回溯入口（顺序关系，要替换） ②同 IP 旁支（平行关系，只提示）。
 
-        返回 (entry, siblings)：
-          entry = (sid, name, image, rating)，或 None（本身是入口 / 前作已看，不替换）；
-          siblings = 旁支作品名列表（外传 / 世界观分支 / 番外，"提一嘴"用）。
+        返回入口、关系簇 root、前作观看状态和旁支。是否替换入口由场景策略决定，
+        不在关系解析阶段把“前作已看”误当成“没有前作”。
         """
         rels = await self.client.get_subject_relations(sid)
         siblings = [
@@ -769,15 +825,19 @@ class RecommendTool(Tool):
         ][:3]
 
         cur, last, cur_rels = sid, None, rels
+        has_predecessor = False
+        seen_predecessor = False
         for _ in range(_SERIES_MAX_HOP):
             pre = next(
                 (r for r in (cur_rels or [])
                  if r.get("relation") == "前传" and r.get("type") == stype
-                 and r.get("id") and r["id"] not in seen),
+                 and r.get("id")),
                 None,
             )
             if not pre:
                 break
+            has_predecessor = True
+            seen_predecessor = seen_predecessor or int(pre["id"]) in seen
             cur, last = pre["id"], pre
             cur_rels = await self.client.get_subject_relations(cur)
 
@@ -790,7 +850,13 @@ class RecommendTool(Tool):
                          img.get("common") or img.get("medium"), raw.get("rating") or {})
             except Exception:  # noqa: BLE001
                 entry = (cur, last.get("name_cn") or last.get("name"), None, {})
-        return entry, siblings
+        return {
+            "entry": entry,
+            "siblings": siblings,
+            "root_id": int(cur),
+            "has_predecessor": has_predecessor,
+            "seen_predecessor": seen_predecessor,
+        }
 
     async def run(self, args: RecommendArgs) -> ToolResult[RecommendResult]:
         stype = SUBJECT_TYPE[args.subject_type]
@@ -829,6 +895,10 @@ class RecommendTool(Tool):
             scenario_notes.append("跨媒体场景：从你喜欢的动画/书籍/game 关系边召回原作、改编、音乐等条目。")
 
         excluded = {int(x) for x in args.exclude_ids if x}
+        event_excluded_ids: set[int] = set()
+        if self.event_store is not None and username and can_access_private_user(username):
+            event_excluded_ids = self.event_store.recent_excluded_ids(username)
+            excluded |= event_excluded_ids
         if username:
             await emit_tool_progress(tool=self.name, summary=f"拉取 @{username} 的 {args.subject_type} 收藏", current=2, total=6)
             items = await self.client.get_all_user_collections(username, stype, None, max_items=_MAX_COLLECT)
@@ -844,6 +914,11 @@ class RecommendTool(Tool):
         else:
             seen = {it["subject"]["id"] for it in items if it.get("subject", {}).get("id")} | excluded
         watched = [it for it in items if it.get("type") == 2]
+        series_seen = {
+            int(it["subject"]["id"])
+            for it in items
+            if it.get("type") in {2, 3, 4, 5} and (it.get("subject") or {}).get("id")
+        }
         wishlist = [it for it in items if it.get("type") == 1]
         profile = compute_taste_profile(username, watched)
         memory_dislikes: list[str] = []
@@ -988,8 +1063,10 @@ class RecommendTool(Tool):
         }
         if args.use_graph:
             await self._graph_recall(cand, stype, fav_ids, seen)
-        if args.use_cf:  # 协同召回（离线 CF 反哺）：无 i2i 表则 _load_i2i 返回空、静默跳过
-            self._cf_recall(cand, fav_ids, seen, _load_i2i(args.subject_type))
+        cf_status = CFModelStatus(subject_type=args.subject_type)
+        if args.use_cf:
+            i2i, cf_status = cf_model_registry.load(args.subject_type)
+            self._cf_recall(cand, fav_ids, seen, i2i)
         if effective_cross_media and username:
             if args.subject_type != "anime":
                 source_items = await self.client.get_all_user_collections(
@@ -1021,7 +1098,8 @@ class RecommendTool(Tool):
             return min(len(c["graph"]), 2) * self.w.graph_per_hit
 
         def cf_bonus(c: dict) -> float:
-            return min(c.get("cf", 0.0), self.w.cf_cap)  # 封顶，避免协同召回压过标签口味
+            freshness = 0.55 if cf_status.stale else 1.0
+            return min(c.get("cf", 0.0), self.w.cf_cap) * freshness
 
         def external_bonus(c: dict) -> float:
             return min(c.get("external_boost", 0.0), self.w.external_cap)
@@ -1231,13 +1309,25 @@ class RecommendTool(Tool):
             return [f"看过《{names[0]}》的人也在看" + (" 等" if len(c["cf_from"]) > 1 else "")]
 
         ranked = sorted(prelim, key=lambda kv: -score(kv[0], kv[1]))
+        ranked = _mmr_rerank(
+            ranked,
+            score,
+            args.diversity_strength,
+            pool_size=max(args.limit * 8, 60),
+        )
         out: list[RecItem] = []
         seen_series: set[str] = set()
         seen_ids: set[int] = set()
         pool_limit = min(args.limit * 2, 20) if args.enrich_evidence else args.limit
         if args.export_features:
             pool_limit = 60  # LTR 训练：导出更大候选池以容纳 hold-out 正样本（训练专用路径）
-        series_contexts: dict[int, tuple] = {}
+        series_contexts: dict[int, dict[str, Any]] = {}
+        effective_series_policy = args.series_policy
+        if effective_series_policy == "auto":
+            effective_series_policy = (
+                "continue" if scenario in {"season", "backlog", "tonight"} else
+                "discover"
+            )
         if args.use_series:
             series_targets = [
                 (sid, c)
@@ -1246,7 +1336,7 @@ class RecommendTool(Tool):
             ][:30]
             if series_targets:
                 series_results = await gather_limited(
-                    [self._series_context(sid, stype, seen) for sid, _c in series_targets],
+                    [self._series_context(sid, stype, series_seen) for sid, _c in series_targets],
                     host="bangumi",
                 )
                 for (sid, _c), res in zip(series_targets, series_results, strict=False):
@@ -1313,14 +1403,26 @@ class RecommendTool(Tool):
             if effective_max_episodes is not None and isinstance(eps, int) and eps > effective_max_episodes:
                 continue
             r_id, r_name, r_img, r_rating, extra = sid, c["name"], c.get("image"), c["rating"], []
+            franchise_key = _series_key(r_name)
             if args.use_series:
-                entry, siblings = series_contexts.get(sid) or await self._series_context(sid, stype, seen)
-                if entry:  # 续集且前作未看 → 换成入口作（顺序关系）
+                context = series_contexts.get(sid) or await self._series_context(sid, stype, series_seen)
+                entry = context["entry"]
+                siblings = context["siblings"]
+                franchise_key = f"root:{context['root_id']}"
+                if effective_series_policy == "discover" and context["seen_predecessor"]:
+                    continue
+                replace_with_entry = bool(entry) and (
+                    effective_series_policy == "entry_only"
+                    or (effective_series_policy in {"discover", "continue"} and not context["seen_predecessor"])
+                )
+                if replace_with_entry:
                     r_id, r_name, r_img, r_rating = entry
                     extra.append(f"系列入口（《{c['name']}》的前作，建议从这部入坑）")
+                elif context["seen_predecessor"] and effective_series_policy in {"continue", "allow"}:
+                    extra.append("你已接触该系列前作，本轮保留后续作候选")
                 if siblings:  # 同 IP 旁支 → 提一嘴（平行关系，不替换）
                     extra.append("同 IP 还有：" + "、".join(f"《{s}》" for s in siblings))
-            sk = _series_key(r_name)
+            sk = franchise_key or _series_key(r_name)
             if r_id in seen_ids or sk in seen_series:  # 入口去重（多个续集回溯到同一入口）
                 continue
             seen_ids.add(r_id)
@@ -1363,6 +1465,7 @@ class RecommendTool(Tool):
                 aspect_warnings=aspect_warnings,
                 media_subtype=subtype,
                 media_notes=subtype_notes,
+                diversity_tags=sorted(c.get("tags") or ())[:16],
                 features=feature_vector(r_id, c) if args.export_features else None,
             ))
             if len(out) >= pool_limit:
@@ -1376,7 +1479,24 @@ class RecommendTool(Tool):
                 total=6,
             )
             await self._enrich_review_evidence(out, aspect_profile, args.subject_type)
-            out.sort(key=lambda x: -x.score)
+            reranked_items = _mmr_rerank(
+                [
+                    (
+                        item.id,
+                        {
+                            "name": item.name,
+                            "tags": set(item.diversity_tags),
+                            "graph": set(),
+                            "item": item,
+                        },
+                    )
+                    for item in out
+                ],
+                lambda _sid, payload: payload["item"].score,
+                args.diversity_strength,
+                pool_size=len(out),
+            )
+            out = [payload["item"] for _sid, payload in reranked_items]
             out = out[: args.limit]
 
         await emit_tool_progress(tool=self.name, summary=f"推荐完成：输出 {len(out)} 个候选", current=6, total=6)
@@ -1412,6 +1532,8 @@ class RecommendTool(Tool):
             applied_constraints.append("场景偏好：" + "、".join(scenario_prefer[:8]))
         if feedback_excluded_ids:
             applied_constraints.append(f"已排除近期负反馈条目 {len(feedback_excluded_ids)} 个")
+        if event_excluded_ids:
+            applied_constraints.append(f"已排除近期卡片反馈条目 {len(event_excluded_ids)} 个")
         if effective_cross_media:
             applied_constraints.append("已启用跨媒体召回")
         if args.use_curation and curation_hits:
@@ -1422,6 +1544,7 @@ class RecommendTool(Tool):
             applied_constraints.append(f"music 分型约束：{_MUSIC_SUBTYPE_LABEL.get(args.music_subtype, args.music_subtype)}")
         if aspect_profile:
             notes.append(f"已使用 {args.subject_type} aspect 情感画像参与重排。")
+        notes.extend(cf_status.warnings)
         if cold_start_questions:
             notes.append("收藏/评分样本偏少，当前结果同时给出冷启动澄清问题。")
         media_strategy = {
@@ -1437,6 +1560,15 @@ class RecommendTool(Tool):
                 else ""
             ),
         }
+        recommendation_set_id = ""
+        if self.event_store is not None and username and out and can_access_private_user(username):
+            recommendation_set_id = self.event_store.create_set(
+                username,
+                args.subject_type,
+                scenario,
+                args.model_dump(mode="json", exclude_none=True),
+                [item.model_dump(mode="json", exclude_none=True) for item in out],
+            )
         return ToolResult(
             ok=True,
             data=RecommendResult(
@@ -1460,6 +1592,14 @@ class RecommendTool(Tool):
                     "positive_tags": feedback_like_tags[:10],
                     "negative_tags": feedback_dislike_tags[:10],
                     "principle": "近期反馈作为弱 rerank 信号；本轮显式要求优先。",
+                },
+                recommendation_set_id=recommendation_set_id,
+                model_metadata=cf_status.model_dump(mode="json", exclude_none=True),
+                diversity={
+                    "method": "MMR",
+                    "strength": args.diversity_strength,
+                    "intra_list_diversity": _intra_list_diversity(out),
+                    "series_policy": effective_series_policy,
                 },
             ),
             sources=[

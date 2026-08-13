@@ -46,6 +46,38 @@ export function TrendingPanel({ data }: { data: AnyRecord }) {
   );
 }
 
+export function TodayCockpitPanel({ data, onPrepareWrite }: { data: AnyRecord; onPrepareWrite?: PrepareWriteHandler }) {
+  const items = list(data.today);
+  const backlog = list(data.backlog);
+  return (
+    <Panel title={`今日追番 · ${text(data.date)}`} subtitle={`${items.length} 部今日放送 · ${backlog.length} 部落后候选`}>
+      <div className="today-panel-list">
+        {items.length ? items.map((item, index) => (
+          <div className="today-panel-item" key={`${item.id}-${index}`}>
+            {item.image ? <img src={item.image} alt="" /> : <div className="rec-noimg" />}
+            <div>
+              <a className="card-title title-link" href={item.url || `https://bgm.tv/subject/${item.id}`} target="_blank" rel="noreferrer">{text(item.name_cn || item.name)}</a>
+              <div className="card-meta">{text(item.broadcast, "放送时间未定")} · 看到 {item.my_ep ?? 0}{item.aired_ep ? ` / 已播 ${item.aired_ep}` : ""}</div>
+              <div className="evidence-row tight">
+                {item.pinned ? <Badge tone="good">置顶</Badge> : null}
+                {item.behind ? <Badge tone="warn">落后 {item.behind} 集</Badge> : <Badge tone="good">已跟上</Badge>}
+                {onPrepareWrite && Number(item.my_ep || 0) < Number(item.aired_ep || 0) ? (
+                  <button className="inline-action card-action" onClick={() => onPrepareWrite(
+                    Number(item.id), text(item.name_cn || item.name), 3,
+                    { operation: "mark_episodes_watched", upToEpisode: Number(item.my_ep || 0) + 1 },
+                  )}>看完下一集</button>
+                ) : null}
+              </div>
+            </div>
+          </div>
+        )) : <EmptyHint text="今天没有你的在看/想看条目" />}
+      </div>
+      <div className="panel-actions"><a className="ghost" href="/today">打开完整今日页</a></div>
+      <Meta notes={list<string>(data.notes)} />
+    </Panel>
+  );
+}
+
 export function BirthdayPanel({ data }: { data: AnyRecord }) {
   const characters = list(data.characters);
   const moegirl = list(data.moegirl_entries);
