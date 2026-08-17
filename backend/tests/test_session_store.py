@@ -19,6 +19,10 @@ def test_session_store_persists_messages_evidence_and_state(tmp_path):
         content="今日有动画A更新。",
         evidence={"get_broadcast_calendar": [{"count": 1}]},
         sources=[{"title": "动画A", "url": "https://bgm.tv/subject/100", "source": "bangumi"}],
+        trace=[{"kind": "obs", "name": "get_broadcast_calendar", "ok": True, "summary": "查到今日放送"}],
+        steps=["规划：查询今日放送", "✓ 查到今日放送"],
+        turn_id="turn-1",
+        elapsed_ms=1450,
     )
     state = AgentState(
         messages=[{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}],
@@ -35,6 +39,11 @@ def test_session_store_persists_messages_evidence_and_state(tmp_path):
     assert len(restored["messages"]) == 2
     assert restored["evidence"]["get_broadcast_calendar"][0]["count"] == 1
     assert restored["sources"][0]["title"] == "动画A"
+    assistant = restored["messages"][1]
+    assert assistant["trace"][0]["name"] == "get_broadcast_calendar"
+    assert assistant["steps"] == ["规划：查询今日放送", "✓ 查到今日放送"]
+    assert assistant["turn_id"] == "turn-1"
+    assert assistant["elapsed_ms"] == 1450
 
     restored_state = store.load_state(sid, auth)
     assert restored_state is not None
@@ -117,3 +126,51 @@ def test_session_store_migrates_legacy_session_schema(tmp_path):
     assert row["source"] == "web"
     assert row["source_label"] == ""
     assert row["revision"] == 0
+
+
+def test_session_store_migrates_legacy_message_schema(tmp_path):
+    path = tmp_path / "legacy-messages.sqlite3"
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                auth_session_id TEXT NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                state_json TEXT NOT NULL DEFAULT '{}',
+                source TEXT NOT NULL DEFAULT 'web',
+                source_label TEXT NOT NULL DEFAULT '',
+                revision INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL DEFAULT '',
+                attachments_json TEXT NOT NULL DEFAULT '[]',
+                evidence_json TEXT NOT NULL DEFAULT '{}',
+                sources_json TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO sessions VALUES(?,?,?,?,?,?,?,?,?)",
+            ("old", "user:u", "旧会话", "{}", "web", "", 0, "2026-01-01T00:00:00", "2026-01-01T00:00:00"),
+        )
+        conn.execute(
+            "INSERT INTO messages(session_id, role, content, created_at) VALUES(?,?,?,?)",
+            ("old", "assistant", "旧回答", "2026-01-01T00:00:00"),
+        )
+
+    restored = SessionStore(str(path)).load_messages("old", "user:u")["messages"][0]
+    assert restored["trace"] == []
+    assert restored["steps"] == []
+    assert restored["turn_id"] == ""
+    assert restored["elapsed_ms"] is None

@@ -5,6 +5,7 @@ import { ImagePlus, PanelRightOpen, Plus, Send, Square } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { PageHeader } from "../../components/page-header";
+import { OtomoAvatar, UserAvatar } from "../../components/identity-avatar";
 import { TasteQuiz } from "../taste-quiz";
 import {
   EvidencePanels,
@@ -51,7 +52,7 @@ type ImageAttachment = {
   preview_url?: string;
 };
 type PendingImage = { id: string; file: File; preview: string };
-type Msg = { role: "user" | "assistant"; content: string; attachments?: ImageAttachment[]; evidence?: EvidenceMap; turnId?: string; feedback?: "up" | "down"; steps?: string[]; elapsedMs?: number };
+type Msg = { role: "user" | "assistant"; content: string; attachments?: ImageAttachment[]; evidence?: EvidenceMap; turnId?: string; feedback?: "up" | "down"; steps?: string[]; trace?: TraceItem[]; elapsedMs?: number };
 type EvidenceMap = Record<string, Record<string, any>[]>;
 
 // [[panel:tool_name]]：LLM 在正文中锚定证据面板的位置。
@@ -119,17 +120,36 @@ function AgentLiveStatus({ steps, startedAt }: { steps: string[]; startedAt: num
 }
 
 /** 完成后收敛成一行小字，点开回看它当时做了什么。 */
-function AgentStepsFold({ steps, elapsedMs }: { steps?: string[]; elapsedMs?: number }) {
-  if (!steps?.length) return null;
+function AgentStepsFold({ steps, trace, elapsedMs }: { steps?: string[]; trace?: TraceItem[]; elapsedMs?: number }) {
+  if (!steps?.length && !trace?.length) return null;
   const secs = elapsedMs ? Math.round(elapsedMs / 1000) : null;
+  const count = steps?.length || trace?.length || 0;
   return (
     <details className="agent-steps">
-      <summary>⏱ {secs ? `思考了 ${secs} 秒` : "思考过程"} · {steps.length} 步</summary>
-      <ol>
-        {steps.map((s, i) => <li key={i}>{s}</li>)}
-      </ol>
+      <summary>执行过程 · {secs ? `${secs} 秒` : "已完成"} · {count} 步</summary>
+      <div className="message-trace">
+        {trace?.length ? trace.map((item, i) => {
+          if (item.kind === "call") return (
+            <details className="message-trace-call" key={i}>
+              <summary>调用 {item.name}</summary>
+              <pre>{JSON.stringify(item.args, null, 2)}</pre>
+            </details>
+          );
+          if (item.kind === "obs") return <div className={item.ok ? "ok" : "bad"} key={i}>{item.ok ? "✓" : "✗"} {item.summary || item.name}</div>;
+          if (item.kind === "progress") return <div key={i}>↳ {item.summary}{item.note ? ` · ${item.note}` : ""}</div>;
+          return <div key={i}>{item.text}</div>;
+        }) : (
+          <ol>{steps?.map((step, i) => <li key={i}>{step}</li>)}</ol>
+        )}
+      </div>
     </details>
   );
+}
+
+function MessageAvatar({ role, auth }: { role: "user" | "assistant"; auth?: AuthState | null }) {
+  return role === "assistant"
+    ? <OtomoAvatar className="message-avatar assistant" />
+    : <UserAvatar className="message-avatar user" username={auth?.username} avatarUrl={auth?.avatar_url} />;
 }
 
 type SpoilerState = {
@@ -161,6 +181,7 @@ type AuthState = {
   authenticated?: boolean;
   username?: string;
   user_id?: number;
+  avatar_url?: string;
   oauth_configured?: boolean;
   dev_token_available?: boolean;
   csrf_token?: string;
@@ -178,6 +199,7 @@ type ChatSession = {
   revision?: number;
   running?: boolean;
   activity_surface?: string;
+  activity_run_id?: string;
   activity_started_at?: number;
   activity_is_current_device?: boolean;
 };
@@ -403,6 +425,7 @@ function TracePanel({
 export default function Home() {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [trace, setTrace] = useState<TraceItem[]>([]);
+  const runTraceRef = useRef<TraceItem[]>([]);
   const [answer, setAnswer] = useState("");
   const [sources, setSources] = useState<Source[]>([]);
   const [evidence, setEvidence] = useState<EvidenceMap>({});
@@ -435,6 +458,8 @@ export default function Home() {
   const lastQ = useRef("");      // 最近一次用户问题（剧透 followup chips 重发用）
   const turnIdRef = useRef("");  // 本轮 turn_id（meta 事件下发，👍👎 反馈按它关联轨迹）
   const abortRef = useRef<AbortController | null>(null);
+  const activeRunIdRef = useRef("");
+  const streamingRunRef = useRef("");
   const receivedFinalRef = useRef(false);
   const busyRef = useRef(false);
   const deviceIdRef = useRef("");
@@ -482,7 +507,9 @@ export default function Home() {
     }
     // Per-page writer id: another tab in the same browser is still a distinct
     // writer and must not silently submit into a running conversation.
-    deviceIdRef.current ||= crypto.randomUUID();
+    const storedDeviceId = window.sessionStorage.getItem("otomo.chatDeviceId") || crypto.randomUUID();
+    deviceIdRef.current = storedDeviceId;
+    window.sessionStorage.setItem("otomo.chatDeviceId", storedDeviceId);
     void (async () => {
       const identity = await refreshAuthSession();
       const rows = await loadSessions();
@@ -603,6 +630,10 @@ export default function Home() {
       })),
       // per-message evidence：恢复历史会话时 inline 面板照常锚定
       evidence: row.evidence && typeof row.evidence === "object" ? row.evidence : undefined,
+      trace: list(row.trace) as TraceItem[],
+      steps: list(row.steps).map((step) => String(step)),
+      turnId: String(row.turn_id || "") || undefined,
+      elapsedMs: row.elapsed_ms == null ? undefined : Number(row.elapsed_ms),
     }));
   }
 
@@ -625,17 +656,31 @@ export default function Home() {
       sessionId.current = id;
       setActiveSessionId(id);
       window.localStorage.setItem("otomo.activeSessionId", id);
-      setMessages(normalizeRestoredMessages(payload.messages));
+      const restoredMessages = normalizeRestoredMessages(payload.messages);
+      setMessages(restoredMessages);
       setEvidence(payload.evidence || {});
       setSources(list(payload.sources));
       const shortTerm = payload.state?.short_term || {};
       setSpoiler(shortTerm.spoiler || null);
       setMemory(shortTerm.memory || null);
-      setTrace([]);
+      const lastAssistant = [...restoredMessages].reverse().find((message) => message.role === "assistant");
+      runTraceRef.current = lastAssistant?.trace || [];
+      setTrace(runTraceRef.current);
       setFollowups([]);
       setAnswer("");
       answerRef.current = "";
       setResumeCandidate(null);
+      const activeRunId = String(payload.session?.activity_run_id || "");
+      if (
+        payload.session?.running
+        && activeRunId
+        && streamingRunRef.current !== activeRunId
+        && !busyRef.current
+      ) {
+        setTimeout(() => void resumeRun(activeRunId), 0);
+      } else if (!payload.session?.running) {
+        activeRunIdRef.current = "";
+      }
       return true;
     } catch {
       /* ignore */
@@ -779,10 +824,11 @@ export default function Home() {
       q = pendingImages.length > 1 ? "请综合识别这些截图，并回锚 Bangumi 候选。" : "请识别这张截图，并回锚 Bangumi 候选。";
     }
     const active = sessions.find((row) => row.id === sessionId.current);
-    if (!q || busy || (active?.running && !active.activity_is_current_device)) return;
+    if (!q || busy || active?.running) return;
     lastQ.current = q;
     setInput("");
     setTrace([]);
+    runTraceRef.current = [];
     setSources([]);
     setEvidence({});
     evidenceRef.current = {};
@@ -803,6 +849,16 @@ export default function Home() {
       setActiveSessionId(sessionId.current);
       window.localStorage.setItem("otomo.activeSessionId", sessionId.current);
     }
+    const backgroundTaskId = crypto.randomUUID();
+    let backgroundTaskError = "";
+    window.dispatchEvent(new CustomEvent("otomo:task-start", {
+      detail: {
+        id: backgroundTaskId,
+        path: "/chat",
+        label: "Otomo 正在回答",
+        href: "/chat",
+      },
+    }));
 
     try {
       const attachments = shouldUseImage ? await uploadPendingImages(controller.signal) : [];
@@ -832,28 +888,12 @@ export default function Home() {
         throw new Error(await httpErrorMessage(res));
       }
       if (!res.body) throw new Error("no response body");
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = "";
-
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        // SSE 事件以空行分隔；后端用 \r\n\r\n，必须兼容 \r
-        const blocks = buf.split(/\r?\n\r?\n/);
-        buf = blocks.pop() ?? "";
-        for (const block of blocks) {
-          const dataLine = block.split(/\r?\n/).find((l) => l.startsWith("data:"));
-          if (!dataLine) continue;
-          try {
-            handleEvent(JSON.parse(dataLine.slice(5).trim()));
-          } catch {
-            /* 忽略半包/ping */
-          }
-        }
+      const responseRunId = res.headers.get("x-otomo-run-id") || "";
+      if (responseRunId) {
+        activeRunIdRef.current = responseRunId;
+        streamingRunRef.current = responseRunId;
       }
+      await consumeEventStream(res);
     } catch (e) {
       const aborted = e instanceof DOMException && e.name === "AbortError";
       if (aborted && !receivedFinalRef.current) {
@@ -864,19 +904,27 @@ export default function Home() {
         setAnswer(answerRef.current);
         evidenceRef.current = {};
         setEvidence({});
-        setTrace((t) => [...t, { kind: "note", text: "已停止本轮生成" }]);
+        pushRunTrace({ kind: "note", text: "已停止本轮生成" });
+        backgroundTaskError = "本轮生成已停止";
       } else if (!aborted) {
-      const message = e instanceof Error ? e.message : String(e);
-      setTrace((t) => [...t, { kind: "obs", name: "error", ok: false, summary: message }]);
-      setUploadNotice({ tone: "bad", text: message });
+        const message = e instanceof Error ? e.message : String(e);
+        if (activeRunIdRef.current && !receivedFinalRef.current) {
+          pushRunTrace({ kind: "note", text: "与实时进度的连接已断开，任务仍在服务器后台继续" });
+          setUploadNotice({ tone: "warn", text: "实时连接已断开，Otomo 仍在后台回答；稍后回到这段对话即可恢复。" });
+        } else {
+          pushRunTrace({ kind: "obs", name: "error", ok: false, summary: message });
+          setUploadNotice({ tone: "bad", text: message });
+          backgroundTaskError = message;
+        }
       }
     } finally {
       const final = answerRef.current;
-      if (final) {
+      if (final && receivedFinalRef.current) {
         const turnEvidence = evidenceRef.current;
         setMessages((m) => [...m, {
           role: "assistant", content: final, evidence: turnEvidence, turnId: turnIdRef.current || undefined,
           steps: liveStepsRef.current.length ? liveStepsRef.current : undefined,
+          trace: runTraceRef.current.length ? runTraceRef.current : undefined,
           elapsedMs: turnStartRef.current ? Date.now() - turnStartRef.current : undefined,
         }]);
       }
@@ -886,7 +934,81 @@ export default function Home() {
       busyRef.current = false;
       setBusy(false);
       if (abortRef.current === controller) abortRef.current = null;
+      streamingRunRef.current = "";
+      if (receivedFinalRef.current) activeRunIdRef.current = "";
+      window.dispatchEvent(new CustomEvent("otomo:task-finish", {
+        detail: { id: backgroundTaskId, ...(backgroundTaskError ? { error: backgroundTaskError } : {}) },
+      }));
       void loadSessions();
+    }
+  }
+
+  async function consumeEventStream(res: Response) {
+    if (!res.body) throw new Error("no response body");
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const blocks = buf.split(/\r?\n\r?\n/);
+      buf = blocks.pop() ?? "";
+      for (const block of blocks) {
+        const dataLine = block.split(/\r?\n/).find((line) => line.startsWith("data:"));
+        if (!dataLine) continue;
+        try {
+          handleEvent(JSON.parse(dataLine.slice(5).trim()));
+        } catch {
+          /* 忽略半包/ping */
+        }
+      }
+    }
+  }
+
+  async function resumeRun(runId: string) {
+    if (!runId || streamingRunRef.current === runId || busyRef.current) return;
+    streamingRunRef.current = runId;
+    activeRunIdRef.current = runId;
+    receivedFinalRef.current = false;
+    answerRef.current = "";
+    setAnswer("");
+    evidenceRef.current = {};
+    setEvidence({});
+    runTraceRef.current = [];
+    setTrace([]);
+    liveStepsRef.current = [];
+    setLiveSteps([]);
+    turnStartRef.current = Date.now();
+    busyRef.current = true;
+    setBusy(true);
+    const taskId = `chat-run:${runId}`;
+    window.dispatchEvent(new CustomEvent("otomo:task-start", {
+      detail: { id: taskId, path: "/chat", label: "重新连接 Otomo 的回答", href: "/chat" },
+    }));
+    let taskError = "";
+    try {
+      const res = await fetch(`${BACKEND}/chat/runs/${encodeURIComponent(runId)}/events`, {
+        credentials: "include",
+      });
+      if (!res.ok) throw new Error(await httpErrorMessage(res));
+      await consumeEventStream(res);
+    } catch (cause) {
+      taskError = cause instanceof Error ? cause.message : String(cause);
+      setUploadNotice({ tone: "warn", text: `暂时无法恢复实时过程：${taskError}` });
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+      setAnswer("");
+      answerRef.current = "";
+      liveStepsRef.current = [];
+      setLiveSteps([]);
+      await loadSession(sessionId.current, true);
+      streamingRunRef.current = "";
+      void loadSessions();
+      window.dispatchEvent(new CustomEvent("otomo:task-finish", {
+        detail: { id: taskId, ...(taskError ? { error: taskError } : {}) },
+      }));
     }
   }
 
@@ -915,8 +1037,26 @@ export default function Home() {
     }
   }
 
-  function stopGeneration() {
-    abortRef.current?.abort();
+  async function stopGeneration() {
+    const runId = activeRunIdRef.current
+      || sessions.find((row) => row.id === sessionId.current)?.activity_run_id
+      || "";
+    if (!runId) {
+      abortRef.current?.abort();
+      return;
+    }
+    try {
+      const res = await fetch(`${BACKEND}/chat/runs/${encodeURIComponent(runId)}/cancel`, {
+        method: "POST",
+        credentials: "include",
+        headers: csrfHeaders({ "Content-Type": "application/json" }),
+        body: "{}",
+      });
+      if (!res.ok) throw new Error(await httpErrorMessage(res));
+      pushStep("正在停止本轮生成…");
+    } catch (cause) {
+      setUploadNotice({ tone: "bad", text: cause instanceof Error ? cause.message : String(cause) });
+    }
   }
 
   async function postAction(kind: "confirm" | "cancel" | "undo", actionId: string) {
@@ -1142,37 +1282,40 @@ export default function Home() {
     setLiveSteps(liveStepsRef.current);
   }
 
+  function pushRunTrace(item: TraceItem) {
+    runTraceRef.current = [...runTraceRef.current.slice(-199), item];
+    setTrace(runTraceRef.current);
+  }
+
   function handleEvent(ev: any) {
     switch (ev.type) {
       case "meta":
         turnIdRef.current = ev.turn_id || "";
+        activeRunIdRef.current = ev.run_id || activeRunIdRef.current;
         break;
       case "plan":
-        setTrace((t) => [...t, { kind: "note", text: `📋 ${ev.summary}` }]);
+        pushRunTrace({ kind: "note", text: `📋 ${ev.summary}` });
         pushStep(`规划：${ev.summary}`);
         break;
       case "reflect":
-        setTrace((t) => [...t, { kind: "note", text: ev.complete ? "↺ 反思：完整" : `↺ 反思：${ev.note}` }]);
+        pushRunTrace({ kind: "note", text: ev.complete ? "↺ 反思：完整" : `↺ 反思：${ev.note}` });
         break;
       case "tool_call":
-        setTrace((t) => [...t, { kind: "call", name: ev.name, args: ev.args }]);
+        pushRunTrace({ kind: "call", name: ev.name, args: ev.args });
         break;
       case "progress":
-        setTrace((t) => [
-          ...t,
-          {
-            kind: "progress",
-            tool: ev.tool || "",
-            summary: ev.summary,
-            current: ev.current ?? undefined,
-            total: ev.total ?? undefined,
-            note: ev.note || "",
-          },
-        ]);
+        pushRunTrace({
+          kind: "progress",
+          tool: ev.tool || "",
+          summary: ev.summary,
+          current: ev.current ?? undefined,
+          total: ev.total ?? undefined,
+          note: ev.note || "",
+        });
         pushStep(ev.summary);
         break;
       case "observation":
-        setTrace((t) => [...t, { kind: "obs", name: ev.name, ok: ev.ok, summary: ev.summary }]);
+        pushRunTrace({ kind: "obs", name: ev.name, ok: ev.ok, summary: ev.summary });
         pushStep(`${ev.ok ? "✓" : "✗"} ${ev.summary}`);
         if (ev.data) {
           evidenceRef.current = {
@@ -1184,15 +1327,12 @@ export default function Home() {
         break;
       case "claim_check":
         const verifiableClaims = Number(ev.supported_count || 0) + Number(ev.unsupported_count || 0);
-        setTrace((t) => [
-          ...t,
-          {
-            kind: "note",
-            text: verifiableClaims
-              ? `证据校验：support ${(Number(ev.support_rate || 0) * 100).toFixed(0)}% · unsupported ${ev.unsupported_count ?? 0}`
-              : "证据校验：无强 canonical 硬事实需要自动回退",
-          },
-        ]);
+        pushRunTrace({
+          kind: "note",
+          text: verifiableClaims
+            ? `证据校验：support ${(Number(ev.support_rate || 0) * 100).toFixed(0)}% · unsupported ${ev.unsupported_count ?? 0}`
+            : "证据校验：无强 canonical 硬事实需要自动回退",
+        });
         evidenceRef.current = {
           ...evidenceRef.current,
           claim_check: [...(evidenceRef.current.claim_check ?? []), ev],
@@ -1219,7 +1359,7 @@ export default function Home() {
         setFollowups(ev.questions ?? []);
         break;
       case "error":
-        setTrace((t) => [...t, { kind: "obs", name: "error", ok: false, summary: ev.message }]);
+        pushRunTrace({ kind: "obs", name: "error", ok: false, summary: ev.message });
         break;
     }
   }
@@ -1228,8 +1368,10 @@ export default function Home() {
     sessionId.current = "";  // 重置 → 下次发送会生成新会话 id（清空多轮上下文）
     setActiveSessionId("");
     window.localStorage.removeItem("otomo.activeSessionId");
+    activeRunIdRef.current = "";
     setMessages([]);
     setTrace([]);
+    runTraceRef.current = [];
     setSources([]);
     setEvidence({});
     evidenceRef.current = {};
@@ -1360,8 +1502,10 @@ export default function Home() {
   };
   const panelHandlers: PanelHandlers = { ...panelHandlerProps, devMode: evidenceMode === "dev" };
   const activeSession = sessions.find((row) => row.id === activeSessionId);
-  const remoteBusy = Boolean(activeSession?.running && !activeSession.activity_is_current_device);
-  const surfaceName = activeSession?.activity_surface === "discord" ? "Discord" : "另一个页面或设备";
+  const backgroundBusy = Boolean(activeSession?.running && !busy);
+  const surfaceName = activeSession?.activity_surface === "discord"
+    ? "Discord"
+    : activeSession?.activity_is_current_device ? "这个标签页的后台任务" : "另一个页面或设备";
 
   return (
     <main className={`page-frame chat-page mode-${evidenceMode}`}>
@@ -1453,10 +1597,10 @@ export default function Home() {
 
       <div className={`chat-layout ${contextOpen ? "with-context" : ""}`}>
         <section className="chat-surface">
-          {remoteBusy && (
+          {backgroundBusy && (
             <div className="session-activity-banner" role="status">
               <span className="activity-pulse" />
-              <div><strong>{surfaceName}正在生成这段对话</strong><span>完成后消息会自动同步；你也可以新建独立对话。</span></div>
+              <div><strong>{surfaceName}正在生成这段对话</strong><span>可以去浏览其他页面；返回后过程与回答会自动恢复。</span></div>
             </div>
           )}
           {messages.length === 0 && !answer && (
@@ -1480,58 +1624,79 @@ export default function Home() {
           )}
           {messages.map((m, i) => (
             <div key={i} id={`msg-${i}`} className={`msg ${m.role}`}>
-              <div className="role">{m.role === "user" ? "你" : "Otomo"}</div>
-              {m.role === "user" ? (
-                <div className="bubble">
-                  {m.attachments?.length ? (
-                    <div className="msg-images">
-                      {m.attachments.map((img, j) => (
-                        <img key={`${img.uri}-${j}`} src={img.preview_url} alt={img.filename || "uploaded image"} />
-                      ))}
-                    </div>
-                  ) : null}
-                  {m.content}
-                </div>
-              ) : (
-                <div className="bubble">
-                  <AgentStepsFold steps={m.steps} elapsedMs={m.elapsedMs} />
-                  <AssistantContent content={m.content} evidence={m.evidence} handlers={panelHandlers} />
-                  {m.turnId && (
-                    <div className="answer-feedback">
-                      <button className={`fb-btn ${m.feedback === "up" ? "on" : ""}`} title="这条回答不错"
-                        onClick={() => sendAnswerFeedback(i, "up")}>👍</button>
-                      <button className={`fb-btn ${m.feedback === "down" ? "on" : ""}`} title="这条回答不行"
-                        onClick={() => sendAnswerFeedback(i, "down")}>👎</button>
-                    </div>
-                  )}
-                  {m.evidence && (
-                    <EvidencePanels
-                      evidence={m.evidence}
-                      mode={evidenceMode}
-                      collapsible
-                      excludeNames={inlinePanelNames(m.content, m.evidence)}
-                      {...panelHandlerProps}
-                    />
-                  )}
-                </div>
-              )}
+              <MessageAvatar role={m.role} auth={auth} />
+              <div className="msg-main">
+                <div className="role">{m.role === "user" ? (auth?.username ? `@${auth.username}` : "你") : "Otomo"}</div>
+                {m.role === "user" ? (
+                  <div className="bubble">
+                    {m.attachments?.length ? (
+                      <div className="msg-images">
+                        {m.attachments.map((img, j) => (
+                          <img key={`${img.uri}-${j}`} src={img.preview_url} alt={img.filename || "uploaded image"} />
+                        ))}
+                      </div>
+                    ) : null}
+                    {m.content}
+                  </div>
+                ) : (
+                  <div className="bubble">
+                    <AgentStepsFold steps={m.steps} trace={m.trace} elapsedMs={m.elapsedMs} />
+                    <AssistantContent content={m.content} evidence={m.evidence} handlers={panelHandlers} />
+                    {m.turnId && (
+                      <div className="answer-feedback">
+                        <button className={`fb-btn ${m.feedback === "up" ? "on" : ""}`} title="这条回答不错"
+                          onClick={() => sendAnswerFeedback(i, "up")}>👍</button>
+                        <button className={`fb-btn ${m.feedback === "down" ? "on" : ""}`} title="这条回答不行"
+                          onClick={() => sendAnswerFeedback(i, "down")}>👎</button>
+                      </div>
+                    )}
+                    {m.evidence && (
+                      <EvidencePanels
+                        evidence={m.evidence}
+                        mode={evidenceMode}
+                        collapsible
+                        excludeNames={inlinePanelNames(m.content, m.evidence)}
+                        {...panelHandlerProps}
+                      />
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
           ))}
           {busy && !answer && (
             <div className="msg assistant">
-              <div className="role">Otomo</div>
-              <div className="bubble">
-                <AgentLiveStatus steps={liveSteps} startedAt={turnStartRef.current} />
+              <MessageAvatar role="assistant" />
+              <div className="msg-main">
+                <div className="role">Otomo</div>
+                <div className="bubble"><AgentLiveStatus steps={liveSteps} startedAt={turnStartRef.current} /></div>
               </div>
             </div>
           )}
           {answer && (
             <div className="msg assistant">
-              <div className="role">Otomo</div>
-              <div className="bubble">
-                {busy && <AgentLiveStatus steps={liveSteps} startedAt={turnStartRef.current} />}
-                {/* 流式中面板标记逐字到达后即时嵌入（inline 锚定对打字中的回答同样生效） */}
-                <AssistantContent content={answer + "▍"} evidence={evidence} handlers={panelHandlers} />
+              <MessageAvatar role="assistant" />
+              <div className="msg-main">
+                <div className="role">Otomo</div>
+                <div className="bubble">
+                  {busy && <AgentLiveStatus steps={liveSteps} startedAt={turnStartRef.current} />}
+                  {/* 流式中面板标记逐字到达后即时嵌入（inline 锚定对打字中的回答同样生效） */}
+                  <AssistantContent content={answer + "▍"} evidence={evidence} handlers={panelHandlers} />
+                </div>
+              </div>
+            </div>
+          )}
+          {backgroundBusy && !answer && (
+            <div className="msg assistant background-generation">
+              <MessageAvatar role="assistant" />
+              <div className="msg-main">
+                <div className="role">Otomo · 后台生成中</div>
+                <div className="bubble">
+                  <AgentLiveStatus
+                    steps={["正在后台继续处理，完成后自动同步到这里"]}
+                    startedAt={Number(activeSession?.activity_started_at || 0) * 1000}
+                  />
+                </div>
               </div>
             </div>
           )}
@@ -1589,7 +1754,7 @@ export default function Home() {
               className="composer-icon"
               title={`上传截图（最多 ${MAX_IMAGES} 张）`}
               onClick={() => fileInputRef.current?.click()}
-              disabled={busy || remoteBusy || pendingImages.length >= MAX_IMAGES}
+              disabled={busy || backgroundBusy || pendingImages.length >= MAX_IMAGES}
             >
               <ImagePlus size={19} />
             </button>
@@ -1599,12 +1764,12 @@ export default function Home() {
               placeholder="例：白色相簿2 里 冬马和纱 的声优还配过哪些番？"
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && send()}
-              disabled={busy || remoteBusy}
+              disabled={busy || backgroundBusy}
             />
             {busy ? (
               <button className="composer-send stop-button" onClick={stopGeneration} title="停止本轮生成"><Square size={17} /></button>
             ) : (
-              <button className="composer-send" onClick={() => send()} title="发送" disabled={remoteBusy}><Send size={18} /></button>
+              <button className="composer-send" onClick={() => send()} title="发送" disabled={backgroundBusy}><Send size={18} /></button>
             )}
           </div>
           {uploadNotice && (

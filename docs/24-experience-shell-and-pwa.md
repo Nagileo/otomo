@@ -8,6 +8,7 @@
 2. 通知、保存视图和清单按 Bangumi OAuth 用户隔离，并可跨设备恢复。
 3. PWA 只缓存应用壳和公开静态资源，绝不缓存带 Cookie 的私人 API 响应。
 4. Web Push 使用长期固定的 VAPID 密钥；浏览器 endpoint 按 OAuth 用户隔离，过期 endpoint 自动清理。
+5. 访客统计不保存原始 IP；累计访客按随机浏览器会话的不可逆哈希长期去重，页面级明细最多保留 48 小时，长期页面数据只保留聚合计数。
 
 ## 信息架构
 
@@ -16,7 +17,8 @@
 - 追番快捷抽屉：复用 `/today`，允许查看今日/落后条目，并经过二次确认写回下一集。
 - 比较托盘：最多保留 3 个条目，调用统一的 `compare_subjects` 产品接口；刷新页面后仍保留候选。
 - 工作区：保存发现页筛选条件，维护跨媒介自定义清单；数据由 SQLite 按用户持久化。
-- 任务中心：记录产品请求的运行、成功、失败和因刷新中断状态；失败任务可回到原页面重试。
+- 任务中心：记录产品请求的运行、成功与失败；对话由服务端独立 Chat Run 执行，页面断开后重进可订阅同一 run 并回放事件。
+- 同好留言：独立 `/community` 页面展示公开留言与聚合访客脉搏；发布需 Bangumi 登录，展示真实头像并链接主页；作者可删除，登录用户可举报，配置的管理员可治理。
 
 ## 外观系统
 
@@ -32,6 +34,9 @@
 - `GET /product/inbox`、`PATCH /product/inbox/{id}`、`POST /product/inbox/read-all`：通知读取状态。
 - `/workspace/views`：保存、列出、删除命名视图。
 - `/workspace/lists` 与 `/workspace/lists/{id}/items`：自定义清单与条目管理。
+- `POST /chat`：创建服务端独立 Chat Run 并立即返回可断开的 SSE 订阅；断开不会取消执行。
+- `GET /chat/runs/{run_id}/events`、`POST /chat/runs/{run_id}/cancel`：事件回放/重连与显式停止。
+- `/community`、`/community/comments`、`/community/comments/{id}/reports`：聚合统计、公开留言和举报治理。
 
 所有写接口要求 OAuth 登录与 CSRF；工作区记录使用 `owner_key=user:<username>` 隔离。
 
@@ -51,3 +56,4 @@
 - inbox 已读状态跨刷新保留；未登录用户看不到私人数据。
 - 比较托盘最多 3 项，能渲染现有 CompareSubjectsPanel。
 - service worker 不缓存任何私人 API JSON。
+- 对话流断开后服务端任务继续；重进同一会话会恢复运行状态并回放仍在缓冲区的过程，完成答案和轨迹从 SQLite 恢复。

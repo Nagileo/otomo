@@ -45,6 +45,7 @@ class BangumiToken(BaseModel):
     expires_at: float = 0.0
     user_id: int | None = None
     username: str = ""
+    avatar_url: str = ""
     status: str = "active"
     last_error: str = ""
     updated_at: str = ""
@@ -59,6 +60,7 @@ class AuthIdentity(BaseModel):
     authenticated: bool = False
     username: str = ""
     user_id: int | None = None
+    avatar_url: str = ""
     token_status: str = ""
     auth_error: str = ""
 
@@ -73,6 +75,13 @@ class AuthSession(BaseModel):
     @property
     def expired(self) -> bool:
         return bool(self.expires_at) and time.time() > self.expires_at
+
+
+def avatar_url_from_profile(profile: dict[str, Any]) -> str:
+    avatar = profile.get("avatar") or {}
+    if not isinstance(avatar, dict):
+        return ""
+    return str(avatar.get("large") or avatar.get("medium") or avatar.get("small") or "")
 
 
 class TokenCipher:
@@ -398,6 +407,7 @@ class AuthStore:
             authenticated=True,
             username=token.username,
             user_id=token.user_id,
+            avatar_url=token.avatar_url,
             token_status=token.status,
             auth_error=token.last_error,
         )
@@ -487,6 +497,7 @@ async def exchange_oauth_code(auth_store: AuthStore, code: str, state_value: str
     async with BangumiClient(token=token.access_token) as bgm:
         me = await bgm.get_me()
     token.username = str(me.get("username") or token.user_id or "")
+    token.avatar_url = avatar_url_from_profile(me)
     if me.get("id") is not None:
         token.user_id = int(me["id"])
     auth_store.save_token(token)

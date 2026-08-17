@@ -102,6 +102,7 @@ class SessionRealtimeHub:
                 activity = self._activities.get((owner, str(row.get("id") or "")))
                 item["running"] = activity is not None
                 if activity is not None:
+                    item["activity_run_id"] = activity.request_id
                     item["activity_surface"] = activity.surface
                     item["activity_started_at"] = activity.started_at
                     item["activity_is_current_device"] = bool(

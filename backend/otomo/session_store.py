@@ -70,6 +70,10 @@ class SessionStore:
                     attachments_json TEXT NOT NULL DEFAULT '[]',
                     evidence_json TEXT NOT NULL DEFAULT '{}',
                     sources_json TEXT NOT NULL DEFAULT '[]',
+                    trace_json TEXT NOT NULL DEFAULT '[]',
+                    steps_json TEXT NOT NULL DEFAULT '[]',
+                    turn_id TEXT NOT NULL DEFAULT '',
+                    elapsed_ms INTEGER,
                     created_at TEXT NOT NULL,
                     FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
                 )
@@ -82,6 +86,17 @@ class SessionStore:
                 conn.execute("ALTER TABLE sessions ADD COLUMN source_label TEXT NOT NULL DEFAULT ''")
             if "revision" not in columns:
                 conn.execute("ALTER TABLE sessions ADD COLUMN revision INTEGER NOT NULL DEFAULT 0")
+            message_columns = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(messages)").fetchall()
+            }
+            if "trace_json" not in message_columns:
+                conn.execute("ALTER TABLE messages ADD COLUMN trace_json TEXT NOT NULL DEFAULT '[]'")
+            if "steps_json" not in message_columns:
+                conn.execute("ALTER TABLE messages ADD COLUMN steps_json TEXT NOT NULL DEFAULT '[]'")
+            if "turn_id" not in message_columns:
+                conn.execute("ALTER TABLE messages ADD COLUMN turn_id TEXT NOT NULL DEFAULT ''")
+            if "elapsed_ms" not in message_columns:
+                conn.execute("ALTER TABLE messages ADD COLUMN elapsed_ms INTEGER")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS session_handoffs (
@@ -251,14 +266,20 @@ class SessionStore:
         attachments: list[dict[str, Any]] | None = None,
         evidence: dict[str, Any] | None = None,
         sources: list[dict[str, Any]] | None = None,
+        trace: list[dict[str, Any]] | None = None,
+        steps: list[str] | None = None,
+        turn_id: str = "",
+        elapsed_ms: int | None = None,
     ) -> None:
         title = content.strip()[:40] if role == "user" else ""
         self.ensure_session(session_id, auth_session_id, title)
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO messages(session_id, role, content, attachments_json, evidence_json, sources_json, created_at)
-                VALUES(?,?,?,?,?,?,?)
+                INSERT INTO messages(
+                    session_id, role, content, attachments_json, evidence_json, sources_json,
+                    trace_json, steps_json, turn_id, elapsed_ms, created_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     session_id,
@@ -267,6 +288,10 @@ class SessionStore:
                     _json_dump(attachments or []),
                     _json_dump(evidence or {}),
                     _json_dump(sources or []),
+                    _json_dump(trace or []),
+                    _json_dump(steps or []),
+                    turn_id.strip()[:96],
+                    max(0, int(elapsed_ms)) if elapsed_ms is not None else None,
                     _now(),
                 ),
             )
@@ -285,7 +310,11 @@ class SessionStore:
         self._existing_session(session_id, auth_session_id)
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT role, content, attachments_json, evidence_json, sources_json, created_at FROM messages WHERE session_id=? ORDER BY id",
+                """
+                SELECT role, content, attachments_json, evidence_json, sources_json,
+                       trace_json, steps_json, turn_id, elapsed_ms, created_at
+                FROM messages WHERE session_id=? ORDER BY id
+                """,
                 (session_id,),
             ).fetchall()
             session = conn.execute(
@@ -307,6 +336,10 @@ class SessionStore:
                 "attachments": _json_load(row["attachments_json"], []),
                 # per-message evidence：前端 inline 面板锚定需要知道每条回答自己的证据
                 "evidence": ev if isinstance(ev, dict) else {},
+                "trace": _json_load(row["trace_json"], []),
+                "steps": _json_load(row["steps_json"], []),
+                "turn_id": str(row["turn_id"] or ""),
+                "elapsed_ms": int(row["elapsed_ms"]) if row["elapsed_ms"] is not None else None,
                 "created_at": row["created_at"],
             }
             messages.append(msg)
@@ -413,9 +446,11 @@ class SessionStore:
                 """
                 INSERT INTO messages(
                     session_id, role, content, attachments_json,
-                    evidence_json, sources_json, created_at
+                    evidence_json, sources_json, trace_json, steps_json,
+                    turn_id, elapsed_ms, created_at
                 )
-                SELECT ?, role, content, attachments_json, evidence_json, sources_json, created_at
+                SELECT ?, role, content, attachments_json, evidence_json, sources_json,
+                       trace_json, steps_json, turn_id, elapsed_ms, created_at
                 FROM messages WHERE session_id=? ORDER BY id
                 """,
                 (target_id, source["id"]),
@@ -439,10 +474,14 @@ class SessionStore:
                         """
                         INSERT INTO messages(
                             session_id, role, content, attachments_json,
-                            evidence_json, sources_json, created_at
-                        ) VALUES(?,?,?,?,?,?,?)
+                            evidence_json, sources_json, trace_json, steps_json,
+                            turn_id, elapsed_ms, created_at
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
                         """,
-                        (target_id, role, content, "[]", "{}", "[]", created_at),
+                        (
+                            target_id, role, content, "[]", "{}", "[]",
+                            "[]", "[]", "", None, created_at,
+                        ),
                     )
                 count = conn.execute(
                     "SELECT COUNT(*) FROM messages WHERE session_id=?",

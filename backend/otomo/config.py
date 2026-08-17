@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     today_store_path: str = "cache/today_preferences.sqlite3"
     recommendation_event_store_path: str = "cache/recommendation_events.sqlite3"
     workspace_store_path: str = "cache/workspace.sqlite3"
+    community_store_path: str = "cache/community.sqlite3"
+    community_admin_usernames: str = ""
     ltm_store_path: str = "cache/ltm/ltm.sqlite3"
     upload_store_path: str = "cache/uploads"
     observation_dir: str = "cache/observations"

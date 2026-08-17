@@ -50,12 +50,14 @@ def test_auth_identity_from_saved_token(tmp_path):
             refresh_token="refresh",
             user_id=123,
             username="Nagileo",
+            avatar_url="https://lain.bgm.tv/pic/user/l/icon.jpg",
         )
     )
     identity = store.identity("sid")
     assert identity.authenticated
     assert identity.username == "Nagileo"
     assert identity.user_id == 123
+    assert identity.avatar_url.endswith("icon.jpg")
 
 
 def test_auth_logout_deletes_token(tmp_path):

@@ -6,7 +6,7 @@ DEST="${OTOMO_BACKUP_DEST:-}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 OUT="${TMPDIR:-/tmp}/otomo-cache-${STAMP}.tar.gz"
 
-tar -C "$ROOT" -czf "$OUT" cache/ltm cache/auth cache/sessions.sqlite3 cache/sessions.sqlite3-wal cache/sessions.sqlite3-shm 2>/dev/null || \
+tar -C "$ROOT" -czf "$OUT" cache/ltm cache/auth cache/sessions.sqlite3 cache/sessions.sqlite3-wal cache/sessions.sqlite3-shm cache/community.sqlite3 cache/community.sqlite3-wal cache/community.sqlite3-shm 2>/dev/null || \
 tar -C "$ROOT" -czf "$OUT" cache
 
 echo "created $OUT"

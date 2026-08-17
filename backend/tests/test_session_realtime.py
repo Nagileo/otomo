@@ -16,6 +16,7 @@ def test_realtime_hub_rejects_second_writer_and_decorates_device_state():
 
         rows = await hub.decorate_sessions("user:u", [{"id": "s1"}], "device-b")
         assert rows[0]["running"] is True
+        assert rows[0]["activity_run_id"] == "r1"
         assert rows[0]["activity_is_current_device"] is False
 
         await hub.release(first)

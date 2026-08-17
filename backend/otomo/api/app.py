@@ -8,6 +8,7 @@ import asyncio
 from contextlib import asynccontextmanager
 import json
 import logging
+import time
 import uuid
 from typing import Any, AsyncIterator, Literal
 from urllib.parse import urlencode, urlparse
@@ -22,7 +23,16 @@ from sse_starlette.sse import EventSourceResponse
 from ..agent.adaptive import AdaptiveRunner
 from ..agent.compaction import compact_agent_state, restore_state
 from ..agent.contracts import AgentState
-from ..auth import AuthStore, BangumiToken, build_authorization_url, exchange_oauth_code, token_for_session
+from ..auth import (
+    AuthStore,
+    BangumiToken,
+    avatar_url_from_profile,
+    build_authorization_url,
+    exchange_oauth_code,
+    token_for_session,
+)
+from ..chat_runs import ChatRun, ChatRunHub
+from ..community import CommunityStore
 from ..config import settings
 from ..memory import LongTermMemory
 from ..memory.consolidate import now_iso
@@ -47,6 +57,7 @@ from ..recommendation_events import (
 from ..recsys_registry import cf_model_registry
 from ..session_realtime import SessionRealtimeHub
 from ..session_store import SessionStore
+from ..session_trace import step_from_event, trace_item_from_event
 from ..security_context import tenant_scope
 from ..share import CreateShareSnapshotRequest, ShareSnapshot, ShareSnapshotStore
 from ..subscriptions import (
@@ -82,6 +93,7 @@ from ..workspace import (
     WorkspaceListItemRequest,
     WorkspaceStore,
 )
+from .community import router as community_router
 
 log = logging.getLogger("otomo.api")
 
@@ -94,11 +106,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.auth = AuthStore()
     app.state.session_store = SessionStore()
     app.state.session_realtime = SessionRealtimeHub()
+    app.state.chat_runs = ChatRunHub()
     app.state.share_store = ShareSnapshotStore()
     app.state.subscription_store = SubscriptionStore(cipher=app.state.auth.cipher)
     app.state.today_store = TodayPreferenceStore()
     app.state.recommendation_event_store = RecommendationEventStore()
     app.state.workspace_store = WorkspaceStore()
+    app.state.community_store = CommunityStore()
     app.state.subscription_service = SubscriptionService(
         app.state.subscription_store,
         app.state.ltm,
@@ -123,12 +137,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 upload_store.cleanup_expired()  # 上传图片 TTL，防 cache/uploads 无限膨胀
             except Exception:  # noqa: BLE001
                 pass
+            try:
+                await app.state.chat_runs.cleanup()
+            except Exception:  # noqa: BLE001
+                pass
             await asyncio.sleep(24 * 3600)
 
     app.state.session_cleanup_task = asyncio.create_task(_session_cleanup_loop())
     try:
         yield
     finally:
+        await app.state.chat_runs.shutdown()
         app.state.session_cleanup_task.cancel()
         try:
             await app.state.session_cleanup_task
@@ -146,6 +165,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="Otomo Backend", version="0.1.0", lifespan=lifespan)
+app.include_router(community_router)
 
 
 def _cors_origins() -> list[str]:
@@ -158,6 +178,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Otomo-Run-Id"],
 )
 
 
@@ -402,7 +423,15 @@ async def auth_session(
     response: Response,
 ) -> dict[str, Any]:
     session = _ensure_auth_session(request, response)
-    await token_for_session(app.state.auth, session.auth_session_id)
+    token = await token_for_session(app.state.auth, session.auth_session_id)
+    if token is not None and not token.avatar_url:
+        try:
+            async with BangumiClient(token=token.access_token) as bgm:
+                me = await bgm.get_me()
+            token.avatar_url = avatar_url_from_profile(me)
+            app.state.auth.save_token(token)
+        except Exception:  # noqa: BLE001 - avatar backfill must not block the whole product
+            pass
     payload = app.state.auth.identity(session.auth_session_id).model_dump(mode="json")
     payload.pop("auth_session_id", None)
     payload["oauth_configured"] = bool(settings.bangumi_oauth_client_id and settings.bangumi_oauth_client_secret)
@@ -630,6 +659,7 @@ async def dev_token_login(req: dict[str, str], request: Request, response: Respo
         access_token=settings.bangumi_token,
         user_id=int(me["id"]) if me.get("id") is not None else None,
         username=str(me.get("username") or ""),
+        avatar_url=avatar_url_from_profile(me),
     )
     app.state.auth.save_token(token)
     if token.username:
@@ -1133,7 +1163,6 @@ async def chat(req: ChatRequest, request: Request):
     _check_chat_limits(request, session.auth_session_id)
     quota_key = _quota_key(session.auth_session_id, request)
     app.state.quota_store.check(quota_key)
-    begin_usage_ledger()  # 本请求所有 LLM/VLM 调用的真实 token 记到这本账
     identity = app.state.auth.identity(session.auth_session_id)
     authenticated = identity.authenticated
     if req.attachments and not authenticated:
@@ -1188,16 +1217,21 @@ async def chat(req: ChatRequest, request: Request):
             },
         )
 
-    async def event_gen() -> AsyncIterator[dict]:
+    async def execute_run(run: ChatRun) -> None:
+        begin_usage_ledger()  # 后台任务内的全部 LLM/VLM 调用记到同一本账
         meta = {
             "session_id": chat_session_id,
             "runner": req.runner,
             "turn_id": turn_id,
+            "run_id": run.id,
         }
         final_answer = ""
         evidence: dict[str, list[dict[str, Any]]] = {}
         sources: list[dict[str, Any]] = []
         tools_called: list[str] = []
+        stored_trace: list[dict[str, Any]] = []
+        stored_steps: list[str] = []
+        turn_started_at = time.monotonic()
         state: AgentState | None = None
         baseline: AgentState | None = None
         cancelled = False
@@ -1253,10 +1287,18 @@ async def chat(req: ChatRequest, request: Request):
                     session_id=chat_session_id,
                     reason="user_message",
                 )
-                yield {"event": "meta", "data": json.dumps({"type": "meta", **meta}, ensure_ascii=False)}
+                await run.publish("meta", {"type": "meta", **meta})
                 try:
                     with tenant_scope(identity.username, authenticated=authenticated):
                         async for ev in traced_stream(runner, req.message, state, meta):
+                            trace_item = trace_item_from_event(ev)
+                            if trace_item is not None:
+                                stored_trace.append(trace_item)
+                                stored_trace[:] = stored_trace[-200:]
+                            step = step_from_event(ev)
+                            if step and (not stored_steps or stored_steps[-1] != step):
+                                stored_steps.append(step)
+                                stored_steps[:] = stored_steps[-120:]
                             if ev.type == "tool_call":
                                 tools_called.append(ev.name)
                             if ev.type == "observation" and getattr(ev, "data", None):
@@ -1266,12 +1308,24 @@ async def chat(req: ChatRequest, request: Request):
                             elif ev.type == "final":
                                 final_answer = ev.answer
                                 sources = [s.model_dump(mode="json", exclude_none=True) for s in ev.sources]
-                            yield {"event": ev.type, "data": ev.model_dump_json()}
+                            await run.publish(ev.type, ev.model_dump_json())
                 except asyncio.CancelledError:
                     cancelled = True
+                    user_cancelled = run.cancel_reason == "user"
+                    cancellation_text = (
+                        "本轮生成已由用户停止。"
+                        if user_cancelled
+                        else "服务正在重启，本轮生成已中断，请稍后重试。"
+                    )
+                    cancellation_step = "已停止本轮生成" if user_cancelled else "服务重启，本轮生成中断"
+                    cancellation_note = {"kind": "note", "text": cancellation_step}
+                    if not stored_trace or stored_trace[-1] != cancellation_note:
+                        stored_trace.append(cancellation_note)
+                    if not stored_steps or stored_steps[-1] != cancellation_step:
+                        stored_steps.append(cancellation_step)
                     if baseline is not None and not final_answer:
                         restore_state(state, baseline)
-                        final_answer = "本轮生成已由用户停止。"
+                        final_answer = cancellation_text
                         state.messages.extend(
                             [
                                 {"role": "user", "content": req.message},
@@ -1279,6 +1333,14 @@ async def chat(req: ChatRequest, request: Request):
                             ]
                         )
                         state.status = "done"
+                    await run.publish(
+                        "final",
+                        {
+                            "type": "final",
+                            "answer": final_answer or cancellation_text,
+                            "sources": [],
+                        },
+                    )
                     raise
                 finally:
                     if turn_has_attachments:
@@ -1291,6 +1353,10 @@ async def chat(req: ChatRequest, request: Request):
                             content=final_answer,
                             evidence=evidence,
                             sources=sources,
+                            trace=stored_trace,
+                            steps=stored_steps,
+                            turn_id=turn_id,
+                            elapsed_ms=int((time.monotonic() - turn_started_at) * 1000),
                         )
                     if final_answer and not cancelled:
                         try:
@@ -1327,11 +1393,108 @@ async def chat(req: ChatRequest, request: Request):
                     )
         finally:
             await app.state.session_realtime.release(activity)
+            if not lock.locked() and app.state.session_locks.get(lock_key) is lock:
+                app.state.session_locks.pop(lock_key, None)
             await client.aclose()
 
-    response = EventSourceResponse(event_gen())
+    try:
+        run = await app.state.chat_runs.start(
+            turn_id,
+            session_owner,
+            chat_session_id,
+            req.device_id or "web-unknown",
+            execute_run,
+        )
+    except RuntimeError as exc:
+        await app.state.session_realtime.release(activity)
+        await client.aclose()
+        raise HTTPException(status_code=409, detail="这个会话已经有后台任务在运行") from exc
+
+    async def event_stream(after: int = 0) -> AsyncIterator[dict[str, str]]:
+        async for item in run.stream(after):
+            if await request.is_disconnected():
+                break
+            if item is None:
+                yield {
+                    "event": "ping",
+                    "data": json.dumps({"type": "ping", "at": time.time()}),
+                }
+            else:
+                yield {"id": str(item.sequence), "event": item.event, "data": item.data}
+
+    response = EventSourceResponse(event_stream())
+    response.headers["X-Otomo-Run-Id"] = run.id
     _set_auth_cookies(response, session)
     return response
+
+
+@app.get("/chat/runs/{run_id}")
+async def get_chat_run(run_id: str, request: Request, response: Response) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    run = await app.state.chat_runs.get(_session_owner(session.auth_session_id), run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="后台任务不存在或已过期")
+    return {
+        "ok": True,
+        "run": {
+            "id": run.id,
+            "session_id": run.session_id,
+            "status": run.status,
+            "started_at": run.started_at,
+            "finished_at": run.finished_at or None,
+            "error": run.error,
+            "last_sequence": run.sequence,
+        },
+    }
+
+
+@app.get("/chat/runs/{run_id}/events")
+async def stream_chat_run_events(
+    run_id: str,
+    request: Request,
+    after: int = 0,
+) -> EventSourceResponse:
+    session = app.state.auth.get_or_create_session(_auth_session_id(request) or None)
+    run = await app.state.chat_runs.get(_session_owner(session.auth_session_id), run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="后台任务不存在或已过期")
+    header_cursor = request.headers.get("last-event-id", "").strip()
+    if header_cursor.isdigit():
+        after = max(after, int(header_cursor))
+
+    async def replay() -> AsyncIterator[dict[str, str]]:
+        async for item in run.stream(after):
+            if await request.is_disconnected():
+                break
+            if item is None:
+                yield {
+                    "event": "ping",
+                    "data": json.dumps({"type": "ping", "at": time.time()}),
+                }
+            else:
+                yield {"id": str(item.sequence), "event": item.event, "data": item.data}
+
+    stream = EventSourceResponse(replay())
+    _set_auth_cookies(stream, session)
+    return stream
+
+
+@app.post("/chat/runs/{run_id}/cancel")
+async def cancel_chat_run(
+    run_id: str,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    owner = _session_owner(session.auth_session_id)
+    run = await app.state.chat_runs.get(owner, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="后台任务不存在或已过期")
+    if run.terminal:
+        return {"ok": True, "status": run.status}
+    await app.state.chat_runs.cancel(owner, run_id)
+    return {"ok": True, "status": "cancelling"}
 
 
 @app.get("/today")
