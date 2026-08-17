@@ -4,10 +4,17 @@ import asyncio
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
+import pytest
 
 from otomo import config
 from otomo.api.app import _request_client, app
-from otomo.auth import AuthStore, BangumiToken, build_authorization_url
+from otomo.auth import (
+    AuthStore,
+    BangumiToken,
+    avatar_url_from_profile,
+    build_authorization_url,
+    resolve_profile_avatar,
+)
 from otomo.share import CreateShareSnapshotRequest
 
 
@@ -58,6 +65,20 @@ def test_auth_identity_from_saved_token(tmp_path):
     assert identity.username == "Nagileo"
     assert identity.user_id == 123
     assert identity.avatar_url.endswith("icon.jpg")
+
+
+@pytest.mark.asyncio
+async def test_avatar_falls_back_from_me_to_public_profile():
+    class Client:
+        async def get_user(self, username):
+            assert username == "alice"
+            return {"avatar": {"large": "//lain.bgm.tv/pic/user/l/alice.jpg"}}
+
+    assert avatar_url_from_profile({"avatar_url": "http://lain.bgm.tv/pic/user/l/a.jpg"}) == (
+        "https://lain.bgm.tv/pic/user/l/a.jpg"
+    )
+    resolved = await resolve_profile_avatar(Client(), {"username": "alice"})
+    assert resolved == "https://lain.bgm.tv/pic/user/l/alice.jpg"
 
 
 def test_auth_logout_deletes_token(tmp_path):

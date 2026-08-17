@@ -52,7 +52,7 @@ type ImageAttachment = {
   preview_url?: string;
 };
 type PendingImage = { id: string; file: File; preview: string };
-type Msg = { role: "user" | "assistant"; content: string; attachments?: ImageAttachment[]; evidence?: EvidenceMap; turnId?: string; feedback?: "up" | "down"; steps?: string[]; trace?: TraceItem[]; elapsedMs?: number };
+type Msg = { role: "user" | "assistant"; content: string; attachments?: ImageAttachment[]; evidence?: EvidenceMap; sources?: Source[]; turnId?: string; feedback?: "up" | "down"; steps?: string[]; trace?: TraceItem[]; elapsedMs?: number };
 type EvidenceMap = Record<string, Record<string, any>[]>;
 
 // [[panel:tool_name]]：LLM 在正文中锚定证据面板的位置。
@@ -106,16 +106,39 @@ function AssistantContent({
   return <>{nodes}</>;
 }
 
-/** 等待体验：生成中在气泡里滚动当前动作（豆包/Gemini 式"看它思考"）。 */
-function AgentLiveStatus({ steps, startedAt }: { steps: string[]; startedAt: number }) {
+function TraceEntries({ steps, trace }: { steps?: string[]; trace?: TraceItem[] }) {
+  if (trace?.length) return <>
+    {trace.map((item, i) => {
+      if (item.kind === "call") return (
+        <details className="message-trace-call" key={i}>
+          <summary>准备：{friendlyToolName(item.name)}</summary>
+          <pre>{JSON.stringify(item.args, null, 2)}</pre>
+        </details>
+      );
+      if (item.kind === "obs") return <div className={item.ok ? "ok" : "bad"} key={i}>{item.ok ? "✓" : "✗"} {item.summary || friendlyToolName(item.name)}</div>;
+      if (item.kind === "progress") return <div key={i}>↳ {item.summary}{item.note ? ` · ${item.note}` : ""}</div>;
+      return <div key={i}>{item.text}</div>;
+    })}
+  </>;
+  return <ol>{steps?.map((step, i) => <li key={i}>{step}</li>)}</ol>;
+}
+
+/** 生成中的状态也是可展开控件；只展示执行事件，不暴露模型的隐藏思维。 */
+function AgentLiveStatus({ steps, trace, startedAt }: { steps: string[]; trace?: TraceItem[]; startedAt: number }) {
   const latest = steps[steps.length - 1] || "正在理解你的问题…";
   const secs = startedAt ? Math.max(0, Math.round((Date.now() - startedAt) / 1000)) : 0;
   return (
-    <div className="live-status">
-      <span className="live-dot" aria-hidden />
-      <span className="live-text">{latest}</span>
-      <span className="live-clock">{secs}s{steps.length > 1 ? ` · 第 ${steps.length} 步` : ""}</span>
-    </div>
+    <details className="live-status">
+      <summary>
+        <span className="live-dot" aria-hidden />
+        <span className="live-text">{latest}</span>
+        <span className="live-clock">{secs}s{steps.length > 1 ? ` · 第 ${steps.length} 步` : ""}</span>
+        <span className="live-toggle">查看过程</span>
+      </summary>
+      <div className="message-trace live-trace">
+        <TraceEntries steps={steps} trace={trace} />
+      </div>
+    </details>
   );
 }
 
@@ -123,24 +146,12 @@ function AgentLiveStatus({ steps, startedAt }: { steps: string[]; startedAt: num
 function AgentStepsFold({ steps, trace, elapsedMs }: { steps?: string[]; trace?: TraceItem[]; elapsedMs?: number }) {
   if (!steps?.length && !trace?.length) return null;
   const secs = elapsedMs ? Math.round(elapsedMs / 1000) : null;
-  const count = steps?.length || trace?.length || 0;
+  const count = trace?.length || steps?.length || 0;
   return (
     <details className="agent-steps">
       <summary>执行过程 · {secs ? `${secs} 秒` : "已完成"} · {count} 步</summary>
       <div className="message-trace">
-        {trace?.length ? trace.map((item, i) => {
-          if (item.kind === "call") return (
-            <details className="message-trace-call" key={i}>
-              <summary>调用 {item.name}</summary>
-              <pre>{JSON.stringify(item.args, null, 2)}</pre>
-            </details>
-          );
-          if (item.kind === "obs") return <div className={item.ok ? "ok" : "bad"} key={i}>{item.ok ? "✓" : "✗"} {item.summary || item.name}</div>;
-          if (item.kind === "progress") return <div key={i}>↳ {item.summary}{item.note ? ` · ${item.note}` : ""}</div>;
-          return <div key={i}>{item.text}</div>;
-        }) : (
-          <ol>{steps?.map((step, i) => <li key={i}>{step}</li>)}</ol>
-        )}
+        <TraceEntries steps={steps} trace={trace} />
       </div>
     </details>
   );
@@ -266,45 +277,51 @@ function AnswerSupport({ sources, evidence }: { sources: Source[]; evidence: Evi
   if (!sources.length && !summary.length) return null;
   const compactSources = sources.slice(0, 6);
   const visualSources = sources.filter((s) => s.image);
+  const evidenceCount = summary.reduce((total, item) => total + item.count, 0);
+  const countLabel = [
+    compactSources.length ? `${compactSources.length} 个来源` : "",
+    evidenceCount ? `${evidenceCount} 项资料` : "",
+  ].filter(Boolean).join(" · ");
   return (
-    <section className="answer-support">
-      <div className="support-head">
-        <div>
-          <div className="support-title">回答支撑</div>
-          <div className="support-sub">证据优先展示在下方卡片；外链仅作追溯入口</div>
-        </div>
-      </div>
-      {summary.length > 0 && (
-        <div className="support-pills">
-          {summary.map((item) => (
-            <span className="support-pill" key={item.key}>{item.label} {item.count}</span>
-          ))}
-        </div>
-      )}
-      {compactSources.length > 0 && (
-        <div className="source-links">
-          {compactSources.map((s, i) => (
-            <a key={`${s.url}-${i}`} href={s.url} target="_blank" rel="noreferrer" title={s.title}>
-              <span>{s.source || sourceHost(s.url) || "source"}</span>
-              {s.title}
-            </a>
-          ))}
-        </div>
-      )}
-      {visualSources.length > 0 && (
-        <details className="source-detail">
-          <summary>查看相关图片卡片（{visualSources.length}）</summary>
-          <div className="src-cards compact">
-            {visualSources.map((s, i) => (
-              <a key={`${s.url}-${i}`} className="src-card" href={s.url} target="_blank" rel="noreferrer" title={s.title}>
-                <img src={s.image} alt="" loading="lazy" />
-                <span className="src-title">{s.title}</span>
+    <details className="answer-support">
+      <summary className="support-summary">
+        <span><strong>回答依据</strong><small>{countLabel}</small></span>
+        <i aria-hidden>⌄</i>
+      </summary>
+      <div className="support-body">
+        <p>这里是这条回答参考的资料，需要时再展开核对。</p>
+        {summary.length > 0 && (
+          <div className="support-pills">
+            {summary.map((item) => (
+              <span className="support-pill" key={item.key}>{item.label} {item.count}</span>
+            ))}
+          </div>
+        )}
+        {compactSources.length > 0 && (
+          <div className="source-links">
+            {compactSources.map((s, i) => (
+              <a key={`${s.url}-${i}`} href={s.url} target="_blank" rel="noreferrer" title={s.title}>
+                <span>{s.source || sourceHost(s.url) || "来源"}</span>
+                {s.title}
               </a>
             ))}
           </div>
-        </details>
-      )}
-    </section>
+        )}
+        {visualSources.length > 0 && (
+          <details className="source-detail">
+            <summary>相关图片（{visualSources.length}）</summary>
+            <div className="src-cards compact">
+              {visualSources.map((s, i) => (
+                <a key={`${s.url}-${i}`} className="src-card" href={s.url} target="_blank" rel="noreferrer" title={s.title}>
+                  <img src={s.image} alt="" loading="lazy" />
+                  <span className="src-title">{s.title}</span>
+                </a>
+              ))}
+            </div>
+          </details>
+        )}
+      </div>
+    </details>
   );
 }
 
@@ -428,6 +445,7 @@ export default function Home() {
   const runTraceRef = useRef<TraceItem[]>([]);
   const [answer, setAnswer] = useState("");
   const [sources, setSources] = useState<Source[]>([]);
+  const sourcesRef = useRef<Source[]>([]);
   const [evidence, setEvidence] = useState<EvidenceMap>({});
   const [spoiler, setSpoiler] = useState<SpoilerState | null>(null);
   const [memory, setMemory] = useState<MemoryState | null>(null);
@@ -630,6 +648,7 @@ export default function Home() {
       })),
       // per-message evidence：恢复历史会话时 inline 面板照常锚定
       evidence: row.evidence && typeof row.evidence === "object" ? row.evidence : undefined,
+      sources: list(row.sources) as Source[],
       trace: list(row.trace) as TraceItem[],
       steps: list(row.steps).map((step) => String(step)),
       turnId: String(row.turn_id || "") || undefined,
@@ -659,7 +678,8 @@ export default function Home() {
       const restoredMessages = normalizeRestoredMessages(payload.messages);
       setMessages(restoredMessages);
       setEvidence(payload.evidence || {});
-      setSources(list(payload.sources));
+      sourcesRef.current = list(payload.sources) as Source[];
+      setSources(sourcesRef.current);
       const shortTerm = payload.state?.short_term || {};
       setSpoiler(shortTerm.spoiler || null);
       setMemory(shortTerm.memory || null);
@@ -830,6 +850,7 @@ export default function Home() {
     setTrace([]);
     runTraceRef.current = [];
     setSources([]);
+    sourcesRef.current = [];
     setEvidence({});
     evidenceRef.current = {};
     setFollowups([]);
@@ -923,6 +944,7 @@ export default function Home() {
         const turnEvidence = evidenceRef.current;
         setMessages((m) => [...m, {
           role: "assistant", content: final, evidence: turnEvidence, turnId: turnIdRef.current || undefined,
+          sources: sourcesRef.current.length ? sourcesRef.current : undefined,
           steps: liveStepsRef.current.length ? liveStepsRef.current : undefined,
           trace: runTraceRef.current.length ? runTraceRef.current : undefined,
           elapsedMs: turnStartRef.current ? Date.now() - turnStartRef.current : undefined,
@@ -1348,7 +1370,8 @@ export default function Home() {
         setAnswer(answerRef.current);
         break;
       case "final":
-        setSources(ev.sources ?? []);
+        sourcesRef.current = list(ev.sources) as Source[];
+        setSources(sourcesRef.current);
         if (ev.answer) {
           receivedFinalRef.current = true;
           answerRef.current = ev.answer; // 以最终完整答案为准，覆盖流式残留（如泄漏被截断的片段）
@@ -1373,6 +1396,7 @@ export default function Home() {
     setTrace([]);
     runTraceRef.current = [];
     setSources([]);
+    sourcesRef.current = [];
     setEvidence({});
     evidenceRef.current = {};
     setSpoiler(null);
@@ -1642,6 +1666,7 @@ export default function Home() {
                   <div className="bubble">
                     <AgentStepsFold steps={m.steps} trace={m.trace} elapsedMs={m.elapsedMs} />
                     <AssistantContent content={m.content} evidence={m.evidence} handlers={panelHandlers} />
+                    <AnswerSupport sources={m.sources || []} evidence={m.evidence || {}} />
                     {m.turnId && (
                       <div className="answer-feedback">
                         <button className={`fb-btn ${m.feedback === "up" ? "on" : ""}`} title="这条回答不错"
@@ -1664,24 +1689,16 @@ export default function Home() {
               </div>
             </div>
           ))}
-          {busy && !answer && (
-            <div className="msg assistant">
-              <MessageAvatar role="assistant" />
-              <div className="msg-main">
-                <div className="role">Otomo</div>
-                <div className="bubble"><AgentLiveStatus steps={liveSteps} startedAt={turnStartRef.current} /></div>
-              </div>
-            </div>
-          )}
-          {answer && (
+          {(busy || answer) && (
             <div className="msg assistant">
               <MessageAvatar role="assistant" />
               <div className="msg-main">
                 <div className="role">Otomo</div>
                 <div className="bubble">
-                  {busy && <AgentLiveStatus steps={liveSteps} startedAt={turnStartRef.current} />}
+                  {busy && <AgentLiveStatus steps={liveSteps} trace={trace} startedAt={turnStartRef.current} />}
                   {/* 流式中面板标记逐字到达后即时嵌入（inline 锚定对打字中的回答同样生效） */}
-                  <AssistantContent content={answer + "▍"} evidence={evidence} handlers={panelHandlers} />
+                  {answer ? <AssistantContent content={answer + "▍"} evidence={evidence} handlers={panelHandlers} /> : null}
+                  {answer ? <AnswerSupport sources={sources} evidence={evidence} /> : null}
                 </div>
               </div>
             </div>
@@ -1700,7 +1717,6 @@ export default function Home() {
               </div>
             </div>
           )}
-          <AnswerSupport sources={sources} evidence={evidence} />
           {hasEvidence && evidenceMode === "dev" && (
             <div className="evidence-toolbar">
               <div>

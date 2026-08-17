@@ -330,12 +330,14 @@ class SessionStore:
         sources: list[dict[str, Any]] = []
         for row in rows:
             ev = _json_load(row["evidence_json"], {})
+            message_sources = _json_load(row["sources_json"], [])
             msg = {
                 "role": row["role"],
                 "content": row["content"],
                 "attachments": _json_load(row["attachments_json"], []),
                 # per-message evidence：前端 inline 面板锚定需要知道每条回答自己的证据
                 "evidence": ev if isinstance(ev, dict) else {},
+                "sources": message_sources if isinstance(message_sources, list) else [],
                 "trace": _json_load(row["trace_json"], []),
                 "steps": _json_load(row["steps_json"], []),
                 "turn_id": str(row["turn_id"] or ""),
@@ -347,9 +349,8 @@ class SessionStore:
                 for key, values in ev.items():
                     if isinstance(values, list):
                         evidence.setdefault(key, []).extend(values)
-            src = _json_load(row["sources_json"], [])
-            if isinstance(src, list):
-                sources.extend(x for x in src if isinstance(x, dict))
+            if isinstance(message_sources, list):
+                sources.extend(x for x in message_sources if isinstance(x, dict))
         return {
             "session": {k: v for k, v in dict(session).items() if k != "state_json"} if session else {"id": session_id},
             "state": _json_load(session["state_json"], {}) if session else {},

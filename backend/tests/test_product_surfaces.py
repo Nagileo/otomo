@@ -216,11 +216,22 @@ def test_workspace_friends_are_account_scoped_and_feed_product_pulse(tmp_path, m
             )],
         ))
 
+    async def fake_fetch_friends(username, limit):
+        from otomo.tools.user_analysis.tool import FriendBrief
+
+        assert username == "alice"
+        assert limit == 200
+        return [
+            FriendBrief(username="bob", nickname="测试好友", url="https://bgm.tv/user/bob"),
+            FriendBrief(username="carol", nickname="另一位好友", url="https://bgm.tv/user/carol"),
+        ], "https://bgm.tv/user/alice/friends"
+
     monkeypatch.setattr("otomo.api.app.BangumiClient.get_user", fake_get_user)
     monkeypatch.setattr(
         "otomo.api.app.BangumiClient.get_all_user_collections", fake_collections,
     )
     monkeypatch.setattr("otomo.api.app.CompareUserTasteTool.run", fake_compare)
+    monkeypatch.setattr("otomo.api.app._fetch_friends", fake_fetch_friends)
     with TestClient(app) as client:
         assert client.get("/workspace/friends").status_code == 401
         _session_id, csrf = _login(client)
@@ -244,10 +255,38 @@ def test_workspace_friends_are_account_scoped_and_feed_product_pulse(tmp_path, m
         assert detail.json()["data"]["watching"][0]["ep_status"] == 4
         assert client.get("/product/friends/not-saved").status_code == 404
 
+        preview = client.get("/workspace/friends/import")
+        assert preview.status_code == 200
+        assert preview.json()["data"] == [
+            {
+                "username": "bob", "nickname": "测试好友",
+                "url": "https://bgm.tv/user/bob", "saved": True,
+            },
+            {
+                "username": "carol", "nickname": "另一位好友",
+                "url": "https://bgm.tv/user/carol", "saved": False,
+            },
+        ]
+        assert client.post(
+            "/workspace/friends/import", headers={"x-otomo-csrf": csrf},
+        ).status_code == 422
+        imported = client.post(
+            "/workspace/friends/import",
+            headers={"x-otomo-csrf": csrf},
+            json={"usernames": ["carol"]},
+        )
+        assert imported.status_code == 200
+        assert imported.json()["imported"] == 1
+
         deleted = client.delete(
             "/workspace/friends/bob", headers={"x-otomo-csrf": csrf},
         )
         assert deleted.status_code == 200
+        assert [row["username"] for row in client.get("/workspace/friends").json()["data"]] == [
+            "carol",
+        ]
+        cleared = client.delete("/workspace/friends", headers={"x-otomo-csrf": csrf})
+        assert cleared.json()["deleted"] == 1
         assert client.get("/workspace/friends").json()["data"] == []
 
 

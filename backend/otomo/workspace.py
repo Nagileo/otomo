@@ -64,6 +64,10 @@ class WorkspaceFriend(WorkspaceFriendCreate):
     updated_at: str
 
 
+class WorkspaceFriendImportRequest(BaseModel):
+    usernames: list[str] = Field(..., min_length=1, max_length=200)
+
+
 def _dump(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
@@ -259,6 +263,11 @@ class WorkspaceStore:
                 (owner_key, normalized),
             )
         return cur.rowcount > 0
+
+    def clear_friends(self, owner_key: str) -> int:
+        with self._connect() as conn:
+            cur = conn.execute("DELETE FROM workspace_friends WHERE owner_key=?", (owner_key,))
+        return max(cur.rowcount, 0)
 
     @staticmethod
     def _view(row: sqlite3.Row) -> SavedView:

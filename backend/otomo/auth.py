@@ -78,10 +78,38 @@ class AuthSession(BaseModel):
 
 
 def avatar_url_from_profile(profile: dict[str, Any]) -> str:
-    avatar = profile.get("avatar") or {}
-    if not isinstance(avatar, dict):
+    avatar = profile.get("avatar") or profile.get("avatars") or {}
+    if isinstance(avatar, dict):
+        raw = str(avatar.get("large") or avatar.get("medium") or avatar.get("small") or "")
+    else:
+        raw = ""
+    if not raw:
+        raw = str(profile.get("avatar_url") or "")
+    if raw.startswith("//"):
+        return f"https:{raw}"
+    if raw.startswith("http://lain.bgm.tv/"):
+        return f"https://{raw.removeprefix('http://')}"
+    return raw
+
+
+async def resolve_profile_avatar(client: BangumiClient, profile: dict[str, Any]) -> str:
+    """Resolve the avatar from /me, falling back to the public user profile.
+
+    Bangumi's OAuth ``/v0/me`` response does not consistently include the
+    avatar object, while ``/v0/users/{username}`` does.  Avatar lookup is
+    presentation-only, so a public-profile failure must never break login.
+    """
+    direct = avatar_url_from_profile(profile)
+    if direct:
+        return direct
+    username = str(profile.get("username") or "").strip()
+    if not username:
         return ""
-    return str(avatar.get("large") or avatar.get("medium") or avatar.get("small") or "")
+    try:
+        public_profile = await client.get_user(username)
+    except Exception:  # noqa: BLE001 - an avatar must not make auth unavailable
+        return ""
+    return avatar_url_from_profile(public_profile)
 
 
 class TokenCipher:
@@ -496,8 +524,9 @@ async def exchange_oauth_code(auth_store: AuthStore, code: str, state_value: str
     )
     async with BangumiClient(token=token.access_token) as bgm:
         me = await bgm.get_me()
+        avatar_url = await resolve_profile_avatar(bgm, me)
     token.username = str(me.get("username") or token.user_id or "")
-    token.avatar_url = avatar_url_from_profile(me)
+    token.avatar_url = avatar_url
     if me.get("id") is not None:
         token.user_id = int(me["id"])
     auth_store.save_token(token)

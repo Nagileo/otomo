@@ -26,9 +26,9 @@ from ..agent.contracts import AgentState
 from ..auth import (
     AuthStore,
     BangumiToken,
-    avatar_url_from_profile,
     build_authorization_url,
     exchange_oauth_code,
+    resolve_profile_avatar,
     token_for_session,
 )
 from ..chat_runs import ChatRun, ChatRunHub
@@ -89,6 +89,7 @@ from ..tools.user_analysis.tool import CompareUserTasteTool, TasteCompareArgs, _
 from ..workspace import (
     SavedViewCreate,
     WorkspaceFriendCreate,
+    WorkspaceFriendImportRequest,
     WorkspaceListCreate,
     WorkspaceListItemRequest,
     WorkspaceStore,
@@ -428,8 +429,9 @@ async def auth_session(
         try:
             async with BangumiClient(token=token.access_token) as bgm:
                 me = await bgm.get_me()
-            token.avatar_url = avatar_url_from_profile(me)
-            app.state.auth.save_token(token)
+                token.avatar_url = await resolve_profile_avatar(bgm, me)
+            if token.avatar_url:
+                app.state.auth.save_token(token)
         except Exception:  # noqa: BLE001 - avatar backfill must not block the whole product
             pass
     payload = app.state.auth.identity(session.auth_session_id).model_dump(mode="json")
@@ -652,6 +654,7 @@ async def dev_token_login(req: dict[str, str], request: Request, response: Respo
     try:
         async with BangumiClient(token=settings.bangumi_token) as bgm:
             me = await bgm.get_me()
+            avatar_url = await resolve_profile_avatar(bgm, me)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=f"BANGUMI_TOKEN 验证失败：{type(e).__name__}: {str(e)[:160]}") from e
     token = BangumiToken(
@@ -659,7 +662,7 @@ async def dev_token_login(req: dict[str, str], request: Request, response: Respo
         access_token=settings.bangumi_token,
         user_id=int(me["id"]) if me.get("id") is not None else None,
         username=str(me.get("username") or ""),
-        avatar_url=avatar_url_from_profile(me),
+        avatar_url=avatar_url,
     )
     app.state.auth.save_token(token)
     if token.username:
@@ -1944,8 +1947,45 @@ async def upsert_workspace_friend(
     return {"ok": True, "data": row.model_dump(mode="json")}
 
 
+@app.delete("/workspace/friends")
+async def clear_workspace_friends(request: Request, response: Response) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    deleted = app.state.workspace_store.clear_friends(
+        _workspace_owner(session.auth_session_id),
+    )
+    return {"ok": True, "deleted": deleted, "data": []}
+
+
+@app.get("/workspace/friends/import")
+async def preview_workspace_friend_import(
+    request: Request, response: Response,
+) -> dict[str, Any]:
+    """Preview Bangumi friends without mutating the Otomo follow list."""
+    session = _ensure_auth_session(request, response)
+    identity = _authenticated_identity(session.auth_session_id)
+    try:
+        friends, source_url = await _fetch_friends(identity.username, 200)
+    except Exception as exc:  # noqa: BLE001 - external HTML source may change
+        raise HTTPException(status_code=502, detail=f"Bangumi 好友页读取失败：{type(exc).__name__}") from exc
+    saved = {
+        row.username.lower()
+        for row in app.state.workspace_store.list_friends(_workspace_owner(session.auth_session_id))
+    }
+    return {
+        "ok": True,
+        "data": [
+            {**friend.model_dump(mode="json"), "saved": friend.username.lower() in saved}
+            for friend in friends
+        ],
+        "source_url": source_url,
+    }
+
+
 @app.post("/workspace/friends/import")
-async def import_workspace_friends(request: Request, response: Response) -> dict[str, Any]:
+async def import_workspace_friends(
+    req: WorkspaceFriendImportRequest, request: Request, response: Response,
+) -> dict[str, Any]:
     session = _ensure_auth_session(request, response)
     _require_csrf(request, session.auth_session_id)
     identity = _authenticated_identity(session.auth_session_id)
@@ -1953,14 +1993,21 @@ async def import_workspace_friends(request: Request, response: Response) -> dict
         friends, source_url = await _fetch_friends(identity.username, 200)
     except Exception as exc:  # noqa: BLE001 - external HTML source may change
         raise HTTPException(status_code=502, detail=f"Bangumi 好友页读取失败：{type(exc).__name__}") from exc
+    selected = {name.strip().lstrip("@").lower() for name in req.usernames}
+    matched = [friend for friend in friends if friend.username.lower() in selected]
+    if not matched:
+        raise HTTPException(status_code=400, detail="没有选中可导入的 Bangumi 好友")
+    owner = _workspace_owner(session.auth_session_id)
+    previously_saved = {row.username.lower() for row in app.state.workspace_store.list_friends(owner)}
     rows = app.state.workspace_store.import_friends(
-        _workspace_owner(session.auth_session_id),
-        [WorkspaceFriendCreate(username=x.username, nickname=x.nickname) for x in friends],
+        owner,
+        [WorkspaceFriendCreate(username=x.username, nickname=x.nickname) for x in matched],
     )
     return {
         "ok": True,
         "data": [x.model_dump(mode="json") for x in rows],
-        "imported": len(friends),
+        "imported": sum(1 for friend in matched if friend.username.lower() not in previously_saved),
+        "selected": len(matched),
         "source_url": source_url,
     }
 

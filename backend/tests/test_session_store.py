@@ -40,6 +40,7 @@ def test_session_store_persists_messages_evidence_and_state(tmp_path):
     assert restored["evidence"]["get_broadcast_calendar"][0]["count"] == 1
     assert restored["sources"][0]["title"] == "动画A"
     assistant = restored["messages"][1]
+    assert assistant["sources"][0]["title"] == "动画A"
     assert assistant["trace"][0]["name"] == "get_broadcast_calendar"
     assert assistant["steps"] == ["规划：查询今日放送", "✓ 查到今日放送"]
     assert assistant["turn_id"] == "turn-1"
