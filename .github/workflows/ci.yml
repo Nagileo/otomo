@@ -71,9 +71,9 @@ jobs:
       - name: Install recommendation tests
         run: |
           pip install -e . --no-deps
-          pip install pandas numpy scipy httpx pytest ruff
+          pip install pandas numpy scipy httpx pytest 'ruff==0.15.18'
       - name: Lint recommendation pipeline
-        run: ruff check recsys_offline tests
+        run: ruff check --output-format=github recsys_offline tests
       - name: Run recommendation tests
         run: pytest
 

@@ -17,6 +17,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    # Keep lint semantics aligned with backend CI; unpinned Ruff releases can
+    # enable new rule families and turn unchanged training code red overnight.
+    "ruff==0.15.18",
 ]
 
 [build-system]
