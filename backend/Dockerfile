@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.12-slim AS core
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -21,10 +21,16 @@ RUN pip install --upgrade pip \
 # ② 再装核心依赖 + 本地包（改代码只重跑这两步，都很快）
 COPY pyproject.toml ./
 COPY otomo ./otomo
-RUN pip install -e ".[rag,discord,obs,browser,asr,pixiv]" \
+RUN pip install -e ".[rag,discord,obs,browser]" \
     && playwright install --with-deps chromium \
     && rm -rf /var/lib/apt/lists/*
 
 EXPOSE 8000
 
 CMD ["uvicorn", "otomo.api.app:app", "--host", "0.0.0.0", "--port", "8000"]
+
+# Optional workstation image. Production API/scheduler/Discord use the core
+# target, so local speech recognition and Pixiv dependencies do not bloat every
+# deployment pull. Build explicitly with --target full when those features are needed.
+FROM core AS full
+RUN pip install -e ".[asr,pixiv]"

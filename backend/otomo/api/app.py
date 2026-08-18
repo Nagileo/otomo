@@ -21,11 +21,13 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from ..agent.adaptive import AdaptiveRunner
+from ..agent._common import tool_progress_channel
 from ..agent.compaction import compact_agent_state, restore_state
 from ..agent.contracts import AgentState
 from ..auth import (
     AuthStore,
     BangumiToken,
+    avatar_url_from_profile,
     build_authorization_url,
     exchange_oauth_code,
     resolve_profile_avatar,
@@ -108,6 +110,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.session_store = SessionStore()
     app.state.session_realtime = SessionRealtimeHub()
     app.state.chat_runs = ChatRunHub()
+    app.state.recommendation_runs = ChatRunHub()
     app.state.share_store = ShareSnapshotStore()
     app.state.subscription_store = SubscriptionStore(cipher=app.state.auth.cipher)
     app.state.today_store = TodayPreferenceStore()
@@ -142,6 +145,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 await app.state.chat_runs.cleanup()
             except Exception:  # noqa: BLE001
                 pass
+            try:
+                await app.state.recommendation_runs.cleanup()
+            except Exception:  # noqa: BLE001
+                pass
             await asyncio.sleep(24 * 3600)
 
     app.state.session_cleanup_task = asyncio.create_task(_session_cleanup_loop())
@@ -149,6 +156,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         await app.state.chat_runs.shutdown()
+        await app.state.recommendation_runs.shutdown()
         app.state.session_cleanup_task.cancel()
         try:
             await app.state.session_cleanup_task
@@ -1593,6 +1601,146 @@ async def product_recommendations(
         await client.aclose()
 
 
+@app.post("/recommendations/runs")
+async def start_recommendation_run(
+    req: RecommendArgs,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    """Start a replayable recommendation run so navigation does not abort it."""
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    _product_rate_limit(request, session.auth_session_id, "recommend")
+    identity = app.state.auth.identity(session.auth_session_id)
+    owner = _session_owner(session.auth_session_id)
+    args = req.model_copy(update={
+        "username": identity.username if identity.authenticated else None,
+    })
+    run_id = uuid.uuid4().hex
+
+    async def execute_run(run: ChatRun) -> None:
+        # Let the POST response return with a run id before any synchronous
+        # candidate preparation inside RecommendTool gets CPU time.
+        await asyncio.sleep(0.05)
+        client = await _request_client(app, session.auth_session_id)
+        progress_queue = asyncio.Queue()
+        await run.publish("progress", {
+            "type": "progress", "tool": "recommend_subjects",
+            "summary": "准备个性化候选与本轮约束", "current": 0, "total": 6,
+        })
+        try:
+            with tenant_scope(identity.username, authenticated=identity.authenticated):
+                with tool_progress_channel(progress_queue):
+                    task = asyncio.create_task(RecommendTool(
+                        client,
+                        app.state.ltm,
+                        event_store=app.state.recommendation_event_store,
+                    ).run(args))
+                    try:
+                        while not task.done():
+                            try:
+                                event = await asyncio.wait_for(progress_queue.get(), timeout=0.15)
+                                await run.publish("progress", event.model_dump(mode="json", exclude_none=True))
+                            except asyncio.TimeoutError:
+                                pass
+                        result = await task
+                        while not progress_queue.empty():
+                            event = progress_queue.get_nowait()
+                            await run.publish("progress", event.model_dump(mode="json", exclude_none=True))
+                    except asyncio.CancelledError:
+                        if not task.done():
+                            task.cancel()
+                            await asyncio.gather(task, return_exceptions=True)
+                        await run.publish("cancelled", {
+                            "type": "cancelled", "message": "本轮推荐已停止，未完成结果不会展示。",
+                        })
+                        raise
+            if not result.ok:
+                raise RuntimeError(result.error or "推荐生成失败")
+            await run.publish("final", {
+                "type": "final",
+                "data": result.data.model_dump(mode="json", exclude_none=True) if result.data else None,
+            })
+        finally:
+            await client.aclose()
+
+    try:
+        run = await app.state.recommendation_runs.start(
+            run_id, owner, "discover", "web", execute_run,
+        )
+    except RuntimeError as exc:
+        active = await app.state.recommendation_runs.active_for_session(owner, "discover")
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "recommendation_busy",
+                "message": "已有一轮推荐在后台运行，请等待完成或先停止上一轮。",
+                "run_id": active.id if active else "",
+            },
+        ) from exc
+    return {"ok": True, "run": {"id": run.id, "status": run.status}}
+
+
+@app.get("/recommendations/runs/{run_id}")
+async def get_recommendation_run(
+    run_id: str, request: Request, response: Response,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    run = await app.state.recommendation_runs.get(_session_owner(session.auth_session_id), run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="推荐任务不存在、已过期或服务已重启")
+    return {"ok": True, "run": {
+        "id": run.id,
+        "status": run.status,
+        "started_at": run.started_at,
+        "finished_at": run.finished_at or None,
+        "error": run.error,
+        "last_sequence": run.sequence,
+    }}
+
+
+@app.get("/recommendations/runs/{run_id}/events")
+async def stream_recommendation_run_events(
+    run_id: str, request: Request, after: int = 0,
+) -> EventSourceResponse:
+    session = app.state.auth.get_or_create_session(_auth_session_id(request) or None)
+    run = await app.state.recommendation_runs.get(_session_owner(session.auth_session_id), run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="推荐任务不存在、已过期或服务已重启")
+    header_cursor = request.headers.get("last-event-id", "").strip()
+    if header_cursor.isdigit():
+        after = max(after, int(header_cursor))
+
+    async def replay() -> AsyncIterator[dict[str, str]]:
+        async for item in run.stream(after):
+            if await request.is_disconnected():
+                break
+            if item is None:
+                yield {"event": "ping", "data": json.dumps({"type": "ping", "at": time.time()})}
+            else:
+                yield {"id": str(item.sequence), "event": item.event, "data": item.data}
+
+    stream = EventSourceResponse(replay())
+    _set_auth_cookies(stream, session)
+    return stream
+
+
+@app.post("/recommendations/runs/{run_id}/cancel")
+async def cancel_recommendation_run(
+    run_id: str, request: Request, response: Response,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    owner = _session_owner(session.auth_session_id)
+    run = await app.state.recommendation_runs.get(owner, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="推荐任务不存在或已过期")
+    if run.terminal:
+        return {"ok": True, "status": run.status}
+    await app.state.recommendation_runs.cancel(owner, run_id)
+    return {"ok": True, "status": "cancelling"}
+
+
 @app.get("/product/library")
 async def product_library(
     request: Request,
@@ -1929,9 +2077,11 @@ async def upsert_workspace_friend(
     if req.username.strip().lstrip("@").lower() == str(identity.username or "").lower():
         raise HTTPException(status_code=400, detail="不能把自己加入好友关注名单")
     client = await _request_client(app, session.auth_session_id)
+    avatar_url = ""
     try:
         try:
             profile = await client.get_user(req.username.strip().lstrip("@"))
+            avatar_url = avatar_url_from_profile(profile)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
                 raise HTTPException(status_code=404, detail="没有找到这个 Bangumi 用户") from exc
@@ -1944,7 +2094,7 @@ async def upsert_workspace_friend(
     nickname = req.nickname or str(profile.get("nickname") or "")
     row = app.state.workspace_store.upsert_friend(
         _workspace_owner(session.auth_session_id),
-        WorkspaceFriendCreate(username=canonical, nickname=nickname),
+        WorkspaceFriendCreate(username=canonical, nickname=nickname, avatar_url=avatar_url),
     )
     return {"ok": True, "data": row.model_dump(mode="json")}
 
@@ -2003,7 +2153,9 @@ async def import_workspace_friends(
     previously_saved = {row.username.lower() for row in app.state.workspace_store.list_friends(owner)}
     rows = app.state.workspace_store.import_friends(
         owner,
-        [WorkspaceFriendCreate(username=x.username, nickname=x.nickname) for x in matched],
+        [WorkspaceFriendCreate(
+            username=x.username, nickname=x.nickname, avatar_url=x.avatar_url,
+        ) for x in matched],
     )
     return {
         "ok": True,
@@ -2237,6 +2389,18 @@ async def recommendation_metrics(
     identity = _authenticated_identity(session.auth_session_id)
     bounded_days = min(max(days, 1), 365)
     return {"ok": True, "data": app.state.recommendation_event_store.metrics(identity.username, bounded_days)}
+
+
+@app.get("/recommendations/history")
+async def recommendation_history(
+    request: Request, response: Response, limit: int = 12,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    identity = _authenticated_identity(session.auth_session_id)
+    return {
+        "ok": True,
+        "data": app.state.recommendation_event_store.history(identity.username, limit),
+    }
 
 
 @app.get("/recommendations/models")

@@ -60,4 +60,40 @@ async def test_anilist_bulk_search_preserves_each_result_and_batches(monkeypatch
     assert all(result.ok and result.data for result in results)
     assert [result.data.query for result in results if result.data] == [f"原名{i}" for i in range(10)]
     assert [result.data.results[0].id for result in results if result.data] == list(range(1000, 1010))
+    assert all(result.data.mapping_status == "verified" for result in results if result.data)
+    assert all(result.data.results[0].verified for result in results if result.data)
     assert all("Page(perPage:3)" in call["query"] for call in FakeAsyncClient.calls)
+
+
+def test_anilist_mapping_rejects_search_rank_without_title_match():
+    result = SearchAniListTool._result(
+        AniListArgs(keyword="サクラノ刻", type="anime", expected_year=2023),
+        [{
+            "id": 1,
+            "title": {"native": "サクラノ詩", "romaji": "Sakura no Uta"},
+            "averageScore": 90,
+            "seasonYear": 2023,
+        }],
+    )
+
+    assert result.data
+    assert result.data.mapping_status == "unmatched"
+    assert not result.data.results[0].verified
+    assert result.sources == []
+
+
+def test_anilist_mapping_rejects_ambiguous_remakes_and_uses_year_to_disambiguate():
+    rows = [
+        {"id": 1, "title": {"native": "同名作品"}, "seasonYear": 2000, "episodes": 12},
+        {"id": 2, "title": {"native": "同名作品"}, "seasonYear": 2025, "episodes": 12},
+    ]
+    ambiguous = SearchAniListTool._result(AniListArgs(keyword="同名作品"), rows)
+    resolved = SearchAniListTool._result(
+        AniListArgs(keyword="同名作品", expected_year=2025, expected_episodes=12),
+        rows,
+    )
+
+    assert ambiguous.data and ambiguous.data.mapping_status == "ambiguous"
+    assert not any(item.verified for item in ambiguous.data.results)
+    assert resolved.data and resolved.data.mapping_status == "verified"
+    assert next(item for item in resolved.data.results if item.verified).id == 2

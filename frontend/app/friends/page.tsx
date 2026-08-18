@@ -12,7 +12,7 @@ import { PageHeader } from "../../components/page-header";
 import { productFetch } from "../../lib/api";
 import { useExperience } from "../../lib/experience";
 
-type Friend = { username: string; nickname?: string; created_at?: string; updated_at?: string };
+type Friend = { username: string; nickname?: string; avatar_url?: string; created_at?: string; updated_at?: string };
 type FriendCandidate = Friend & { url?: string; saved?: boolean };
 type PulseItem = {
   subject_id: number; name: string; image?: string; count: number; friends: string[];
@@ -205,7 +205,7 @@ export default function FriendsPage() {
           </div>
           {notice ? <div className="inline-notice">{notice}</div> : null}
           {error ? <div className="surface-error">{error}</div> : null}
-          {friends.length ? <div className="friend-chips">{friends.map((friend) => <article key={friend.username}><span className="friend-avatar">{(friend.nickname || friend.username).slice(0, 1).toUpperCase()}</span><span><strong>{friend.nickname || `@${friend.username}`}</strong>{friend.nickname ? <small>@{friend.username}</small> : <small>Bangumi 用户</small>}</span><button className="icon-plain" onClick={() => void loadFriendDetail(friend.username)} title="查看公开追番">{busy === `detail:${friend.username}` ? <LoaderCircle className="spin" size={14} /> : <Eye size={14} />}</button><a className="icon-plain" href={`https://bgm.tv/user/${friend.username}`} target="_blank" rel="noreferrer" title="打开 Bangumi"><ExternalLink size={14} /></a><button className="icon-plain" onClick={() => void removeFriend(friend.username)} title="移出名单"><Trash2 size={14} /></button></article>)}</div> : <div className="friend-empty"><Users size={24} /><strong>还没有关注好友</strong><span>添加用户名，或从 Bangumi 好友候选中勾选你真正关心的人。</span></div>}
+          {friends.length ? <div className="friend-chips">{friends.map((friend) => <article key={friend.username}>{friend.avatar_url ? <img className="friend-avatar" src={friend.avatar_url} alt="" /> : <span className="friend-avatar">{(friend.nickname || friend.username).slice(0, 1).toUpperCase()}</span>}<span><strong>{friend.nickname || `@${friend.username}`}</strong>{friend.nickname ? <small>@{friend.username}</small> : <small>Bangumi 用户</small>}</span><button className="icon-plain" onClick={() => void loadFriendDetail(friend.username)} title="查看公开追番">{busy === `detail:${friend.username}` ? <LoaderCircle className="spin" size={14} /> : <Eye size={14} />}</button><a className="icon-plain" href={`https://bgm.tv/user/${friend.username}`} target="_blank" rel="noreferrer" title="打开 Bangumi"><ExternalLink size={14} /></a><button className="icon-plain" onClick={() => void removeFriend(friend.username)} title="移出名单"><Trash2 size={14} /></button></article>)}</div> : <div className="friend-empty"><Users size={24} /><strong>还没有关注好友</strong><span>添加用户名，或从 Bangumi 好友候选中勾选你真正关心的人。</span></div>}
         </section>
 
         {detail ? <FriendDetailPanel data={detail} /> : null}
@@ -235,7 +235,7 @@ export default function FriendsPage() {
                     const selected = selectedImports.has(friend.username);
                     return <label className={`${selected ? "selected" : ""}${friend.saved ? " saved" : ""}`} key={friend.username}>
                       <input type="checkbox" checked={Boolean(friend.saved || selected)} disabled={Boolean(friend.saved || busy)} onChange={() => toggleImport(friend.username)} />
-                      <span className="friend-avatar">{(friend.nickname || friend.username).slice(0, 1).toUpperCase()}</span>
+                      {friend.avatar_url ? <img className="friend-avatar" src={friend.avatar_url} alt="" /> : <span className="friend-avatar">{(friend.nickname || friend.username).slice(0, 1).toUpperCase()}</span>}
                       <span><strong>{friend.nickname || `@${friend.username}`}</strong><small>@{friend.username}</small></span>
                       <i>{friend.saved ? "已在名单" : selected ? <Check size={15} /> : "选择"}</i>
                     </label>;

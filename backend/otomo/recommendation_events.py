@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import secrets
 import sqlite3
+from collections import Counter
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -234,11 +235,66 @@ class RecommendationEventStore:
                 (username, cutoff),
             ).fetchone()
             dimensions = conn.execute(
-                """SELECT s.subject_type,s.scenario,COUNT(*) n
+                """WITH latest AS (
+                       SELECT e.*,ROW_NUMBER() OVER (
+                         PARTITION BY e.set_id,e.subject_id ORDER BY e.id DESC
+                       ) rn
+                       FROM recommendation_events e
+                       WHERE e.username=? AND e.created_at>=?
+                         AND e.event IN ('wishlist','started','dismiss','more','less','watched','undo')
+                   )
+                   SELECT s.subject_type,s.scenario,
+                          COUNT(DISTINCT CASE WHEN e.event='impression'
+                            THEN e.set_id || ':' || e.subject_id END) impressions,
+                          COUNT(DISTINCT CASE WHEN p.event IN ('wishlist','started','more','watched')
+                            THEN p.set_id || ':' || p.subject_id END) accepted,
+                          COUNT(DISTINCT CASE WHEN p.event IN ('dismiss','less')
+                            THEN p.set_id || ':' || p.subject_id END) dismissed
                    FROM recommendation_events e
                    JOIN recommendation_sets s ON s.id=e.set_id
-                   WHERE e.username=? AND e.created_at>=? AND e.event='impression'
-                   GROUP BY s.subject_type,s.scenario ORDER BY n DESC""",
+                   LEFT JOIN latest p ON p.set_id=e.set_id AND p.subject_id=e.subject_id AND p.rn=1
+                   WHERE e.username=? AND e.created_at>=?
+                   GROUP BY s.subject_type,s.scenario ORDER BY impressions DESC""",
+                (username, cutoff, username, cutoff),
+            ).fetchall()
+            positions = conn.execute(
+                """WITH latest AS (
+                       SELECT e.*,ROW_NUMBER() OVER (
+                         PARTITION BY e.set_id,e.subject_id ORDER BY e.id DESC
+                       ) rn
+                       FROM recommendation_events e
+                       WHERE e.username=? AND e.created_at>=?
+                         AND e.event IN ('wishlist','started','dismiss','more','less','watched','undo')
+                   )
+                   SELECT i.position,
+                          COUNT(DISTINCT CASE WHEN e.event='impression'
+                            THEN e.set_id || ':' || e.subject_id END) impressions,
+                          COUNT(DISTINCT CASE WHEN e.event='open'
+                            THEN e.set_id || ':' || e.subject_id END) opens,
+                          COUNT(DISTINCT CASE WHEN p.event IN ('wishlist','started','more','watched')
+                            THEN p.set_id || ':' || p.subject_id END) accepted,
+                          COUNT(DISTINCT CASE WHEN p.event IN ('dismiss','less')
+                            THEN p.set_id || ':' || p.subject_id END) dismissed
+                   FROM recommendation_events e
+                   JOIN recommendation_items i ON i.set_id=e.set_id AND i.subject_id=e.subject_id
+                   LEFT JOIN latest p ON p.set_id=e.set_id AND p.subject_id=e.subject_id AND p.rn=1
+                   WHERE e.username=? AND e.created_at>=?
+                   GROUP BY i.position ORDER BY i.position""",
+                (username, cutoff, username, cutoff),
+            ).fetchall()
+            latest_preferences = conn.execute(
+                """WITH latest AS (
+                       SELECT e.*,ROW_NUMBER() OVER (
+                         PARTITION BY e.subject_id ORDER BY e.id DESC
+                       ) rn
+                       FROM recommendation_events e
+                       WHERE e.username=? AND e.created_at>=?
+                         AND e.event IN ('wishlist','started','dismiss','more','less','watched','undo')
+                   )
+                   SELECT l.event,l.reason,l.aspect,i.payload_json
+                   FROM latest l
+                   JOIN recommendation_items i ON i.set_id=l.set_id AND i.subject_id=l.subject_id
+                   WHERE l.rn=1 AND l.event!='undo'""",
                 (username, cutoff),
             ).fetchall()
             model_rows = conn.execute(
@@ -250,6 +306,7 @@ class RecommendationEventStore:
             ).fetchall()
         counts = {row["event"]: int(row["n"]) for row in rows}
         impressions = counts.get("impression", 0)
+        decision_count = len(latest_preferences)
         models: dict[str, int] = {}
         for row in model_rows:
             try:
@@ -258,6 +315,22 @@ class RecommendationEventStore:
                 metadata = {}
             label = str(metadata.get("version") or metadata.get("built_at") or "无协同模型")
             models[label] = models.get(label, 0) + 1
+        positive_tags: Counter[str] = Counter()
+        negative_tags: Counter[str] = Counter()
+        preference_aspects: Counter[str] = Counter()
+        for row in latest_preferences:
+            try:
+                payload = json.loads(row["payload_json"])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                payload = {}
+            tags = [str(tag) for tag in payload.get("diversity_tags") or [] if str(tag).strip()][:12]
+            if row["event"] in {"wishlist", "started", "more", "watched"}:
+                positive_tags.update(tags)
+            elif row["event"] in {"dismiss", "less"} and row["reason"] != "temporary":
+                negative_tags.update(tags)
+            if row["aspect"] and row["aspect"] != "item":
+                preference_aspects[str(row["aspect"])] += 1
+        confidence = "high" if decision_count >= 30 else "medium" if decision_count >= 10 else "low"
         return {
             "days": days,
             "counts": counts,
@@ -272,12 +345,90 @@ class RecommendationEventStore:
                 {
                     "subject_type": row["subject_type"],
                     "scenario": row["scenario"],
-                    "impressions": int(row["n"]),
+                    "impressions": int(row["impressions"]),
+                    "accepted": int(row["accepted"]),
+                    "dismissed": int(row["dismissed"]),
+                    "acceptance_rate": (
+                        int(row["accepted"]) / int(row["impressions"])
+                        if row["impressions"] else 0.0
+                    ),
                 }
                 for row in dimensions
             ],
+            "positions": [
+                {
+                    "position": int(row["position"]),
+                    "impressions": int(row["impressions"]),
+                    "opens": int(row["opens"]),
+                    "accepted": int(row["accepted"]),
+                    "dismissed": int(row["dismissed"]),
+                    "acceptance_rate": (
+                        int(row["accepted"]) / int(row["impressions"])
+                        if row["impressions"] else 0.0
+                    ),
+                }
+                for row in positions
+            ],
             "model_versions": models,
+            "personalization": {
+                "confidence": confidence,
+                "decision_samples": decision_count,
+                "positive_tags": [tag for tag, _count in positive_tags.most_common(8)],
+                "negative_tags": [tag for tag, _count in negative_tags.most_common(8)],
+                "scoped_feedback": dict(preference_aspects.most_common()),
+                "note": (
+                    "反馈样本仍少，当前画像会保守参与排序。"
+                    if confidence == "low" else
+                    "已有一定反馈样本，仍以你本轮明确要求为最高优先级。"
+                    if confidence == "medium" else
+                    "反馈样本较充分，但不会覆盖你本轮明确要求。"
+                ),
+            },
         }
+
+    def history(self, username: str, limit: int = 12) -> list[dict[str, Any]]:
+        """Return recent recommendation sets with each card's latest explicit decision."""
+        bounded_limit = min(max(limit, 1), 50)
+        with self._connect() as conn:
+            sets = conn.execute(
+                """SELECT id,subject_type,scenario,request_json,created_at
+                   FROM recommendation_sets WHERE username=?
+                   ORDER BY created_at DESC LIMIT ?""",
+                (username, bounded_limit),
+            ).fetchall()
+            history: list[dict[str, Any]] = []
+            for row in sets:
+                items = conn.execute(
+                    """SELECT i.position,i.payload_json,
+                              (SELECT e.event FROM recommendation_events e
+                               WHERE e.set_id=i.set_id AND e.subject_id=i.subject_id
+                                 AND e.event IN ('wishlist','started','dismiss','more','less','watched','undo')
+                               ORDER BY e.id DESC LIMIT 1) latest_event,
+                              (SELECT e.reason FROM recommendation_events e
+                               WHERE e.set_id=i.set_id AND e.subject_id=i.subject_id
+                                 AND e.event IN ('wishlist','started','dismiss','more','less','watched','undo')
+                               ORDER BY e.id DESC LIMIT 1) latest_reason
+                       FROM recommendation_items i WHERE i.set_id=? ORDER BY i.position""",
+                    (row["id"],),
+                ).fetchall()
+                request = json.loads(row["request_json"])
+                request.pop("username", None)
+                payload_items = []
+                for item in items:
+                    payload = json.loads(item["payload_json"])
+                    payload["position"] = int(item["position"])
+                    payload["latest_event"] = item["latest_event"]
+                    payload["latest_reason"] = item["latest_reason"]
+                    payload_items.append(payload)
+                history.append({
+                    "id": row["id"],
+                    "subject_type": row["subject_type"],
+                    "scenario": row["scenario"],
+                    "request": request,
+                    "items": payload_items,
+                    "created_at": row["created_at"],
+                })
+        return history
 
 
 def record_recommendation_feedback(

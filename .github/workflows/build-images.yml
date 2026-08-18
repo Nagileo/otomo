@@ -24,9 +24,18 @@ jobs:
         include:
           - name: backend
             context: ./backend
+            target: core
+            publish_on_push: true
+            build_args: ""
+          - name: backend-full
+            context: ./backend
+            target: full
+            publish_on_push: false
             build_args: ""
           - name: frontend
             context: ./frontend
+            target: runner
+            publish_on_push: true
             build_args: |
               NEXT_PUBLIC_BACKEND=/api
     steps:
@@ -50,8 +59,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/build-push-action@v6
+        if: matrix.publish_on_push || github.event_name == 'workflow_dispatch'
         with:
           context: ${{ matrix.context }}
+          target: ${{ matrix.target }}
           push: true
           tags: |
             ghcr.io/nagileo/otomo-${{ matrix.name }}:latest

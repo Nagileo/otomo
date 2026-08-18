@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+from contextlib import contextmanager
 import json
 import re
 from typing import Any, AsyncIterator
@@ -450,6 +451,16 @@ def presentation_contract_prompt(state: Any | None, limit: int = 48000) -> str:
         "正文负责结论和取舍，不再另造一套结构化数据。聚合面板与专门面板同时存在时，"
         "专门面板字段优先，聚合面板只作导航。"
     )
+
+
+@contextmanager
+def tool_progress_channel(queue: asyncio.Queue[ProgressEvent]):
+    """Bind a progress queue for direct tool runs outside the chat agent."""
+    token = _TOOL_PROGRESS_QUEUE.set(queue)
+    try:
+        yield
+    finally:
+        _TOOL_PROGRESS_QUEUE.reset(token)
 
 
 def compose_messages(messages: list[dict], state: Any | None, prompt: str) -> list[dict]:

@@ -40,6 +40,10 @@ class RatingEvidence(BaseModel):
     signal: Literal["strong", "positive", "mixed", "weak", "low_data", "unknown"] = "unknown"
     note: str = ""
     url: str | None = None
+    external_id: int | str | None = None
+    external_title: str | None = None
+    mapping_confidence: float | None = None
+    matched_by: str | None = None
 
 
 class CommentEvidence(BaseModel):
@@ -492,17 +496,30 @@ class ReviewSubjectTool(Tool):
                 async_jobs.append(("comments", "bangumi", self.comments.run(CommentsArgs(subject_id=detail.id, query=args.focus, limit=8))))
 
         await emit_tool_progress(tool=self.name, summary="补充外部评价源", current=3, total=4)
+        expected_year = int(detail.date[:4]) if detail.date and detail.date[:4].isdigit() else None
+        expected_episodes = int(raw.get("eps") or 0) or None
         if detail.type == 2:  # anime
             if result := external_results.get("anilist_anime"):
                 prepared_results.append(("anilist_anime", result))
             else:
-                async_jobs.append(("anilist_anime", "anilist", self.anilist.run(AniListArgs(keyword=detail.name or title, type="anime", limit=3))))
+                async_jobs.append(("anilist_anime", "anilist", self.anilist.run(AniListArgs(
+                    keyword=detail.name or title,
+                    type="anime",
+                    limit=3,
+                    expected_year=expected_year,
+                    expected_episodes=expected_episodes,
+                ))))
 
         if detail.type == 1:  # book / manga / novel
             if result := external_results.get("anilist_manga"):
                 prepared_results.append(("anilist_manga", result))
             else:
-                async_jobs.append(("anilist_manga", "anilist", self.anilist.run(AniListArgs(keyword=detail.name or title, type="manga", limit=3))))
+                async_jobs.append(("anilist_manga", "anilist", self.anilist.run(AniListArgs(
+                    keyword=detail.name or title,
+                    type="manga",
+                    limit=3,
+                    expected_year=expected_year,
+                ))))
 
         if detail.type == 4:  # game / galgame
             async_jobs.append(("egs", "egs", self.egs.run(EGSArgs(keyword=title, limit=3))))
@@ -548,8 +565,18 @@ class ReviewSubjectTool(Tool):
                     )
             elif label in {"anilist_anime", "anilist_manga"}:
                 if data.ok and data.data and data.data.results:
-                    item = data.data.results[0]
                     is_anime = label == "anilist_anime"
+                    item = next((candidate for candidate in data.data.results if candidate.verified), None)
+                    if item is None:
+                        source_matrix.append(
+                            SourceAvailability(
+                                source="AniList",
+                                role="英文圈动画评分/别名" if is_anime else "英文圈漫画/书籍评分/别名",
+                                status="unavailable",
+                                note="；".join(data.data.mapping_warnings) or "外站条目未通过对齐门禁",
+                            )
+                        )
+                        continue
                     ratings.append(
                         RatingEvidence(
                             source="AniList",
@@ -558,11 +585,15 @@ class ReviewSubjectTool(Tool):
                             count=None,
                             signal=_score_signal(item.score, None, 100),
                             note=(
-                                "英文圈动画评分，满分 100；用 Bangumi 日文原名检索。"
+                                f"英文圈动画评分，满分 100；外站对齐 {item.mapping_confidence:.0%}（{item.mapping_note}）。"
                                 if is_anime else
-                                "英文圈漫画/书籍条目评分，满分 100；轻小说可能覆盖不完整。"
+                                f"英文圈漫画/书籍评分，满分 100；外站对齐 {item.mapping_confidence:.0%}（{item.mapping_note}）；轻小说可能覆盖不完整。"
                             ),
                             url=f"https://anilist.co/{'anime' if is_anime else 'manga'}/{item.id}",
+                            external_id=item.id,
+                            external_title=item.title_native or item.title_romaji,
+                            mapping_confidence=item.mapping_confidence,
+                            matched_by=item.matched_by,
                         )
                     )
                     source_matrix.append(

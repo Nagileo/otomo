@@ -156,7 +156,7 @@ export default function CommunityPage() {
 
       <section className="community-stats" aria-label="访客统计">
         <article><Users size={18} /><span>独立访客</span><strong>{stats.total_visitors ?? "—"}</strong><small>按浏览器会话 · 今日 {stats.visitors_today ?? "—"}</small></article>
-        <article><BarChart3 size={18} /><span>页面浏览量</span><strong>{stats.total_views ?? "—"}</strong><small>去重后 · 今日 {stats.views_today ?? "—"}</small></article>
+        <article><BarChart3 size={18} /><span>页面浏览量</span><strong>{stats.total_views ?? "—"}</strong><small>同一会话 / 页面每小时计一次 · 今日 {stats.views_today ?? "—"}</small></article>
         <article><MessageSquareText size={18} /><span>公开留言</span><strong>{stats.comment_count ?? comments.length}</strong><small>连接 Bangumi 后可参与</small></article>
       </section>
       <p className="community-stat-scope">自本次统计部署起{stats.tracking_since ? `（${formatTime(stats.tracking_since)} 开始）` : ""}；不是 Bangumi 全站数据，也不保存原始 IP。</p>

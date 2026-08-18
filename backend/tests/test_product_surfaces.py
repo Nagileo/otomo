@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 from fastapi.testclient import TestClient
 
@@ -80,6 +81,25 @@ def test_product_surfaces_enforce_identity_and_inject_current_username(tmp_path,
             json={"subject_type": "anime", "username": "mallory", "limit": 3},
         )
         assert rec.status_code == 200
+        assert seen["recommend_username"] == "alice"
+        background = client.post(
+            "/recommendations/runs",
+            headers={"x-otomo-csrf": csrf},
+            json={"subject_type": "book", "username": "mallory", "limit": 3},
+        )
+        assert background.status_code == 200
+        run_id = background.json()["run"]["id"]
+        status = "running"
+        for _attempt in range(50):
+            status = client.get(f"/recommendations/runs/{run_id}").json()["run"]["status"]
+            if status == "completed":
+                break
+            time.sleep(0.01)
+        assert status == "completed"
+        events = client.get(f"/recommendations/runs/{run_id}/events")
+        assert events.status_code == 200
+        assert "event: progress" in events.text
+        assert "event: final" in events.text
         assert seen["recommend_username"] == "alice"
         library = client.get("/product/library?subject_types=anime,invalid")
         assert library.status_code == 200
@@ -258,14 +278,14 @@ def test_workspace_friends_are_account_scoped_and_feed_product_pulse(tmp_path, m
         preview = client.get("/workspace/friends/import")
         assert preview.status_code == 200
         assert preview.json()["data"] == [
-            {
-                "username": "bob", "nickname": "测试好友",
-                "url": "https://bgm.tv/user/bob", "saved": True,
-            },
-            {
-                "username": "carol", "nickname": "另一位好友",
-                "url": "https://bgm.tv/user/carol", "saved": False,
-            },
+                {
+                    "username": "bob", "nickname": "测试好友",
+                    "url": "https://bgm.tv/user/bob", "avatar_url": "", "saved": True,
+                },
+                {
+                    "username": "carol", "nickname": "另一位好友",
+                    "url": "https://bgm.tv/user/carol", "avatar_url": "", "saved": False,
+                },
         ]
         assert client.post(
             "/workspace/friends/import", headers={"x-otomo-csrf": csrf},

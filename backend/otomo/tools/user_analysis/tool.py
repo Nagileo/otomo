@@ -203,6 +203,7 @@ class FriendBrief(BaseModel):
     username: str
     nickname: str = ""
     url: str
+    avatar_url: str = ""
 
 
 class FriendListResult(BaseModel):
@@ -663,7 +664,20 @@ def _parse_friend_list(page: str, limit: int) -> list[FriendBrief]:
         if username in seen:
             continue
         seen.add(username)
-        out.append(FriendBrief(username=username, nickname=_clean_text(label), url=f"https://bgm.tv/user/{username}"))
+        avatar_match = re.search(
+            r"background-image\s*:\s*url\(['\"]?([^'\")]+)", label, flags=re.I,
+        ) or re.search(r'<img[^>]+src=["\']([^"\']+)', label, flags=re.I)
+        avatar_url = avatar_match.group(1).strip() if avatar_match else ""
+        if avatar_url.startswith("//"):
+            avatar_url = f"https:{avatar_url}"
+        elif avatar_url.startswith("http://lain.bgm.tv/"):
+            avatar_url = f"https://{avatar_url.removeprefix('http://')}"
+        out.append(FriendBrief(
+            username=username,
+            nickname=_clean_text(label),
+            url=f"https://bgm.tv/user/{username}",
+            avatar_url=avatar_url,
+        ))
         if len(out) >= limit:
             break
     return out

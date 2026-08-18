@@ -67,6 +67,8 @@ Caddy 自动为 `1-2-3-4.nip.io` 申请证书，几秒后 `https://1-2-3-4.nip.i
 - **caddy**：反代 + 自动 HTTPS；覆盖 `X-Forwarded-For` 防伪造绕限流。
 - **cloudflared**（可选 `--profile tunnel`）：临时公网隧道。
 
+生产默认发布和拉取 `otomo-backend`（Docker `core` target），包含网站、调度器、Discord、推荐和浏览器能力，但不携带体积很大的本地 ASR / Pixiv 可选依赖。需要这些能力时，在 Actions 手动运行 `build-images` 生成 `otomo-backend-full`，或本地显式使用 `docker build --target full`；普通 main push 不会自动发布 full 镜像。
+
 > 单机单实例足够个人/朋友规模。要多实例横向扩才需要 Redis（会话/缓存）+ 调度器 leader lock + LTM/share/subscription 迁 Postgres——现在不用管。
 
 ---
@@ -122,7 +124,8 @@ export OTOMO_IMAGE_TAG="$(git rev-parse HEAD)"
 - [ ] 如需浏览器推送，运行 `bash deploy/configure_webpush.sh 你的邮箱@example.com`，然后重新部署并在订阅设置授权浏览器
 - [ ] `DAILY_TOKEN_BUDGET_*` 按预算设（防爬虫刷爆 LLM 账单）
 - [ ] LLM/VLM provider 后台设月度充值上限（第二道熔断）
-- [ ] 备份 cache/（auth/sessions/share/subscriptions/ltm）：`deploy/backup_cache.sh` 挂 cron，可选传 OSS
+- [ ] 备份整个 cache：`deploy/backup_cache.sh` 会对所有 SQLite 做在线一致快照和 `integrity_check`，并保留 auth 密钥、LTM 等非数据库文件；可挂 cron、可选传 OSS
+- [ ] 每月做一次恢复演练：解压备份到临时目录后运行 `python3 deploy/cache_backup.py verify --snapshot <解压目录>`，再运行 `python3 deploy/cache_backup.py restore-drill --snapshot <解压目录> --target <新的空目录>`；该命令拒绝覆盖非空目录
 - [ ] 部署后做一次备份恢复演练（新容器还原备份，登录态/记忆完好才算数）
 
 ---
@@ -133,4 +136,4 @@ export OTOMO_IMAGE_TAG="$(git rev-parse HEAD)"
 - **`NEXT_PUBLIC_BACKEND` 改了不生效**：它是 build 期内联的，改了要 `--build` 重建 frontend 镜像。
 - **证书申请失败**：确认 80/443 放行、`OTOMO_DOMAIN` 是能解析到本机的名字（nip.io 需公网 IP 可达）。
 - **浏览器推送按钮不可用**：确认公网 HTTPS、backend 与 scheduler 都读取同一份 `backend/.env`，且 VAPID 公私钥及 `WEBPUSH_VAPID_SUBJECT` 配置完整；授权后还需在具体规则里勾选“浏览器推送”。
-- **pixiv/B站 ASR 用不了**：国内 IP 直连 pixiv 不可达（选海外节点或挂代理）；B站 ASR 需 cookies（见 ASR_COOKIES_*）。
+- **pixiv/B站本地 ASR 用不了**：先确认使用的是手动发布的 `otomo-backend-full`；国内 IP 直连 pixiv 仍需海外节点或代理，B站 ASR 还需 cookies（见 ASR_COOKIES_*）。

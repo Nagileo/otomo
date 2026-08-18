@@ -7,6 +7,7 @@ GraphQL API（graphql.anilist.co），无 token，评分满分 100。
 from __future__ import annotations
 
 import asyncio
+from datetime import date
 from typing import Literal
 
 import httpx
@@ -30,6 +31,8 @@ class AniListArgs(BaseModel):
     )
     type: Literal["anime", "manga"] = "anime"
     limit: int = Field(5, ge=1, le=10)
+    expected_year: int | None = Field(None, ge=1900, le=date.today().year + 5, description="用于消除同名作品歧义的年份")
+    expected_episodes: int | None = Field(None, ge=1, le=5000, description="用于消除同名动画歧义的集数")
 
 
 class AniListMedia(BaseModel):
@@ -42,12 +45,87 @@ class AniListMedia(BaseModel):
     year: int | None = None
     format: str | None = None
     episodes: int | None = None
+    mapping_confidence: float = 0.0
+    matched_by: str = "title_mismatch"
+    mapping_note: str = ""
+    verified: bool = False
 
 
 class AniListResult(BaseModel):
     query: str
     count: int
     results: list[AniListMedia] = Field(default_factory=list)
+    mapping_status: Literal["verified", "ambiguous", "unmatched"] = "unmatched"
+    mapping_warnings: list[str] = Field(default_factory=list)
+
+
+def _norm_title(value: str | None) -> str:
+    if not value:
+        return ""
+    return "".join(ch.lower() for ch in value if ch.isalnum())
+
+
+_SAFE_TITLE_SUFFIXES = (
+    "tv", "movie", "themovie", "ova", "oad", "season", "part", "manga", "comic",
+    "完全版", "新装版", "総集編", "剧场版", "劇場版",
+)
+
+
+def _safe_title_delta(left: str, right: str) -> bool:
+    longer, shorter = (left, right) if len(left) >= len(right) else (right, left)
+    if not shorter or not longer.startswith(shorter):
+        return False
+    delta = longer[len(shorter):]
+    return bool(delta) and any(token in delta for token in _SAFE_TITLE_SUFFIXES)
+
+
+def _mapping_confidence(args: AniListArgs, media: dict) -> tuple[float, str, str]:
+    """Conservatively align one AniList result to the requested canonical title.
+
+    Search rank is deliberately not evidence. Exact canonical/alias titles are
+    accepted; a small allow-list covers harmless edition suffixes. Year and
+    episode metadata only disambiguate an already credible title match.
+    """
+    query_key = _norm_title(args.keyword)
+    title = media.get("title") or {}
+    title_keys = {
+        _norm_title(title.get("native")),
+        _norm_title(title.get("romaji")),
+        _norm_title(title.get("english")),
+    }
+    title_keys.discard("")
+    if not query_key or not title_keys:
+        return 0.0, "missing_title", "标题信息不足，无法建立外站映射"
+    if query_key in title_keys:
+        confidence = 0.94
+        matched_by = "exact_title"
+    elif any(_safe_title_delta(query_key, key) for key in title_keys):
+        confidence = 0.84
+        matched_by = "safe_edition_delta"
+    else:
+        return 0.0, "title_mismatch", "检索结果标题与 Bangumi canonical 标题不一致"
+
+    notes = ["标题精确一致" if matched_by == "exact_title" else "标题仅有安全的版本后缀差异"]
+    result_year = media.get("seasonYear")
+    if args.expected_year and result_year:
+        year_delta = abs(int(result_year) - args.expected_year)
+        if year_delta == 0:
+            confidence += 0.04
+            notes.append("年份一致")
+        elif year_delta >= 2:
+            confidence -= 0.22
+            notes.append(f"年份冲突（Bangumi {args.expected_year} / AniList {result_year}）")
+        else:
+            notes.append("年份相差 1 年（可能是连载/播出跨年）")
+    result_episodes = media.get("episodes")
+    if args.expected_episodes and result_episodes:
+        if int(result_episodes) == args.expected_episodes:
+            confidence += 0.02
+            notes.append("集数一致")
+        elif abs(int(result_episodes) - args.expected_episodes) >= 2:
+            confidence -= 0.14
+            notes.append(f"集数冲突（Bangumi {args.expected_episodes} / AniList {result_episodes}）")
+    return round(max(0.0, min(confidence, 1.0)), 3), matched_by, "；".join(notes)
 
 
 class SearchAniListTool(Tool):
@@ -62,26 +140,53 @@ class SearchAniListTool(Tool):
 
     @staticmethod
     def _result(args: AniListArgs, media: list[dict]) -> ToolResult[AniListResult]:
-        items = [
-            AniListMedia(
-                id=m["id"],
-                title_romaji=(m.get("title") or {}).get("romaji") or "",
-                title_native=(m.get("title") or {}).get("native") or "",
-                title_english=(m.get("title") or {}).get("english"),
-                score=m.get("averageScore"),
-                year=m.get("seasonYear"),
-                format=m.get("format"),
-                episodes=m.get("episodes"),
-            )
-            for m in media
-            if m.get("id")
-        ]
+        items: list[AniListMedia] = []
+        for raw in media:
+            if not raw.get("id"):
+                continue
+            confidence, matched_by, note = _mapping_confidence(args, raw)
+            items.append(AniListMedia(
+                id=raw["id"],
+                title_romaji=(raw.get("title") or {}).get("romaji") or "",
+                title_native=(raw.get("title") or {}).get("native") or "",
+                title_english=(raw.get("title") or {}).get("english"),
+                score=raw.get("averageScore"),
+                year=raw.get("seasonYear"),
+                format=raw.get("format"),
+                episodes=raw.get("episodes"),
+                mapping_confidence=confidence,
+                matched_by=matched_by,
+                mapping_note=note,
+            ))
+        items.sort(key=lambda item: item.mapping_confidence, reverse=True)
+        credible = [item for item in items if item.mapping_confidence >= 0.84]
+        mapping_status: Literal["verified", "ambiguous", "unmatched"] = "unmatched"
+        warnings: list[str] = []
+        if credible:
+            top = credible[0]
+            tied = [item for item in credible[1:] if top.mapping_confidence - item.mapping_confidence < 0.05]
+            if tied:
+                mapping_status = "ambiguous"
+                warnings.append(
+                    "AniList 返回多个同等可信的同名条目，缺少足够年份/集数证据，已拒绝自动对齐。"
+                )
+            else:
+                mapping_status = "verified"
+                top.verified = True
+        if mapping_status == "unmatched" and items:
+            warnings.append("AniList 检索结果未通过标题/年份/集数对齐门禁，评分未被采用。")
         return ToolResult(
             ok=True,
-            data=AniListResult(query=args.keyword, count=len(items), results=items),
+            data=AniListResult(
+                query=args.keyword,
+                count=len(items),
+                results=items,
+                mapping_status=mapping_status,
+                mapping_warnings=warnings,
+            ),
             sources=[
                 Citation(title=f"AniList — {item.title_romaji}", url=f"https://anilist.co/{args.type}/{item.id}", source="anilist")
-                for item in items[:5]
+                for item in items if item.verified
             ],
         )
 

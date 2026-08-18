@@ -280,10 +280,12 @@ def test_bili_title_cleaner_friend_parser_and_sentiment():
     assert _parse_bili_video_ref("https://www.bilibili.com/video/av123456")[0] == 123456
     assert _sentiment("节奏太拖，比较失望") < 0
     friends = _parse_friend_list(
-        '<ul id="memberUserList"><li><a href="/user/alice" class="avatar">Alice</a></li></ul>',
+        '<ul id="memberUserList"><li><a href="/user/alice" class="avatar">'
+        '<span style="background-image:url(\'//lain.bgm.tv/pic/user/l/1.jpg\')"></span>Alice</a></li></ul>',
         10,
     )
     assert friends[0].username == "alice"
+    assert friends[0].avatar_url == "https://lain.bgm.tv/pic/user/l/1.jpg"
 
 
 def test_bili_video_content_aggregates_public_layers(monkeypatch):

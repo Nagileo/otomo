@@ -3,7 +3,11 @@ export const BACKEND = process.env.NEXT_PUBLIC_BACKEND ?? "http://localhost:8000
 export async function readJson(response: Response) {
   const payload = await response.json().catch(() => ({}));
   if (!response.ok || payload.ok === false) {
-    throw new Error(payload.detail || payload.error || `请求失败：HTTP ${response.status}`);
+    const detail = payload.detail || payload.error;
+    const message = typeof detail === "string"
+      ? detail
+      : detail?.message || (detail ? JSON.stringify(detail) : `请求失败：HTTP ${response.status}`);
+    throw new Error(message);
   }
   return payload;
 }

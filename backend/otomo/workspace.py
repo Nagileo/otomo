@@ -57,6 +57,7 @@ class WorkspaceList(WorkspaceListCreate):
 class WorkspaceFriendCreate(BaseModel):
     username: str = Field(..., min_length=1, max_length=64, pattern=r"^@?[A-Za-z0-9_.-]+$")
     nickname: str = Field("", max_length=80)
+    avatar_url: str = Field("", max_length=1000)
 
 
 class WorkspaceFriend(WorkspaceFriendCreate):
@@ -115,6 +116,7 @@ class WorkspaceStore:
                     owner_key TEXT NOT NULL,
                     username TEXT NOT NULL,
                     nickname TEXT NOT NULL,
+                    avatar_url TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY(owner_key, username)
@@ -123,6 +125,14 @@ class WorkspaceStore:
                     ON workspace_friends(owner_key, updated_at DESC);
                 """
             )
+            friend_columns = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(workspace_friends)").fetchall()
+            }
+            if "avatar_url" not in friend_columns:
+                conn.execute(
+                    "ALTER TABLE workspace_friends ADD COLUMN avatar_url TEXT NOT NULL DEFAULT ''"
+                )
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=10)
@@ -227,21 +237,28 @@ class WorkspaceStore:
         now = now_iso()
         username = req.username.strip().lstrip("@").lower()
         nickname = req.nickname.strip()
+        avatar_url = req.avatar_url.strip()
         with self._connect() as conn:
             existing = conn.execute(
-                "SELECT created_at FROM workspace_friends WHERE owner_key=? AND username=?",
+                "SELECT created_at,avatar_url FROM workspace_friends WHERE owner_key=? AND username=?",
                 (owner_key, username),
             ).fetchone()
             created_at = existing["created_at"] if existing else now
+            if not avatar_url and existing:
+                avatar_url = str(existing["avatar_url"] or "")
             conn.execute(
-                """INSERT INTO workspace_friends(owner_key,username,nickname,created_at,updated_at)
-                VALUES(?,?,?,?,?) ON CONFLICT(owner_key,username) DO UPDATE SET
-                    nickname=excluded.nickname,updated_at=excluded.updated_at""",
-                (owner_key, username, nickname, created_at, now),
+                """INSERT INTO workspace_friends(
+                    owner_key,username,nickname,avatar_url,created_at,updated_at
+                ) VALUES(?,?,?,?,?,?) ON CONFLICT(owner_key,username) DO UPDATE SET
+                    nickname=excluded.nickname,
+                    avatar_url=CASE WHEN excluded.avatar_url!='' THEN excluded.avatar_url ELSE workspace_friends.avatar_url END,
+                    updated_at=excluded.updated_at""",
+                (owner_key, username, nickname, avatar_url, created_at, now),
             )
         return WorkspaceFriend(
             username=username,
             nickname=nickname,
+            avatar_url=avatar_url,
             created_at=created_at,
             updated_at=now,
         )
@@ -295,6 +312,7 @@ class WorkspaceStore:
         return WorkspaceFriend(
             username=row["username"],
             nickname=row["nickname"],
+            avatar_url=row["avatar_url"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )

@@ -166,8 +166,46 @@ def test_metrics_count_only_recorded_visible_impressions(tmp_path):
     assert metrics["unique_visible_items"] == 1
     assert metrics["segments"] == [{
         "subject_type": "anime", "scenario": "tonight", "impressions": 1,
+        "accepted": 0, "dismissed": 0, "acceptance_rate": 0.0,
     }]
+    assert metrics["positions"] == [{
+        "position": 1, "impressions": 1, "opens": 0, "accepted": 0,
+        "dismissed": 0, "acceptance_rate": 0.0,
+    }]
+    assert metrics["personalization"]["confidence"] == "low"
     assert metrics["model_versions"] == {"v1": 1}
+
+
+def test_recommendation_history_and_metrics_explain_learned_preferences(tmp_path):
+    store = RecommendationEventStore(str(tmp_path / "events.sqlite3"))
+    set_id = store.create_set(
+        "alice", "book", "general", {"book_subtype": "comic", "username": "alice"},
+        [
+            {"id": 1, "name": "A", "diversity_tags": ["百合", "日常"]},
+            {"id": 2, "name": "B", "diversity_tags": ["战斗"]},
+        ],
+    )
+    for subject_id in (1, 2):
+        store.record("alice", RecommendationFeedbackRequest(
+            recommendation_set_id=set_id, subject_id=subject_id, event="impression",
+        ))
+    store.record("alice", RecommendationFeedbackRequest(
+        recommendation_set_id=set_id, subject_id=1, event="more", aspect="genre",
+    ))
+    store.record("alice", RecommendationFeedbackRequest(
+        recommendation_set_id=set_id, subject_id=2, event="dismiss", reason="genre", aspect="genre",
+    ))
+
+    metrics = store.metrics("alice")
+    history = store.history("alice")
+
+    assert metrics["segments"][0]["acceptance_rate"] == 0.5
+    assert metrics["positions"][0]["accepted"] == 1
+    assert metrics["personalization"]["positive_tags"] == ["百合", "日常"]
+    assert metrics["personalization"]["negative_tags"] == ["战斗"]
+    assert history[0]["request"].get("username") is None
+    assert history[0]["items"][0]["latest_event"] == "more"
+    assert history[0]["items"][1]["latest_reason"] == "genre"
 
 
 def test_cf_registry_reports_stale_and_missing_models(tmp_path):

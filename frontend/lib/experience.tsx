@@ -67,7 +67,7 @@ const ExperienceContext = createContext<ExperienceContextValue | null>(null);
 const APPEARANCE_KEY = "otomo:appearance:v1";
 const COMPARE_KEY = "otomo:compare:v1";
 const TASK_KEY = "otomo:tasks:v2";
-const TASK_LIFETIME = { success: 3_000, error: 10_000, interrupted: 10_000 } as const;
+const TASK_LIFETIME = { success: 3_000, error: 8_000, interrupted: 8_000 } as const;
 
 function taskErrorMessage(error?: string) {
   const message = String(error || "").replace(/^Error:\s*/i, "").trim();
@@ -217,7 +217,7 @@ export function ExperienceProvider({ children }: { children: ReactNode }) {
       const now = new Date().toISOString();
       const label = d.label || (key ? labels[key] : "后台任务");
       const record: TaskRecord = { id: d.id, label, href: d.href || pathname, status: "running", startedAt: now, updatedAt: now };
-      setTasks((rows) => [record, ...rows.filter((task) => task.status === "running" || task.label !== label)].slice(0, 12));
+      setTasks((rows) => [record, ...rows.filter((task) => task.label !== label)].slice(0, 12));
     };
     const finished = (event: Event) => {
       const d = (event as CustomEvent<{ id: string; error?: string }>).detail;

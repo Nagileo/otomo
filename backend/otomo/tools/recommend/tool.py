@@ -420,6 +420,7 @@ def _blank(x: dict) -> dict:
         "rating": x.get("rating") or {},
         "image": img.get("common") or img.get("medium") or img.get("grid"),
         "eps": _eps_value(x.get("eps") or x.get("total_episodes")),
+        "release_date": x.get("date") or None,
         "cf": 0.0, "cf_from": set(),
         "external": set(), "external_evidence": [], "external_boost": 0.0,
         "external_mappings": [],
@@ -431,7 +432,8 @@ def _blank_id() -> dict:
     """协同召回新候选（i2i 只给 subject_id+score，name/rating/image 待 enrich 补）。"""
     return {
         "name": None, "matched": set(), "graph": set(), "weight": 0.0,
-        "rating": {}, "image": None, "eps": None, "cf": 0.0, "cf_from": set(),
+        "rating": {}, "image": None, "eps": None, "release_date": None,
+        "cf": 0.0, "cf_from": set(),
         "external": set(), "external_evidence": [], "external_boost": 0.0,
         "external_mappings": [],
         "tags": set(),
@@ -490,6 +492,10 @@ class RecEvidence(BaseModel):
     count: int | None = None
     signal: str = "unknown"
     note: str = ""
+    external_id: int | str | None = None
+    external_title: str | None = None
+    mapping_confidence: float | None = None
+    matched_by: str | None = None
 
 
 class ExternalMappingEvidence(BaseModel):
@@ -522,6 +528,8 @@ class RecItem(BaseModel):
     bangumi_score: float | None = None
     rank: int | None = None
     image: str | None = None
+    release_date: str | None = None
+    episodes: int | None = None
     review_consensus: str | None = None
     evidence: list[RecEvidence] = Field(default_factory=list)
     external_mappings: list[ExternalMappingEvidence] = Field(default_factory=list)
@@ -1649,6 +1657,8 @@ class RecommendTool(Tool):
                 bangumi_score=(r_rating or {}).get("score"),
                 rank=(r_rating or {}).get("rank"),
                 image=r_img,
+                release_date=effective_candidate.get("release_date"),
+                episodes=effective_candidate.get("eps"),
                 evidence=list(effective_candidate.get("external_evidence", [])),
                 external_mappings=list(effective_candidate.get("external_mappings", [])),
                 aspect_matches=aspect_matches,
@@ -1885,6 +1895,16 @@ class RecommendTool(Tool):
                     keyword=str(raw.get("name") or item.name),
                     type="anime" if raw_type == 2 else "manga",
                     limit=3,
+                    expected_year=(
+                        int(str(raw.get("date"))[:4])
+                        if str(raw.get("date") or "")[:4].isdigit()
+                        else None
+                    ),
+                    expected_episodes=(
+                        int(raw.get("eps") or 0) or None
+                        if raw_type == 2
+                        else None
+                    ),
                 ))
             precomputed: dict[int, dict[str, ToolResult]] = {}
             if anilist_args:
@@ -1916,9 +1936,26 @@ class RecommendTool(Tool):
                     count=r.count,
                     signal=r.signal,
                     note=r.note,
+                    external_id=r.external_id,
+                    external_title=r.external_title,
+                    mapping_confidence=r.mapping_confidence,
+                    matched_by=r.matched_by,
                 )
                 for r in res.data.ratings
             ]
+            for rating in res.data.ratings:
+                if rating.mapping_confidence is None or rating.external_id is None:
+                    continue
+                mapping = ExternalMappingEvidence(
+                    source=rating.source,
+                    external_title=rating.external_title or rating.source,
+                    external_id=rating.external_id,
+                    bangumi_id=item.id,
+                    mapping_confidence=rating.mapping_confidence,
+                    matched_by=rating.matched_by or "unknown",
+                )
+                if mapping not in item.external_mappings:
+                    item.external_mappings.append(mapping)
             seen = {(e.source, e.score, e.scale, e.count, e.note) for e in item.evidence}
             item.evidence.extend(
                 e for e in review_evidence if (e.source, e.score, e.scale, e.count, e.note) not in seen

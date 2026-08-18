@@ -228,7 +228,10 @@ export function RecommendPanel({
                 <div className="card-meta">
                   {item.bangumi_score ? `Bangumi ${item.bangumi_score}` : "评分暂无"}
                   {item.rank ? ` · 全站 #${item.rank}` : ""}
+                  {item.release_date ? ` · ${text(item.release_date).slice(0, 10)}` : ""}
+                  {item.episodes ? ` · ${item.episodes} 集` : ""}
                 </div>
+                {(item.media_subtype || list<string>(item.media_notes).length) ? <div className="evidence-row tight rec-media-meta">{item.media_subtype ? <Badge tone="dim">{text(item.media_subtype)}</Badge> : null}{list<string>(item.media_notes).slice(0, 2).map((note) => <span key={note}>{note}</span>)}</div> : null}
                 {fit ? <p className="card-note rec-fit"><strong>为什么适合你</strong>{fit}</p> : null}
                 {risk ? <p className="card-note rec-risk"><strong>需要注意</strong>{risk}</p> : null}
                 <div className="evidence-row tight">
@@ -314,6 +317,7 @@ export function RecommendPanel({
                     {list<string>(item.quality_badges).length ? (
                       <div className="evidence-row tight">{list<string>(item.quality_badges).slice(0, 3).map((badge) => <Badge key={badge} tone="warn">{badge}</Badge>)}</div>
                     ) : null}
+                    {list(item.external_mappings).length ? <div className="rec-provenance"><small>外站评分对齐</small>{list(item.external_mappings).slice(0, 3).map((mapping, idx) => <span key={`${mapping.source}-${idx}`}>{text(mapping.source)} · {text(mapping.external_title)} · 可信度 {Math.round(Number(mapping.mapping_confidence || 0) * 100)}%</span>)}</div> : null}
                     {(provenanceClaims.length || list<string>(item.why_recalled).length) ? (
                       <div className="rec-provenance">
                         <small>候选是怎么被找到的（不等于适合你的证据）</small>
