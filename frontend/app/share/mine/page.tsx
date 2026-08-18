@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 
+import { useExperience } from "../../../lib/experience";
+
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND ?? "http://localhost:8000";
 
 type AnyRecord = Record<string, any>;
@@ -12,21 +14,14 @@ function list(value: any): AnyRecord[] {
 }
 
 export default function MyShareSnapshotsPage() {
-  const [csrf, setCsrf] = useState("");
+  const { authReady, csrf } = useExperience();
   const [snapshots, setSnapshots] = useState<AnyRecord[]>([]);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    void bootstrap();
-  }, []);
-
-  async function bootstrap() {
-    const res = await fetch(`${BACKEND}/auth/session`, { credentials: "include" });
-    const auth = await res.json().catch(() => ({}));
-    setCsrf(auth.csrf_token || "");
-    await loadShares(auth.csrf_token || "");
-  }
+    if (authReady) void loadShares(csrf);
+  }, [authReady, csrf]);
 
   async function loadShares(token = csrf) {
     setBusy(true);

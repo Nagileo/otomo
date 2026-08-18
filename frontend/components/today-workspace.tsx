@@ -6,6 +6,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { PageHeader } from "./page-header";
 import { createShareSnapshot } from "../lib/api";
+import { useExperience } from "../lib/experience";
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND ?? "http://localhost:8000";
 
@@ -23,7 +24,7 @@ type Cockpit = {
 type Tab = "today" | "yesterday" | "week" | "backlog" | "hidden";
 
 export function TodayWorkspace() {
-  const [csrf, setCsrf] = useState("");
+  const { authReady, authenticated, csrf } = useExperience();
   const [data, setData] = useState<Cockpit | null>(null);
   const [tab, setTab] = useState<Tab>("today");
   const [busy, setBusy] = useState(false);
@@ -32,13 +33,11 @@ export function TodayWorkspace() {
   const [publicSeason, setPublicSeason] = useState<any[]>([]);
   const [share, setShare] = useState("");
 
-  useEffect(() => { void bootstrap(); }, []);
+  useEffect(() => { if (authReady) void bootstrap(); }, [authReady, authenticated]);
 
   async function bootstrap() {
     setBusy(true);
-    const auth = await fetch(`${BACKEND}/auth/session`, { credentials: "include" }).then((r) => r.json()).catch(() => ({}));
-    setCsrf(auth.csrf_token || "");
-    if (!auth.authenticated) {
+    if (!authenticated) {
       setNotice("连接 Bangumi 后，这里会自动生成你的今日更新、落后进度和一键打卡队列。");
       const now = new Date();
       const currentMonth = now.getMonth() + 1;

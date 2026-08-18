@@ -852,6 +852,18 @@ export function SeasonGuidePanel({
     : null;
   if (anchorKey && !anchoredItem) return null;
   const visibleItems = anchoredItem ? [anchoredItem] : items;
+  const fitLabel: Record<string, string> = {
+    strong: "适合度：很匹配",
+    maybe: "适合度：值得试试",
+    wait: "适合度：建议观望",
+    unknown: "适合度：尚未判断",
+  };
+  const heatLabel: Record<string, string> = {
+    surge: "热度：快速上升",
+    hot: "热度：热门",
+    warm: "热度：有讨论",
+    none: "热度：暂无趋势",
+  };
   const single = Boolean(anchoredItem);
   const renderGuideRoute = (video: AnyRecord, idx: number) => {
     const hit = list(video.verified_hits)[0] || null;
@@ -914,15 +926,16 @@ export function SeasonGuidePanel({
                 {item.broadcast ? ` · ${item.broadcast}` : ""}
               </div>
               <div className="evidence-row tight">
-                <Badge tone={clsBySignal(item.fit)}>{text(item.fit)}</Badge>
-                <Badge tone={item.match_confidence >= 0.8 ? "good" : item.match_confidence > 0 ? "warn" : "dim"}>
-                  match {pct(item.match_confidence)}
+                <Badge tone={clsBySignal(item.fit)}>{fitLabel[String(item.fit)] || fitLabel.unknown}</Badge>
+                <Badge tone={item.bangumi_score >= 8 ? "good" : item.bangumi_score && item.bangumi_score < 6.5 ? "warn" : "dim"}>
+                  {item.bangumi_score ? `口碑：${item.bangumi_score}` : "口碑：样本不足"}
                 </Badge>
                 <Badge tone={item.hotness_level === "surge" || item.hotness_level === "hot" ? "warn" : item.hotness_level === "warm" ? "dim" : "dim"}>
-                  heat {text(item.hotness_level, "none")} {pct(item.hotness)}
+                  {heatLabel[String(item.hotness_level)] || heatLabel.none}
                 </Badge>
                 {item.pre_air_wish != null && <Badge tone="dim">播前期待 {item.pre_air_wish}</Badge>}
               </div>
+              {item.mapping_warning ? <p className="card-note season-mapping-warning">{text(item.mapping_warning)}</p> : null}
               {list(item.verticals).length > 0 && (
                 <div className="evidence-row tight">
                   {list(item.verticals).slice(0, 3).map((v) => (

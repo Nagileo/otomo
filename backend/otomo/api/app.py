@@ -1576,11 +1576,13 @@ async def product_recommendations(
     session = _ensure_auth_session(request, response)
     _require_csrf(request, session.auth_session_id)
     _product_rate_limit(request, session.auth_session_id, "recommend")
-    identity = _authenticated_identity(session.auth_session_id)
-    args = req.model_copy(update={"username": identity.username})
+    identity = app.state.auth.identity(session.auth_session_id)
+    args = req.model_copy(update={
+        "username": identity.username if identity.authenticated else None,
+    })
     client = await _request_client(app, session.auth_session_id)
     try:
-        with tenant_scope(identity.username, authenticated=True):
+        with tenant_scope(identity.username, authenticated=identity.authenticated):
             result = await RecommendTool(
                 client,
                 app.state.ltm,

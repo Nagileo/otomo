@@ -23,13 +23,22 @@
 - **S3+**：LLM 派生特征 / 冷启动 → 双塔+Faiss → DPO/GRPO（推后）。
 
 ## Bangumi 原生 CF（闭环，对应 docs/06 §9）✅
-自采 Bangumi 公开收藏 → 训 ALS/ItemCF → 导出 i2i 表 → 在线协同召回。**离线↔在线真闭环**（≠ MAL 线只能刷指标）。
+自采 Bangumi 公开收藏 → 构造带评分/状态/时间的正负反馈 → 训 ALS/ItemCF → 导出 i2i 表 → 在线协同召回。**离线↔在线真闭环**（≠ MAL 线只能刷指标）。
 - **采集** `bangumi_collect`：按数字 UID 区间拉 `/v0/users/{uid}/collections`（公开免 token），礼貌限流 + 并发 + 断点续传。
-  实测命中率 ~18–26%、~11 uid/s。原始 user-item 数据**本地训练用、不提交**（隐私），只发布聚合 i2i 表。
-- **训练评测** `run_bangumi_cf`：leave-one-out 对比流行度基线。
-  真实结果（自采 ~1.5k 用户 / 9 万交互，过滤后 815 用户 / 2672 物品）：
-  流行度 NDCG@10=0.062 → **ItemCF 0.127(+105%) · ALS 0.186(+199%)**。数据够大 **ALS 完胜**（小数据时 ItemCF 更稳，故导出模型可选）。
-- **导出**：`--export-model als` 用 `similar_items` 导每物品 top-K 邻居 → `i2i_<stype>.json`（key=subject_id）。
+  API 瞬时失败不会写入完成断点，下次会自动补采。原始 user-item 数据**本地训练用、不提交**（隐私），只发布聚合 i2i 表。
+- **加权反馈**：高分看过/在看为强正，想看为弱正，低分/搁置/抛弃为负；有 `updated_at` 时按半衰期衰减，同一用户/作品只保留最新状态。
+- **训练评测** `run_bangumi_cf`：时间 leave-one-out 优先，同台比较流行度、BM25 与 ALS；`auto` 按 NDCG@10 选择。所有模式都必须超过流行度门禁，否则退出码 3、保留旧线上模型。
+- **五媒介实测（2026-08-18，UID 1–7999）**：
+
+  | 媒介 | 模型 | 过滤后用户/物品 | 流行度 NDCG@10 | 模型 NDCG@10 | 相对提升 | 切分 |
+  |---|---:|---:|---:|---:|---:|---|
+  | 动画 | ALS | 844 / 2,899 | 0.0581 | 0.1734 | +198.6% | 固定随机（旧 CSV 无时间戳） |
+  | 书籍 | BM25 | 192 / 306 | 0.0502 | 0.1420 | +182.9% | 时间 |
+  | 音乐 | BM25 | 197 / 407 | 0.0655 | 0.1243 | +89.7% | 时间 |
+  | 游戏 | ALS | 453 / 1,009 | 0.0322 | 0.1370 | +325.4% | 时间 |
+  | 三次元 | BM25 | 215 / 476 | 0.0422 | 0.1711 | +305.4% | 时间 |
+
+- **导出/发布**：`train_all` 为各媒介采用独立稀疏阈值，临时目录训练并校验后用 `os.replace` 原子发布 `i2i_<stype>.json`；增量训练不会覆盖其他媒介清单。
 - **在线接入**：拷到 `backend/otomo/data/`，`recommend` 加载（缺失则该路静默跳过）。协同召回与标签 / 图谱融合——
   rank 衰减累加、封顶 1.5，**协同 > 图谱**。端到端验证：协同贡献了图谱 / 标签召回不到的独特候选。
 
@@ -46,8 +55,10 @@ recsys_offline/
   data.py             # MAL 数据集加载（CSV → 交互）
   run_baseline/s1/s2.py  # MAL 线：S0 基线 / S1 CF·MF / S2 ALS召回+LambdaMART
   bangumi_collect.py  # 【Bangumi 原生】采集公开收藏（UID 区间，限流/并发/续传）
-  bangumi_data.py     # 【Bangumi 原生】收藏加载（正反馈=看过/在看）+ 稀疏过滤
+  bangumi_data.py     # 【Bangumi 原生】收藏加载 + 评分/状态/时间加权 + 稀疏过滤
+  model_selection.py  # BM25/ALS 自动择优 + 流行度质量门禁
   run_bangumi_cf.py   # 【Bangumi 原生】CF：评测 + 全量重训 + 导出 i2i（闭环产物）
+  train_all.py        # 五媒介训练、校验与原子增量发布
 tests/                # 合成数据单测（不依赖下载）
 ```
 
@@ -59,7 +70,7 @@ pytest                                   # 合成单测
 python -m recsys_offline.run_baseline --data <path>   # S0 流行度基线指标
 
 # Bangumi 原生 CF 闭环（离线真正反哺在线）
-python -m recsys_offline.bangumi_collect --start 1 --end 50000   # 采集公开收藏（可断点续传）
-python -m recsys_offline.run_bangumi_cf --export-model als        # 训练+评测+导出 i2i 表
-cp data/bangumi/i2i_anime.json ../backend/otomo/data/            # 发布给在线 recommend
+python -m recsys_offline.bangumi_collect --start 1 --end 50000 --stype anime
+python -m recsys_offline.train_all --media anime book music game real
+# 或使用 refresh_models.ps1 / refresh_models.sh：采集、评测、过门禁后原子发布
 ```

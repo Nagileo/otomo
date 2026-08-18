@@ -13,7 +13,7 @@ from .config import settings
 _PRODUCT_TZ = timezone(timedelta(hours=8))
 _VISIT_PATHS = {
     "/", "/chat", "/community", "/discover", "/friends", "/library",
-    "/settings/subscriptions", "/share", "/share/mine", "/subject", "/today", "/workspace",
+    "/me", "/settings/subscriptions", "/share", "/share/mine", "/subject", "/today", "/workspace",
 }
 
 
@@ -190,6 +190,9 @@ class CommunityStore:
                 ).fetchone()[0]
             )
             comment_count = int(conn.execute("SELECT COUNT(*) FROM community_comments").fetchone()[0])
+            tracking_since = conn.execute(
+                "SELECT MIN(first_seen) FROM community_visitors"
+            ).fetchone()[0]
             popular = conn.execute(
                 """
                 SELECT path, SUM(views) AS views
@@ -203,6 +206,7 @@ class CommunityStore:
             "total_views": total_views,
             "views_today": views_today,
             "comment_count": comment_count,
+            "tracking_since": str(tracking_since or ""),
             "popular_pages": [dict(row) for row in popular],
             "privacy": (
                 "不保存原始 IP。累计访客按随机浏览器会话的不可逆哈希长期去重；"

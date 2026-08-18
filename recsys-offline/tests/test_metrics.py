@@ -1,6 +1,4 @@
 """合成单测：验证指标与流行度基线（不依赖下载任何数据集）。"""
-import math
-
 from recsys_offline.baseline import PopularityRecommender
 from recsys_offline.metrics import (
     evaluate,

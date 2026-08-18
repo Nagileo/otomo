@@ -29,10 +29,12 @@ from ...recsys_registry import CFModelStatus, cf_model_registry
 from ...security_context import can_access_private_user
 from ...profile import compute_taste_profile
 from .._concurrency import gather_limited
+from .._rag import semantic_model_status
 from ..bangumi.client import SUBJECT_TYPE, BangumiClient
 from ..curation import curated_recall_candidates
 from ..erogamescape.tool import EGSRankArgs, RankErogameScapeTool
 from ..review.tool import ReviewSubjectArgs, ReviewSubjectTool, _ASPECT_HINTS
+from .explanations import RecommendationClaim, refresh_item_explanation
 
 _RECALL_PER_TAG = 50
 _MAX_RECALL_TAGS = 8
@@ -107,6 +109,18 @@ def _norm_title(value: str | None) -> str:
 
 def _unique(values: list[str]) -> list[str]:
     return [v for v in dict.fromkeys(str(x).strip() for x in values if str(x).strip())]
+
+
+def _positive_consumption_items(items: list[dict]) -> list[dict]:
+    """Keep consumed, non-disliked works that are safe personalization seeds."""
+    return [
+        item for item in items
+        if int(item.get("type") or 0) in {2, 3}
+        and (
+            int(item.get("rate") or 0) == 0
+            or int(item.get("rate") or 0) >= 7
+        )
+    ]
 
 
 def _candidate_similarity(left: dict, right: dict) -> float:
@@ -493,11 +507,16 @@ class RecItem(BaseModel):
     score: float
     reasons: list[str]
     why_recalled: list[str] = Field(default_factory=list)
+    recall_signals: list[str] = Field(default_factory=list)
     fit_points: list[str] = Field(default_factory=list)
     risks: list[str] = Field(default_factory=list)
+    constraint_warnings: list[str] = Field(default_factory=list)
     heat: dict = Field(default_factory=dict)
     next_step: list[str] = Field(default_factory=list)
     explicit_tag_matches: list[str] = Field(default_factory=list)
+    scenario_tag_matches: list[str] = Field(default_factory=list)
+    feedback_tag_matches: list[str] = Field(default_factory=list)
+    profile_tag_matches: list[str] = Field(default_factory=list)
     bangumi_score: float | None = None
     rank: int | None = None
     image: str | None = None
@@ -511,6 +530,8 @@ class RecItem(BaseModel):
     media_subtype: str | None = None
     media_notes: list[str] = Field(default_factory=list)
     diversity_tags: list[str] = Field(default_factory=list)
+    series_origin: str | None = None
+    claims: list[RecommendationClaim] = Field(default_factory=list)
     features: dict[str, float] | None = None  # export_features=True 时填；LTR 训练用
 
 
@@ -543,6 +564,10 @@ class RerankWeights(BaseModel):
     aspect_dislike: float = 0.42    # 长期雷区每命中（罚）
     explicit_hit: float = 0.8       # 本轮显式心境命中
     explicit_miss: float = -1.2     # 显式心境未命中（"今天想看治愈"时热血不能顶上来）
+    scenario_hit: float = 0.3       # 场景默认只是软信号，不能冒充用户明确要求
+    scenario_miss: float = -0.12
+    feedback_hit: float = 0.18      # 近期正反馈是弱信号
+    feedback_penalty: float = -0.45 # 近期负反馈标签只轻量降权；仅 exact item 会硬排除
     memory_penalty: float = -2.2    # 长期记忆避雷
     temporary_penalty: float = -1.5 # 本轮 avoid_tags/近期负反馈
     quality_popular: float = 1.2    # 站内口碑项（普通模式）
@@ -690,7 +715,10 @@ class RecommendTool(Tool):
             c["external_boost"] = max(c.get("external_boost", 0.0), min(0.2 + (avg - 8) * 0.1, 0.4))
 
     async def _cross_media_recall(self, cand: dict, target_stype: int, source_items: list[dict], seen: set[int]) -> None:
-        seeds = sorted(source_items, key=lambda it: -(it.get("rate") or 0))[:_CF_SEEDS]
+        seeds = sorted(
+            _positive_consumption_items(source_items),
+            key=lambda it: -(int(it.get("rate") or 0)),
+        )[:_CF_SEEDS]
         jobs = []
         meta: list[tuple[int, str]] = []
         for item in seeds:
@@ -842,16 +870,20 @@ class RecommendTool(Tool):
             cur_rels = await self.client.get_subject_relations(cur)
 
         entry = None
+        entry_candidate = None
         if last is not None:
             try:
                 raw = await self.client.get_subject(cur)
                 img = raw.get("images") or {}
                 entry = (cur, raw.get("name_cn") or raw.get("name"),
                          img.get("common") or img.get("medium"), raw.get("rating") or {})
+                entry_candidate = _blank(raw)
             except Exception:  # noqa: BLE001
                 entry = (cur, last.get("name_cn") or last.get("name"), None, {})
+                entry_candidate = _blank(last)
         return {
             "entry": entry,
+            "entry_candidate": entry_candidate,
             "siblings": siblings,
             "root_id": int(cur),
             "has_predecessor": has_predecessor,
@@ -920,7 +952,9 @@ class RecommendTool(Tool):
             if it.get("type") in {2, 3, 4, 5} and (it.get("subject") or {}).get("id")
         }
         wishlist = [it for it in items if it.get("type") == 1]
-        profile = compute_taste_profile(username, watched)
+        # 画像需要同时看到在看/搁置/抛弃和低分作品；只传“看过”会把所有标签
+        # 都误算成正向兴趣。compute_taste_profile 会按状态和个人均分中心化。
+        profile = compute_taste_profile(username, items)
         memory_dislikes: list[str] = []
         feedback_like_tags: list[str] = []
         feedback_dislike_tags: list[str] = []
@@ -941,7 +975,9 @@ class RecommendTool(Tool):
             async def feedback_tags(feedback_items):
                 tags: list[str] = []
                 for f in feedback_items[:12]:
-                    if not f.subject_id:
+                    # 只有用户明确选择“题材”时才把一次卡片反馈泛化到标签。
+                    # item/画风/节奏/篇幅反馈都只保留为精确条目或对应维度信号。
+                    if not f.subject_id or f.scope != "genre":
                         continue
                     try:
                         raw = await self.client.get_subject(int(f.subject_id))
@@ -957,14 +993,21 @@ class RecommendTool(Tool):
                 aspect_profile = mem.aspect_profiles.get(args.subject_type)
         all_tags = [t["tag"] for t in profile.top_tags]
         user_tags = {t["tag"]: float(t["weight"]) for t in profile.top_tags[:8]}
+        profile_dislike_tags = [t["tag"] for t in profile.bottom_tags[:8]]
         maxw = max(user_tags.values()) if user_tags else 1.0
 
         subtype_focus_tags = _subtype_tags(args.subject_type, args.book_subtype, args.music_subtype)
-        mood = _expand_moods(list(dict.fromkeys(
-            (args.tags or []) + args.prefer_tags + scenario_prefer + feedback_like_tags[:4] + subtype_focus_tags
-        )))
+        explicit_preferences = _expand_moods(list(dict.fromkeys((args.tags or []) + args.prefer_tags)))
+        scenario_preferences = _expand_moods(list(dict.fromkeys(scenario_prefer + subtype_focus_tags)))
+        feedback_preferences = _expand_moods(list(dict.fromkeys(feedback_like_tags[:4])))
+        recall_focus = list(dict.fromkeys(
+            explicit_preferences + scenario_preferences + feedback_preferences
+        ))
+        # 只有用户本轮明确输入和场景约束值得扩大标签搜索深度；历史反馈只参与
+        # 一次弱召回，不能像本轮硬要求一样搜三页并施加强惩罚。
+        mood = explicit_preferences + [x for x in scenario_preferences if x not in explicit_preferences]
         core = all_tags[2:8] if args.explore else all_tags[:6]  # explore：用次级标签拓展
-        recall_tags = list(dict.fromkeys(mood + core))[:_MAX_RECALL_TAGS]
+        recall_tags = list(dict.fromkeys(recall_focus + core))[:_MAX_RECALL_TAGS]
         cold_start_questions: list[str] = []
         if len(watched) < 5 and not (args.tags or args.prefer_tags):
             cold_start_questions = [
@@ -1054,8 +1097,16 @@ class RecommendTool(Tool):
                 c["external_boost"] = max(c.get("external_boost", 0.0), min(0.1 + meta.get("_sim", 0.0) * 0.3, 0.35))
                 semantic_hits += 1
 
-        # 用户最爱作品（按评分降序）——图谱召回与协同召回共用作种子
-        fav_sorted = sorted(watched, key=lambda it: -(it.get("rate") or 0))
+        # 图谱与协同种子只使用可解释的正向消费。旧逻辑会在用户评分稀疏时把
+        # 低分“看过”也当作爱好种子，从而系统性召回相似雷区。
+        positive_seed_items = _positive_consumption_items(items)
+        fav_sorted = sorted(
+            positive_seed_items,
+            key=lambda it: (
+                -(int(it.get("rate") or 0)),
+                0 if it.get("type") == 2 else 1,
+            ),
+        )
         fav_ids = [it["subject"]["id"] for it in fav_sorted if it.get("subject", {}).get("id")]
         fav_names = {
             it["subject"]["id"]: (it["subject"].get("name_cn") or it["subject"].get("name"))
@@ -1104,44 +1155,51 @@ class RecommendTool(Tool):
         def external_bonus(c: dict) -> float:
             return min(c.get("external_boost", 0.0), self.w.external_cap)
 
-        mood_set = set(mood)
+        explicit_set = set(explicit_preferences)
+        scenario_set = set(scenario_preferences)
+        feedback_set = set(feedback_preferences)
 
-        def memory_avoidance_hits(c: dict) -> list[str]:
-            if not memory_dislikes:
-                return []
+        def tag_hits(c: dict, values: list[str]) -> list[str]:
             haystack = [str(x) for x in (c.get("tags") or set()) | (c.get("matched") or set())]
             if c.get("name"):
                 haystack.append(str(c["name"]))
             hits: list[str] = []
-            for value in memory_dislikes:
+            for value in values:
                 key = _norm_title(value)
                 if not key:
                     continue
-                for h in haystack:
-                    hk = _norm_title(h)
-                    if hk and (key == hk or key in hk or hk in key):
-                        hits.append(value)
-                        break
+                if any(
+                    (haystack_key := _norm_title(candidate))
+                    and (key == haystack_key or key in haystack_key or haystack_key in key)
+                    for candidate in haystack
+                ):
+                    hits.append(value)
             return list(dict.fromkeys(hits))[:4]
+
+        def memory_avoidance_hits(c: dict) -> list[str]:
+            return tag_hits(c, memory_dislikes)
 
         def memory_penalty(c: dict) -> float:
             return self.w.memory_penalty if memory_avoidance_hits(c) else 0.0
 
         def temporary_avoidance_hits(c: dict) -> list[str]:
-            haystack = [str(x) for x in (c.get("tags") or set()) | (c.get("matched") or set())]
-            if c.get("name"):
-                haystack.append(str(c["name"]))
-            hits: list[str] = []
-            for value in list(args.avoid_tags) + feedback_dislike_tags[:6]:
-                key = _norm_title(value)
-                if not key:
-                    continue
-                if any((hk := _norm_title(h)) and (key == hk or key in hk or hk in key) for h in haystack):
-                    hits.append(value)
-            return list(dict.fromkeys(hits))[:4]
+            return tag_hits(c, list(args.avoid_tags))
 
         def temporary_penalty(c: dict) -> float:
             return self.w.temporary_penalty if temporary_avoidance_hits(c) else 0.0
+
+        def feedback_avoidance_hits(c: dict) -> list[str]:
+            return tag_hits(c, feedback_dislike_tags[:6])
+
+        def feedback_avoidance_penalty(c: dict) -> float:
+            return self.w.feedback_penalty if feedback_avoidance_hits(c) else 0.0
+
+        def profile_avoidance_hits(c: dict) -> list[str]:
+            return tag_hits(c, profile_dislike_tags)
+
+        def profile_avoidance_penalty(c: dict) -> float:
+            # 从评分/弃坑推导出的标签是统计推断，不应像用户明确避雷一样硬罚。
+            return -0.3 if profile_avoidance_hits(c) else 0.0
 
         def candidate_aspects(c: dict) -> set[str]:
             values = list(c.get("tags") or set()) + list(c.get("matched") or set())
@@ -1225,9 +1283,19 @@ class RecommendTool(Tool):
 
             例如"今天想看治愈"时，历史画像里的热血/战斗候选不能靠总画像分数顶上来。
             """
-            if not mood_set:
+            if not explicit_set:
                 return 0.0
-            return self.w.explicit_hit if c["matched"] & mood_set else self.w.explicit_miss
+            return self.w.explicit_hit if c["matched"] & explicit_set else self.w.explicit_miss
+
+        def scenario_tag_adjust(c: dict) -> float:
+            if not scenario_set:
+                return 0.0
+            return self.w.scenario_hit if c["matched"] & scenario_set else self.w.scenario_miss
+
+        def feedback_tag_adjust(c: dict) -> float:
+            if not feedback_set:
+                return 0.0
+            return self.w.feedback_hit if c["matched"] & feedback_set else 0.0
 
         # 预排（不含质量）→ 给 top 候选补名/评分 → 终排（含质量）
         prelim = sorted(
@@ -1235,7 +1303,10 @@ class RecommendTool(Tool):
             key=lambda kv: -(
                 affinity(kv[1]) + graph_bonus(kv[1]) + cf_bonus(kv[1])
                 + external_bonus(kv[1]) + explicit_tag_adjust(kv[1])
-                + memory_penalty(kv[1]) + temporary_penalty(kv[1]) + aspect_bonus(kv[1])
+                + scenario_tag_adjust(kv[1]) + feedback_tag_adjust(kv[1])
+                + memory_penalty(kv[1]) + temporary_penalty(kv[1])
+                + feedback_avoidance_penalty(kv[1]) + profile_avoidance_penalty(kv[1])
+                + aspect_bonus(kv[1])
                 + media_subtype_penalty(kv[1])
             ),
         )[:40]
@@ -1278,8 +1349,12 @@ class RecommendTool(Tool):
                 "cf": cf_bonus(c),
                 "external": external_bonus(c),
                 "explicit": explicit_tag_adjust(c),
+                "scenario": scenario_tag_adjust(c),
+                "feedback": feedback_tag_adjust(c),
                 "memory_pen": memory_penalty(c),
                 "temporary_pen": temporary_penalty(c),
+                "feedback_pen": feedback_avoidance_penalty(c),
+                "profile_pen": profile_avoidance_penalty(c),
                 "aspect": aspect_bonus(c),
                 "subtype_pen": media_subtype_penalty(c),
                 "semantic": sem_scores.get(sid, 0.0),
@@ -1290,12 +1365,16 @@ class RecommendTool(Tool):
             if args.niche:  # 挖冷门：协同偏热门，权重压低
                 return (0.5 * affinity(c) + 0.5 * graph_bonus(c)
                         + 0.4 * cf_bonus(c) + external_bonus(c)
-                        + explicit_tag_adjust(c) + memory_penalty(c) + temporary_penalty(c)
+                        + explicit_tag_adjust(c) + scenario_tag_adjust(c) + feedback_tag_adjust(c)
+                        + memory_penalty(c) + temporary_penalty(c)
+                        + feedback_avoidance_penalty(c) + profile_avoidance_penalty(c)
                         + aspect_bonus(c) + media_subtype_penalty(c) + semantic_bonus(c, sid)
                         + 2.0 * _quality_niche(c["rating"]))
             return (
                 affinity(c) + graph_bonus(c) + cf_bonus(c) + external_bonus(c)
-                + explicit_tag_adjust(c) + memory_penalty(c) + temporary_penalty(c)
+                + explicit_tag_adjust(c) + scenario_tag_adjust(c) + feedback_tag_adjust(c)
+                + memory_penalty(c) + temporary_penalty(c)
+                + feedback_avoidance_penalty(c) + profile_avoidance_penalty(c)
                 + aspect_bonus(c) + media_subtype_penalty(c) + semantic_bonus(c, sid)
                 + self.w.quality_popular * _quality_popular(c["rating"])
             )
@@ -1318,7 +1397,9 @@ class RecommendTool(Tool):
         out: list[RecItem] = []
         seen_series: set[str] = set()
         seen_ids: set[int] = set()
-        pool_limit = min(args.limit * 2, 20) if args.enrich_evidence else args.limit
+        # 系列入口替换后会重新计算分数，因此无论是否补评价证据，都保留一个
+        # 稍大的候选池供最终重排，避免续作高分把实际不合适的入口硬塞进 top-N。
+        pool_limit = min(args.limit * 2, 20)
         if args.export_features:
             pool_limit = 60  # LTR 训练：导出更大候选池以容纳 hold-out 正样本（训练专用路径）
         series_contexts: dict[int, dict[str, Any]] = {}
@@ -1343,58 +1424,73 @@ class RecommendTool(Tool):
                     if not isinstance(res, Exception):
                         series_contexts[sid] = res
 
-        def explanation_parts(c: dict, r_id: int, r_name: str, reasons: list[str], subtype_notes: list[str]) -> tuple[list[str], list[str], list[str], dict, list[str]]:
-            why_recalled = []
+        def recall_signals(c: dict) -> list[str]:
+            signals: list[str] = []
             if c["matched"]:
-                why_recalled.append("标签召回：" + "、".join(sorted(c["matched"])[:4]))
+                signals.append("标签召回：" + "、".join(sorted(c["matched"])[:4]))
             if c["graph"]:
-                why_recalled.append("图谱召回：" + "、".join(sorted(c["graph"])[:2]))
+                signals.append("图谱召回：" + "、".join(sorted(c["graph"])[:2]))
             if c.get("friends"):
-                why_recalled.append("好友圈信号：" + str(c["friends"]))
+                signals.append("好友圈信号：" + str(c["friends"]))
             if c.get("cf_from"):
-                why_recalled.extend(cf_reason(c)[:1])
+                signals.extend(cf_reason(c)[:1])
             if c.get("external"):
-                why_recalled.append("外部证据：" + "、".join(sorted(c["external"])[:2]))
-            fit_points = []
-            if explicit_matches := sorted(c["matched"] & mood_set):
-                fit_points.append("本轮偏好命中：" + "、".join(explicit_matches[:4]))
-            if aspect_like_hits(c):
-                fit_points.append("长期好球区：" + "、".join(aspect_like_hits(c)[:3]))
-            if subtype_notes:
-                fit_points.extend(subtype_notes[:2])
-            risks = []
-            if aspect_dislike_hits(c):
-                risks.append("可能触及雷区：" + "、".join(aspect_dislike_hits(c)[:3]))
-            if temporary_avoidance_hits(c):
-                risks.append("接近近期避雷/本轮避雷：" + "、".join(temporary_avoidance_hits(c)[:3]))
-            if memory_avoidance_hits(c):
-                risks.append("接近长期避雷：" + "、".join(memory_avoidance_hits(c)[:3]))
-            eps = c.get("eps")
-            if effective_max_episodes and eps and eps > effective_max_episodes:
-                risks.append(f"篇幅 {eps} 集，超过本轮短篇目标")
-            heat = {
+                signals.append("外部来源召回：" + "、".join(sorted(c["external"])[:2]))
+            return signals[:5]
+
+        def item_heat(c: dict) -> dict:
+            return {
                 "bangumi_score": (c.get("rating") or {}).get("score"),
                 "rank": (c.get("rating") or {}).get("rank"),
                 "evidence": [e.model_dump(mode="json", exclude_none=True) for e in c.get("external_evidence", [])[:3]],
                 "badges": _quality_badges(list(c.get("external_evidence", []))),
             }
+
+        def next_steps(r_name: str) -> list[str]:
             if scenario == "tonight":
-                next_step = [f"今晚先看《{r_name}》第 1 集试口味", "如果觉得节奏不对，反馈“少来这种/换短一点”"]
+                result = [f"今晚先看《{r_name}》第 1 集试口味", "如果觉得节奏不对，反馈“少来这种/换短一点”"]
             elif scenario == "backlog":
-                next_step = [f"从想看列表开《{r_name}》1-2 集", "看完后可写回在看或移出想看"]
+                result = [f"从想看列表开《{r_name}》1-2 集", "看完后可写回在看或移出想看"]
             elif scenario == "gal_intro":
-                next_step = [f"先查《{r_name}》购买/入门入口", "可再问“无剧透评价/适合我吗”"]
+                result = [f"先查《{r_name}》购买/入门入口", "可再问“无剧透评价/适合我吗”"]
             elif scenario == "cross_media":
-                next_step = [f"把《{r_name}》作为跨媒体延伸入口", "可继续查原作/改编关系图"]
+                result = [f"把《{r_name}》作为跨媒体延伸入口", "可继续查原作/改编关系图"]
             else:
-                next_step = [f"先看《{r_name}》的无剧透评价", "喜欢/不喜欢后用反馈按钮继续重排"]
-            return (
-                why_recalled[:5] or reasons[:3],
-                fit_points[:5] or reasons[:3],
-                risks[:5],
-                heat,
-                next_step[:4],
+                result = [f"先看《{r_name}》的无剧透评价", "喜欢/不喜欢后用反馈按钮继续重排"]
+            return result[:4]
+
+        def entry_candidate(context: dict[str, Any], origin: dict) -> dict | None:
+            raw = context.get("entry_candidate")
+            if not raw:
+                return None
+            candidate = {
+                **raw,
+                "matched": set(raw.get("matched") or ()),
+                "graph": set(raw.get("graph") or ()),
+                "cf_from": set(raw.get("cf_from") or ()),
+                "external": set(raw.get("external") or ()),
+                "external_evidence": list(raw.get("external_evidence") or ()),
+                "external_mappings": list(raw.get("external_mappings") or ()),
+                "tags": set(raw.get("tags") or ()),
+            }
+            # _blank() 保证以下召回信号为空。这里显式清空，防止未来上游给
+            # entry_candidate 增加字段时意外继承续作证据。
+            candidate.update({
+                "graph": set(),
+                "cf": 0.0,
+                "cf_from": set(),
+                "external": set(),
+                "external_evidence": [],
+                "external_boost": 0.0,
+                "external_mappings": [],
+            })
+            candidate["matched"] = set(tag_hits(candidate, recall_tags))
+            candidate["weight"] = sum(
+                maxw if tag in mood else user_tags.get(tag, 1.0)
+                for tag in candidate["matched"]
             )
+            candidate["series_origin"] = str(origin.get("name") or "")
+            return candidate
 
         for sid, c in ranked:
             if not c["name"]:
@@ -1402,6 +1498,8 @@ class RecommendTool(Tool):
             eps = c.get("eps")
             if effective_max_episodes is not None and isinstance(eps, int) and eps > effective_max_episodes:
                 continue
+            effective_candidate = c
+            series_origin: str | None = None
             r_id, r_name, r_img, r_rating, extra = sid, c["name"], c.get("image"), c["rating"], []
             franchise_key = _series_key(r_name)
             if args.use_series:
@@ -1417,7 +1515,12 @@ class RecommendTool(Tool):
                 )
                 if replace_with_entry:
                     r_id, r_name, r_img, r_rating = entry
-                    extra.append(f"系列入口（《{c['name']}》的前作，建议从这部入坑）")
+                    replacement = entry_candidate(context, c)
+                    if replacement is None:
+                        continue
+                    effective_candidate = replacement
+                    series_origin = str(c["name"])
+                    extra.append(f"系列入口：由《{c['name']}》回溯，建议从这部开始")
                 elif context["seen_predecessor"] and effective_series_policy in {"continue", "allow"}:
                     extra.append("你已接触该系列前作，本轮保留后续作候选")
                 if siblings:  # 同 IP 旁支 → 提一嘴（平行关系，不替换）
@@ -1425,48 +1528,86 @@ class RecommendTool(Tool):
             sk = franchise_key or _series_key(r_name)
             if r_id in seen_ids or sk in seen_series:  # 入口去重（多个续集回溯到同一入口）
                 continue
+            effective_eps = effective_candidate.get("eps")
+            if (
+                effective_max_episodes is not None
+                and isinstance(effective_eps, int)
+                and effective_eps > effective_max_episodes
+            ):
+                continue
             seen_ids.add(r_id)
             seen_series.add(sk)
-            explicit_matches = sorted(c["matched"] & mood_set)
-            reasons = sorted(c["matched"]) + sorted(c["graph"]) + sorted(c.get("external", set())) + cf_reason(c) + extra
-            avoid_hits = memory_avoidance_hits(c)
+            explicit_matches = sorted(tag_hits(effective_candidate, list(explicit_set)))
+            scenario_matches = sorted(tag_hits(effective_candidate, list(scenario_set)))
+            feedback_matches = sorted(tag_hits(effective_candidate, list(feedback_set)))
+            profile_matches = sorted(tag_hits(effective_candidate, list(user_tags)))
+            signals = recall_signals(effective_candidate)
+            if series_origin:
+                signals = [f"系列入口：由《{series_origin}》回溯"]
+            reasons = (
+                sorted(effective_candidate["matched"])
+                + sorted(effective_candidate["graph"])
+                + sorted(effective_candidate.get("external", set()))
+                + cf_reason(effective_candidate)
+                + extra
+            )
+            constraint_warnings: list[str] = []
+            avoid_hits = memory_avoidance_hits(effective_candidate)
             if avoid_hits:
                 reasons.append("命中长期记忆避雷，已降权：" + "、".join(avoid_hits))
-            temp_hits = temporary_avoidance_hits(c)
+                constraint_warnings.append("接近你的长期明确避雷：" + "、".join(avoid_hits))
+            temp_hits = temporary_avoidance_hits(effective_candidate)
             if temp_hits:
                 reasons.append("命中本轮临时避雷，已降权：" + "、".join(temp_hits))
-            aspect_matches = aspect_like_hits(c)
-            aspect_warnings = aspect_dislike_hits(c)
+                constraint_warnings.append("接近你本轮明确避开的：" + "、".join(temp_hits))
+            feedback_avoid_hits = feedback_avoidance_hits(effective_candidate)
+            if feedback_avoid_hits:
+                reasons.append("命中近期负反馈标签，已轻量降权：" + "、".join(feedback_avoid_hits))
+                constraint_warnings.append("与你近期减少的方向相近：" + "、".join(feedback_avoid_hits))
+            profile_avoid_hits = profile_avoidance_hits(effective_candidate)
+            if profile_avoid_hits:
+                reasons.append("命中画像推断负标签，已轻量降权：" + "、".join(profile_avoid_hits))
+                constraint_warnings.append("画像显示你可能不太偏好：" + "、".join(profile_avoid_hits))
+            aspect_matches = aspect_like_hits(effective_candidate)
+            aspect_warnings = aspect_dislike_hits(effective_candidate)
             if aspect_matches:
                 reasons.append("aspect 好球区命中：" + "、".join(aspect_matches))
             if aspect_warnings:
                 reasons.append("aspect 雷区命中，已降权：" + "、".join(aspect_warnings))
-            if mood_set and not explicit_matches:
+            if explicit_set and not explicit_matches:
                 reasons.append("未命中本轮显式标签，作为画像邻近补充")
-            subtype = media_subtype(c)
-            subtype_notes = media_notes(c)
+            subtype = media_subtype(effective_candidate)
+            subtype_notes = media_notes(effective_candidate)
             reasons.extend(n for n in subtype_notes if n not in reasons)
-            why_recalled, fit_points, risks, heat, next_step = explanation_parts(c, r_id, r_name, reasons, subtype_notes)
+            constraint_warnings.extend(note for note in subtype_notes if "未完全命中" in note)
             out.append(RecItem(
-                id=r_id, name=r_name, score=round(score(r_id, c), 3),
+                id=r_id, name=r_name, score=round(score(r_id, effective_candidate), 3),
                 reasons=reasons,
-                why_recalled=why_recalled,
-                fit_points=fit_points,
-                risks=risks,
-                heat=heat,
-                next_step=next_step,
+                why_recalled=signals,
+                recall_signals=signals,
+                constraint_warnings=_unique(constraint_warnings)[:5],
+                heat=item_heat(effective_candidate),
+                next_step=next_steps(r_name),
                 explicit_tag_matches=explicit_matches,
+                scenario_tag_matches=scenario_matches,
+                feedback_tag_matches=feedback_matches,
+                profile_tag_matches=profile_matches,
                 bangumi_score=(r_rating or {}).get("score"),
                 rank=(r_rating or {}).get("rank"),
                 image=r_img,
-                evidence=list(c.get("external_evidence", [])),
-                external_mappings=list(c.get("external_mappings", [])),
+                evidence=list(effective_candidate.get("external_evidence", [])),
+                external_mappings=list(effective_candidate.get("external_mappings", [])),
                 aspect_matches=aspect_matches,
                 aspect_warnings=aspect_warnings,
                 media_subtype=subtype,
                 media_notes=subtype_notes,
-                diversity_tags=sorted(c.get("tags") or ())[:16],
-                features=feature_vector(r_id, c) if args.export_features else None,
+                diversity_tags=sorted(effective_candidate.get("tags") or ())[:16],
+                series_origin=series_origin,
+                features=(
+                    feature_vector(r_id, effective_candidate)
+                    if args.export_features
+                    else None
+                ),
             ))
             if len(out) >= pool_limit:
                 break
@@ -1479,31 +1620,35 @@ class RecommendTool(Tool):
                 total=6,
             )
             await self._enrich_review_evidence(out, aspect_profile, args.subject_type)
-            reranked_items = _mmr_rerank(
-                [
-                    (
-                        item.id,
-                        {
-                            "name": item.name,
-                            "tags": set(item.diversity_tags),
-                            "graph": set(),
-                            "item": item,
-                        },
-                    )
-                    for item in out
-                ],
-                lambda _sid, payload: payload["item"].score,
-                args.diversity_strength,
-                pool_size=len(out),
-            )
-            out = [payload["item"] for _sid, payload in reranked_items]
-            out = out[: args.limit]
+
+        # 评价补全会修改 score/aspect/evidence；必须在所有修改结束后再生成用户
+        # 可见解释。随后按“最终条目”的最终分数和标签统一重排。
+        for item in out:
+            refresh_item_explanation(item, scenario)
+        reranked_items = _mmr_rerank(
+            [
+                (
+                    item.id,
+                    {
+                        "name": item.name,
+                        "tags": set(item.diversity_tags),
+                        "graph": set(),
+                        "item": item,
+                    },
+                )
+                for item in sorted(out, key=lambda candidate: -candidate.score)
+            ],
+            lambda _sid, payload: payload["item"].score,
+            args.diversity_strength,
+            pool_size=len(out),
+        )
+        out = [payload["item"] for _sid, payload in reranked_items[: args.limit]]
 
         await emit_tool_progress(tool=self.name, summary=f"推荐完成：输出 {len(out)} 个候选", current=6, total=6)
 
         mode = "niche" if args.niche else ("explore" if args.explore else "normal")
         notes: list[str] = []
-        if mood_set:
+        if explicit_set:
             strict_count = sum(1 for it in out if it.explicit_tag_matches)
             if strict_count == 0:
                 notes.append("没有找到未看且命中本轮显式标签的高置信候选；当前结果为画像邻近补充。")
@@ -1566,7 +1711,13 @@ class RecommendTool(Tool):
                 username,
                 args.subject_type,
                 scenario,
-                args.model_dump(mode="json", exclude_none=True),
+                {
+                    **args.model_dump(mode="json", exclude_none=True),
+                    "_model_metadata": {
+                        **cf_status.model_dump(mode="json", exclude_none=True),
+                        "semantic": semantic_model_status(),
+                    },
+                },
                 [item.model_dump(mode="json", exclude_none=True) for item in out],
             )
         return ToolResult(
@@ -1594,7 +1745,10 @@ class RecommendTool(Tool):
                     "principle": "近期反馈作为弱 rerank 信号；本轮显式要求优先。",
                 },
                 recommendation_set_id=recommendation_set_id,
-                model_metadata=cf_status.model_dump(mode="json", exclude_none=True),
+                model_metadata={
+                    **cf_status.model_dump(mode="json", exclude_none=True),
+                    "semantic": semantic_model_status(),
+                },
                 diversity={
                     "method": "MMR",
                     "strength": args.diversity_strength,

@@ -36,6 +36,8 @@ jobs:
         run: pip install -e ".[dev]"
       - name: Lint backend
         run: ruff check otomo tests scripts
+      - name: Check recommendation model coverage
+        run: python scripts/check_recommendation_models.py
       - name: Run tests
         run: pytest -m "not external"
 
@@ -55,6 +57,25 @@ jobs:
         run: npm ci
       - name: Build frontend
         run: npm run build
+
+  recsys:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: recsys-offline
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install recommendation tests
+        run: |
+          pip install -e . --no-deps
+          pip install pandas numpy scipy httpx pytest ruff
+      - name: Lint recommendation pipeline
+        run: ruff check recsys_offline tests
+      - name: Run recommendation tests
+        run: pytest
 
   golden-eval:
     if: github.event_name == 'workflow_dispatch'

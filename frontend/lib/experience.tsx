@@ -2,7 +2,7 @@
 
 import { usePathname, useRouter } from "next/navigation";
 import {
-  createContext, useCallback, useContext, useEffect, useMemo, useState,
+  createContext, useCallback, useContext, useEffect, useMemo, useRef, useState,
   type ReactNode,
 } from "react";
 
@@ -55,6 +55,11 @@ type ExperienceContextValue = {
   authenticated: boolean;
   authReady: boolean;
   csrf: string;
+  username: string;
+  avatarUrl: string;
+  oauthConfigured: boolean;
+  devTokenAvailable: boolean;
+  refreshAuthSession: () => Promise<Record<string, any>>;
   online: boolean;
 };
 
@@ -130,7 +135,41 @@ export function ExperienceProvider({ children }: { children: ReactNode }) {
   const [authenticated, setAuthenticated] = useState(false);
   const [authReady, setAuthReady] = useState(false);
   const [csrf, setCsrf] = useState("");
+  const [username, setUsername] = useState("");
+  const [avatarUrl, setAvatarUrl] = useState("");
+  const [oauthConfigured, setOauthConfigured] = useState(false);
+  const [devTokenAvailable, setDevTokenAvailable] = useState(false);
+  const authRequestRef = useRef<Promise<Record<string, any>> | null>(null);
   const [online, setOnline] = useState(true);
+
+  const refreshAuthSession = useCallback(() => {
+    if (authRequestRef.current) return authRequestRef.current;
+    const request = authSession()
+      .then((auth) => {
+        setAuthenticated(Boolean(auth.authenticated));
+        setCsrf(auth.csrf_token || "");
+        setUsername(auth.username || "");
+        setAvatarUrl(auth.avatar_url || "");
+        setOauthConfigured(Boolean(auth.oauth_configured));
+        setDevTokenAvailable(Boolean(auth.dev_token_available));
+        return auth;
+      })
+      .catch(() => {
+        setAuthenticated(false);
+        setCsrf("");
+        setUsername("");
+        setAvatarUrl("");
+        setOauthConfigured(false);
+        setDevTokenAvailable(false);
+        return { authenticated: false };
+      })
+      .finally(() => {
+        authRequestRef.current = null;
+        setAuthReady(true);
+      });
+    authRequestRef.current = request;
+    return request;
+  }, []);
 
   useEffect(() => {
     const value = parseLocal(APPEARANCE_KEY, DEFAULT_APPEARANCE);
@@ -149,10 +188,7 @@ export function ExperienceProvider({ children }: { children: ReactNode }) {
     }).catch(() => undefined);
     const syncOnline = () => setOnline(navigator.onLine);
     syncOnline(); window.addEventListener("online", syncOnline); window.addEventListener("offline", syncOnline);
-    authSession()
-      .then((auth) => { setAuthenticated(Boolean(auth.authenticated)); setCsrf(auth.csrf_token || ""); })
-      .catch(() => undefined)
-      .finally(() => setAuthReady(true));
+    void refreshAuthSession();
     if ("serviceWorker" in navigator) {
       if (process.env.NODE_ENV === "production") {
         navigator.serviceWorker.register("/sw.js").catch(() => undefined);
@@ -166,7 +202,7 @@ export function ExperienceProvider({ children }: { children: ReactNode }) {
       }
     }
     return () => { window.removeEventListener("online", syncOnline); window.removeEventListener("offline", syncOnline); };
-  }, []);
+  }, [refreshAuthSession]);
 
   useEffect(() => {
     const labels: Record<string, string> = {
@@ -262,8 +298,9 @@ export function ExperienceProvider({ children }: { children: ReactNode }) {
     compareItems, addCompareItem, removeCompareItem: (id) => setCompareItems((rows) => rows.filter((x) => x.id !== id)),
     clearCompareItems: () => setCompareItems([]), tasks, startTask, finishTask,
     dismissTask: (id) => setTasks((rows) => rows.filter((x) => x.id !== id)),
-    unread, refreshUnread, authenticated, authReady, csrf, online,
-  }), [appearance, wallpaperUrl, commandOpen, notificationOpen, watchOpen, settingsOpen, compareOpen, compareItems, tasks, unread, authenticated, authReady, csrf, online, setAppearance, saveWallpaper, clearWallpaper, addCompareItem, startTask, finishTask, refreshUnread]);
+    unread, refreshUnread, authenticated, authReady, csrf, username, avatarUrl,
+    oauthConfigured, devTokenAvailable, refreshAuthSession, online,
+  }), [appearance, wallpaperUrl, commandOpen, notificationOpen, watchOpen, settingsOpen, compareOpen, compareItems, tasks, unread, authenticated, authReady, csrf, username, avatarUrl, oauthConfigured, devTokenAvailable, online, setAppearance, saveWallpaper, clearWallpaper, addCompareItem, startTask, finishTask, refreshUnread, refreshAuthSession]);
 
   useEffect(() => {
     const handler = (event: Event) => {

@@ -5,23 +5,19 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 
 import { PageHeader } from "../../../components/page-header";
-import { authSession, createShareSnapshot, productFetch } from "../../../lib/api";
+import { createShareSnapshot, productFetch } from "../../../lib/api";
+import { useExperience } from "../../../lib/experience";
 import { SubjectDossierPanel } from "../../panels/product";
 import { SubjectActions } from "../../../components/subject-actions";
 
 export default function SubjectPage({ params }: { params: { id: string } }) {
+  const { csrf, authenticated } = useExperience();
   const [data, setData] = useState<any>(null);
   const [sources, setSources] = useState<any[]>([]);
-  const [csrf, setCsrf] = useState("");
-  const [authenticated, setAuthenticated] = useState(false);
   const [error, setError] = useState("");
   const [share, setShare] = useState("");
 
   useEffect(() => {
-    authSession().then((auth) => {
-      setCsrf(auth.csrf_token || "");
-      setAuthenticated(Boolean(auth.authenticated));
-    }).catch(() => undefined);
     productFetch(`/product/subjects/${encodeURIComponent(params.id)}?spoiler_level=none`)
       .then((payload) => { setData(payload.data); setSources(payload.sources || []); })
       .catch((e) => setError(String(e)));

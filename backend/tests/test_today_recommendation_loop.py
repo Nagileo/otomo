@@ -108,10 +108,82 @@ def test_recommendation_feedback_service_shares_memory_across_clients(tmp_path):
     assert memory.feedback[-1].note == "recommendation_card:discord:watched"
 
 
+def test_scoped_feedback_can_be_undone_without_generalizing_all_tags(tmp_path):
+    store = RecommendationEventStore(str(tmp_path / "events.sqlite3"))
+    ltm = LongTermMemory(tmp_path / "memory")
+    set_id = store.create_set("alice", "anime", "general", {}, [{"id": 9, "name": "测试番"}])
+
+    record_recommendation_feedback(
+        store,
+        ltm,
+        "alice",
+        RecommendationFeedbackRequest(
+            recommendation_set_id=set_id,
+            subject_id=9,
+            event="less",
+            aspect="genre",
+        ),
+    )
+    memory = ltm.load_user("alice")
+    assert memory.feedback[-1].scope == "genre"
+    assert store.recent_excluded_ids("alice") == {9}
+
+    record_recommendation_feedback(
+        store,
+        ltm,
+        "alice",
+        RecommendationFeedbackRequest(
+            recommendation_set_id=set_id,
+            subject_id=9,
+            event="undo",
+        ),
+    )
+    assert ltm.load_user("alice").feedback == []
+    assert store.recent_excluded_ids("alice") == set()
+
+
+def test_metrics_count_only_recorded_visible_impressions(tmp_path):
+    store = RecommendationEventStore(str(tmp_path / "events.sqlite3"))
+    set_id = store.create_set(
+        "alice",
+        "anime",
+        "tonight",
+        {"_model_metadata": {"version": "v1"}},
+        [{"id": 1, "name": "A"}, {"id": 2, "name": "B"}],
+    )
+    visible = RecommendationFeedbackRequest(
+        recommendation_set_id=set_id,
+        subject_id=1,
+        event="impression",
+        note="visible_1200ms",
+    )
+    store.record("alice", visible)
+    store.record("alice", visible)
+    metrics = store.metrics("alice")
+
+    assert metrics["visible_impressions"] == 1
+    assert metrics["unique_visible_sets"] == 1
+    assert metrics["unique_visible_items"] == 1
+    assert metrics["segments"] == [{
+        "subject_type": "anime", "scenario": "tonight", "impressions": 1,
+    }]
+    assert metrics["model_versions"] == {"v1": 1}
+
+
 def test_cf_registry_reports_stale_and_missing_models(tmp_path):
     built = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
     (tmp_path / "i2i_anime.json").write_text(json.dumps({
-        "meta": {"model": "bm25", "built_at": built, "n_users": 10, "n_items": 1},
+        "meta": {
+            "model": "bm25",
+            "built_at": built,
+            "n_users": 10,
+            "n_items": 1,
+            "weighting_version": "bangumi-weighted-v2",
+            "quality_gate_passed": True,
+            "baseline_ndcg_at_10": 0.12,
+            "selected_ndcg_at_10": 0.16,
+            "relative_lift": 0.333333,
+        },
         "items": {"1": [[2, 0.5]]},
     }), encoding="utf-8")
     registry = CFModelRegistry(str(tmp_path), max_age_days=45)
@@ -119,6 +191,11 @@ def test_cf_registry_reports_stale_and_missing_models(tmp_path):
     assert payload["items"]["1"][0][0] == 2
     assert status.available is True
     assert status.stale is True
+    assert status.weighting_version == "bangumi-weighted-v2"
+    assert status.quality_gate_passed is True
+    assert status.baseline_ndcg_at_10 == 0.12
+    assert status.selected_ndcg_at_10 == 0.16
+    assert status.relative_lift == 0.333333
     assert status.warnings
     assert registry.load("music")[1].available is False
 

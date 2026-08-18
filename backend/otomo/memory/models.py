@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, PrivateAttr
 MemSource = Literal["explicit_user", "bangumi_profile", "derived_from_feedback"]
 SpoilerDefault = Literal["none", "mild", "full"]
 FeedbackSignal = Literal["like", "dislike", "more", "less"]
+FeedbackScope = Literal["item", "genre", "visual", "pace", "length"]
 VisualFeedbackSignal = Literal["correct", "wrong", "ambiguous"]
 WriteActionStatus = Literal["pending", "executed", "cancelled", "failed", "undone"]
 WriteOperation = Literal["set_collection", "set_episode_collection", "mark_episodes_watched", "push_downloader"]
@@ -39,6 +40,9 @@ class FeedbackItem(BaseModel):
     subject_id: int | None = None
     name: str = ""
     signal: FeedbackSignal
+    # item 只影响这部作品；其余值必须是用户明确选择的泛化维度。旧数据默认
+    # 为 item，避免一次“少来这种”自动把作品全部标签都判成雷区。
+    scope: FeedbackScope = "item"
     note: str = ""
     source: MemSource = "explicit_user"
     confidence: float = Field(0.8, ge=0.0, le=1.0)

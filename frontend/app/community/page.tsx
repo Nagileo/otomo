@@ -5,7 +5,8 @@ import { useEffect, useState } from "react";
 
 import { PageHeader } from "../../components/page-header";
 import { UserAvatar } from "../../components/identity-avatar";
-import { authSession, BACKEND, readJson } from "../../lib/api";
+import { BACKEND, readJson } from "../../lib/api";
+import { useExperience } from "../../lib/experience";
 
 type CommunityStats = {
   total_visitors?: number;
@@ -13,6 +14,7 @@ type CommunityStats = {
   total_views?: number;
   views_today?: number;
   comment_count?: number;
+  tracking_since?: string;
   popular_pages?: { path: string; views: number }[];
   privacy?: string;
 };
@@ -30,19 +32,13 @@ type CommunityComment = {
   report_count?: number;
 };
 
-type AuthState = {
-  authenticated?: boolean;
-  username?: string;
-  avatar_url?: string;
-  csrf_token?: string;
-};
-
 const PAGE_NAMES: Record<string, string> = {
   "/": "今日",
   "/chat": "对话",
   "/discover": "发现",
   "/library": "收藏",
   "/workspace": "清单",
+  "/me": "我的",
   "/friends": "好友圈",
   "/community": "同好留言",
   "/settings/subscriptions": "订阅设置",
@@ -58,7 +54,7 @@ function formatTime(value: string) {
 }
 
 export default function CommunityPage() {
-  const [auth, setAuth] = useState<AuthState | null>(null);
+  const { authenticated, authReady, username, avatarUrl, csrf } = useExperience();
   const [stats, setStats] = useState<CommunityStats>({});
   const [comments, setComments] = useState<CommunityComment[]>([]);
   const [content, setContent] = useState("");
@@ -67,15 +63,7 @@ export default function CommunityPage() {
 
   async function load() {
     try {
-      const identity = await authSession();
-      await fetch(`${BACKEND}/community/visit`, {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: "/community" }),
-      });
       const overview = await readJson(await fetch(`${BACKEND}/community`, { credentials: "include" }));
-      setAuth(identity);
       setStats(overview.stats || {});
       setComments(Array.isArray(overview.comments) ? overview.comments : []);
       setError("");
@@ -84,7 +72,7 @@ export default function CommunityPage() {
     }
   }
 
-  useEffect(() => { void load(); }, []);
+  useEffect(() => { if (authReady) void load(); }, [authReady]);
 
   async function submitComment() {
     const clean = content.trim();
@@ -96,7 +84,7 @@ export default function CommunityPage() {
         credentials: "include",
         headers: {
           "Content-Type": "application/json",
-          ...(auth?.csrf_token ? { "x-otomo-csrf": auth.csrf_token } : {}),
+          ...(csrf ? { "x-otomo-csrf": csrf } : {}),
         },
         body: JSON.stringify({ content: clean }),
       }));
@@ -118,7 +106,7 @@ export default function CommunityPage() {
       const payload = await readJson(await fetch(`${BACKEND}/community/comments/${encodeURIComponent(comment.id)}`, {
         method: "DELETE",
         credentials: "include",
-        headers: auth?.csrf_token ? { "x-otomo-csrf": auth.csrf_token } : {},
+        headers: csrf ? { "x-otomo-csrf": csrf } : {},
       }));
       setComments((rows) => rows.filter((row) => row.id !== comment.id));
       setStats(payload.stats || stats);
@@ -141,7 +129,7 @@ export default function CommunityPage() {
         credentials: "include",
         headers: {
           "Content-Type": "application/json",
-          ...(auth?.csrf_token ? { "x-otomo-csrf": auth.csrf_token } : {}),
+          ...(csrf ? { "x-otomo-csrf": csrf } : {}),
         },
         body: JSON.stringify({ reason: reason.trim() }),
       }));
@@ -159,7 +147,7 @@ export default function CommunityPage() {
   return (
     <main className="page-frame community-page">
       <PageHeader
-        eyebrow="Community pulse"
+        eyebrow="同好交流"
         title="同好留言"
         description="看看大家最近在用 Otomo 做什么，也可以留下建议、体验或想要的能力。"
       />
@@ -167,21 +155,22 @@ export default function CommunityPage() {
       {error ? <div className="surface-error">{error}</div> : null}
 
       <section className="community-stats" aria-label="访客统计">
-        <article><Users size={18} /><span>累计访客</span><strong>{stats.total_visitors ?? "—"}</strong><small>今日 {stats.visitors_today ?? "—"}</small></article>
-        <article><BarChart3 size={18} /><span>聚合访问</span><strong>{stats.total_views ?? "—"}</strong><small>今日 {stats.views_today ?? "—"}</small></article>
+        <article><Users size={18} /><span>独立访客</span><strong>{stats.total_visitors ?? "—"}</strong><small>按浏览器会话 · 今日 {stats.visitors_today ?? "—"}</small></article>
+        <article><BarChart3 size={18} /><span>页面浏览量</span><strong>{stats.total_views ?? "—"}</strong><small>去重后 · 今日 {stats.views_today ?? "—"}</small></article>
         <article><MessageSquareText size={18} /><span>公开留言</span><strong>{stats.comment_count ?? comments.length}</strong><small>连接 Bangumi 后可参与</small></article>
       </section>
+      <p className="community-stat-scope">自本次统计部署起{stats.tracking_since ? `（${formatTime(stats.tracking_since)} 开始）` : ""}；不是 Bangumi 全站数据，也不保存原始 IP。</p>
 
       <div className="community-layout">
         <section className="community-feed">
           <div className="section-heading compact">
-            <div><span className="section-kicker">Guestbook</span><h2>最近留言</h2></div>
+            <div><span className="section-kicker">公开留言板</span><h2>最近留言</h2></div>
           </div>
-          {auth?.authenticated ? (
+          {authenticated ? (
             <div className="comment-composer">
-              <UserAvatar className="comment-avatar" username={auth.username} avatarUrl={auth.avatar_url} />
+              <UserAvatar className="comment-avatar" username={username} avatarUrl={avatarUrl} />
               <div>
-                <strong>@{auth.username}</strong>
+                <strong>@{username}</strong>
                 <textarea
                   value={content}
                   onChange={(event) => setContent(event.target.value.slice(0, 500))}

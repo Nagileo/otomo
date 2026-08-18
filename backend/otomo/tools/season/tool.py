@@ -113,6 +113,7 @@ class SeasonGuideItem(BaseModel):
     yuc_title: str | None = None
     match_confidence: float = 0.0
     matched_by: str = "bangumi_only"
+    mapping_warning: str | None = None
     bangumi_score: float | None = None
     rank: int | None = None
     air_date: str | None = None
@@ -433,7 +434,7 @@ class SeasonGuideBriefTool(Tool):
                 me = await self.client.get_me()
                 user = me.get("username") or str(me.get("id"))
             items = await self.client.get_all_user_collections(
-                user, SUBJECT_TYPE["anime"], collection_type=2, max_items=1000
+                user, SUBJECT_TYPE["anime"], collection_type=None, max_items=1000
             )
         except Exception:  # noqa: BLE001
             return False, []
@@ -546,6 +547,11 @@ class SeasonGuideBriefTool(Tool):
                 yuc_title=yuc.title_cn if yuc else None,
                 match_confidence=match_confidence,
                 matched_by=matched_by,
+                mapping_warning=(
+                    "放送资料与 Bangumi 标题只做到了弱匹配，制作和播出信息请谨慎参考"
+                    if yuc and match_confidence < 0.8
+                    else None
+                ),
                 bangumi_score=subject.score,
                 rank=subject.rank,
                 air_date=subject.date,

@@ -73,65 +73,148 @@ export function RecommendPanel({
   const [current, setCurrent] = useState(data);
   const [dismissed, setDismissed] = useState<number[]>([]);
   const [reasons, setReasons] = useState<Record<number, string>>({});
+  const [expanded, setExpanded] = useState(false);
+  const [feedbackChoice, setFeedbackChoice] = useState<{ id: number; event: "more" | "less" } | null>(null);
+  const [feedbackScope, setFeedbackScope] = useState<Record<number, string>>({});
+  const [lastAction, setLastAction] = useState<{ item: AnyRecord; label: string } | null>(null);
   const [loadingNext, setLoadingNext] = useState(false);
   const reportedImpressions = useRef(new Set<string>());
-  useEffect(() => { setCurrent(data); setDismissed([]); }, [data]);
+  const gridRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    setCurrent(data);
+    setDismissed([]);
+    setExpanded(false);
+    setFeedbackChoice(null);
+    setLastAction(null);
+  }, [data]);
   const items = list(current.items).filter((item) => !dismissed.includes(Number(item.id)));
+  const shownItems = expanded ? items : items.slice(0, 3);
   const setId = String(current.recommendation_set_id || "");
   const aspectProfile = current.aspect_profile_summary || {};
   const mediaStrategy = current.media_strategy || {};
   const scenarioText = SCENARIO_LABEL[String(current.scenario || "general")] || "按你的口味";
   const fb = current.feedback_policy;
+  const model = current.model_metadata || {};
+  const personalizationLabel = current.subject_type === "anime"
+    ? model.available && !model.stale
+      ? "正式个性化"
+      : model.available ? "个性化模型待更新" : "画像推荐"
+    : "实验探索";
 
   useEffect(() => {
-    if (!onFeedback || !setId) return;
-    list(current.items).forEach((item) => {
-      const key = `${setId}:${Number(item.id)}`;
-      if (reportedImpressions.current.has(key)) return;
-      reportedImpressions.current.add(key);
-      void onFeedback({ recommendation_set_id: setId, subject_id: Number(item.id), event: "impression" });
-    });
-  }, [current, onFeedback, setId]);
+    const root = gridRef.current;
+    if (!root || !onFeedback || !setId || typeof IntersectionObserver === "undefined") return;
+    const timers = new Map<Element, number>();
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        const node = entry.target as HTMLElement;
+        const subjectId = Number(node.dataset.recommendationId || 0);
+        const key = `${setId}:${subjectId}`;
+        const oldTimer = timers.get(entry.target);
+        if (oldTimer) {
+          window.clearTimeout(oldTimer);
+          timers.delete(entry.target);
+        }
+        if (
+          !entry.isIntersecting
+          || entry.intersectionRatio < 0.6
+          || !subjectId
+          || reportedImpressions.current.has(key)
+        ) return;
+        const timer = window.setTimeout(() => {
+          reportedImpressions.current.add(key);
+          void onFeedback({
+            recommendation_set_id: setId,
+            subject_id: subjectId,
+            event: "impression",
+            note: "visible_1200ms",
+          });
+          timers.delete(entry.target);
+        }, 1200);
+        timers.set(entry.target, timer);
+      });
+    }, { threshold: [0.6] });
+    root.querySelectorAll("[data-recommendation-id]").forEach((node) => observer.observe(node));
+    return () => {
+      observer.disconnect();
+      timers.forEach((timer) => window.clearTimeout(timer));
+    };
+  }, [current, expanded, onFeedback, setId]);
 
-  async function feedback(item: AnyRecord, event: string, reason?: string) {
+  async function feedback(item: AnyRecord, event: string, reason?: string, aspect = "item") {
     if (!onFeedback || !setId) return false;
     const ok = await onFeedback({
       recommendation_set_id: setId,
       subject_id: Number(item.id),
       event,
       ...(reason ? { reason } : {}),
+      aspect,
     });
-    if (ok && event === "dismiss") setDismissed((ids) => [...ids, Number(item.id)]);
+    if (ok) {
+      if (event === "dismiss") setDismissed((ids) => [...ids, Number(item.id)]);
+      const label = event === "more"
+        ? "已记住：多来这种"
+        : event === "less" ? "已记住：少来这种" : "已从本批推荐移除";
+      setLastAction({ item, label });
+      setFeedbackChoice(null);
+    }
     return ok;
+  }
+
+  async function undoLast() {
+    if (!lastAction || !onFeedback || !setId) return;
+    const ok = await onFeedback({
+      recommendation_set_id: setId,
+      subject_id: Number(lastAction.item.id),
+      event: "undo",
+    });
+    if (!ok) return;
+    setDismissed((ids) => ids.filter((id) => id !== Number(lastAction.item.id)));
+    setLastAction(null);
   }
 
   async function nextBatch() {
     if (!onNextBatch || !setId || loadingNext) return;
     setLoadingNext(true);
     const next = await onNextBatch(setId);
-    if (next) { setCurrent(next); setDismissed([]); }
+    if (next) { setCurrent(next); setDismissed([]); setExpanded(false); setLastAction(null); }
     setLoadingNext(false);
   }
   return (
     <Panel
       title="为你推荐"
-      subtitle={`${scenarioText} · 挑了 ${items.length} 部`}
+      subtitle={`${scenarioText} · 共 ${items.length} 部，先看最值得考虑的 3 部`}
     >
-      {(list(aspectProfile.likes).length > 0 || list(aspectProfile.dislikes).length > 0 || list<string>(data.based_on_tags).length > 0) && (
+      <div className="recommend-status-row">
+        <Badge tone={current.subject_type === "anime" && model.available && !model.stale ? "good" : "dim"}>{personalizationLabel}</Badge>
+        {model.stale ? <span>协同数据较旧，已自动降权；画像和本轮偏好仍正常参与。</span> : null}
+      </div>
+      {lastAction ? (
+        <div className="rec-feedback-notice" role="status">
+          <span>{lastAction.label} · 《{text(lastAction.item.name)}》</span>
+          <button type="button" className="inline-action" onClick={() => void undoLast()}>撤销</button>
+        </div>
+      ) : null}
+      {(list(aspectProfile.likes).length > 0 || list(aspectProfile.dislikes).length > 0 || list<string>(current.based_on_tags).length > 0) && (
         <div className="evidence-row">
-          {list<string>(data.based_on_tags).slice(0, 6).map((tag) => <Badge key={tag} tone="dim">{tag}</Badge>)}
+          {list<string>(current.based_on_tags).slice(0, 6).map((tag) => <Badge key={tag} tone="dim">{tag}</Badge>)}
           {list(aspectProfile.likes).slice(0, 3).map((x) => <Badge key={`like-${x.aspect}`} tone="good">你吃 {text(x.label || x.aspect)}</Badge>)}
           {list(aspectProfile.dislikes).slice(0, 3).map((x) => <Badge key={`dislike-${x.aspect}`} tone="warn">避 {text(x.label || x.aspect)}</Badge>)}
         </div>
       )}
-      <div className="rec-grid">
-        {items.map((item, i) => {
-          const fit = list<string>(item.fit_points)[0] || item.review_consensus || "";
+      <div className="rec-grid" ref={gridRef}>
+        {shownItems.map((item, i) => {
+          const claims = list(item.claims);
+          const fitClaims = claims.filter((claim) => claim.kind === "fit");
+          const riskClaims = claims.filter((claim) => claim.kind === "risk");
+          const qualityClaims = claims.filter((claim) => claim.kind === "quality");
+          const provenanceClaims = claims.filter((claim) => claim.kind === "provenance");
+          const fit = text(fitClaims[0]?.text || list<string>(item.fit_points)[0], "");
           const risk = list<string>(item.risks)[0] || list<string>(item.aspect_warnings)[0] || "";
-          const recall = list<string>(item.why_recalled)[0] || "";
           const nextStep = list<string>(item.next_step)[0] || "";
+          const choiceOpen = feedbackChoice?.id === Number(item.id);
           return (
-            <article className="rec-card" key={`${item.id}-${i}`}>
+            <article className="rec-card rec-card-explained" key={`${item.id}-${i}`} data-recommendation-id={Number(item.id)}>
               <a href={`/subject/${item.id}`} onClick={() => void feedback(item, "open")}>
                 {item.image ? <img src={item.image} alt="" /> : <div className="rec-noimg" />}
               </a>
@@ -141,12 +224,9 @@ export function RecommendPanel({
                   {item.bangumi_score ? `Bangumi ${item.bangumi_score}` : "评分暂无"}
                   {item.rank ? ` · 全站 #${item.rank}` : ""}
                 </div>
-                {fit && <p className="card-note">{fit}</p>}
-                {risk && <p className="card-note">⚠ {risk}</p>}
+                {fit ? <p className="card-note rec-fit"><strong>为什么适合你</strong>{fit}</p> : null}
+                {risk ? <p className="card-note rec-risk"><strong>需要注意</strong>{risk}</p> : null}
                 <div className="evidence-row tight">
-                  {recall && <Badge tone="good">{recall}</Badge>}
-                  {list<string>(item.explicit_tag_matches).slice(0, 3).map((tag) => <Badge key={tag} tone="dim">{tag}</Badge>)}
-                  {list<string>(item.quality_badges).slice(0, 2).map((tag) => <Badge key={tag} tone="warn">{tag}</Badge>)}
                   {item.id && onPrepareWrite && (
                     <button
                       type="button"
@@ -160,9 +240,28 @@ export function RecommendPanel({
                       想看
                     </button>
                   )}
-                  {onFeedback && setId && <button type="button" className="inline-action card-action" onClick={() => void feedback(item, "more")}>多来这种</button>}
-                  {onFeedback && setId && <button type="button" className="inline-action card-action" onClick={() => void feedback(item, "less")}>少来这种</button>}
+                  {onFeedback && setId && <button type="button" className="inline-action card-action" onClick={() => setFeedbackChoice({ id: Number(item.id), event: "more" })}>多来这种</button>}
+                  {onFeedback && setId && <button type="button" className="inline-action card-action" onClick={() => setFeedbackChoice({ id: Number(item.id), event: "less" })}>少来这种</button>}
                 </div>
+                {choiceOpen ? (
+                  <div className="rec-feedback-scope">
+                    <label>
+                      <span>{feedbackChoice?.event === "more" ? "希望多来哪一方面？" : "希望少来哪一方面？"}</span>
+                      <select
+                        value={feedbackScope[Number(item.id)] || "item"}
+                        onChange={(event) => setFeedbackScope((prev) => ({ ...prev, [Number(item.id)]: event.target.value }))}
+                      >
+                        <option value="item">只针对这部作品</option>
+                        <option value="genre">类似题材</option>
+                        <option value="visual">类似画风 / 视觉</option>
+                        <option value="pace">类似节奏</option>
+                        <option value="length">类似篇幅</option>
+                      </select>
+                    </label>
+                    <button type="button" className="inline-action" onClick={() => void feedback(item, feedbackChoice?.event || "less", undefined, feedbackScope[Number(item.id)] || "item")}>确认</button>
+                    <button type="button" className="inline-action" onClick={() => setFeedbackChoice(null)}>取消</button>
+                  </div>
+                ) : null}
                 {onFeedback && setId && (
                   <div className="rec-dismiss-row">
                     <select
@@ -178,15 +277,57 @@ export function RecommendPanel({
                       <option value="length">太长</option>
                       <option value="temporary">这次暂时不要</option>
                     </select>
-                    <button type="button" className="inline-action card-action" onClick={() => void feedback(item, "dismiss", reasons[Number(item.id)] || "not_interested")}>移除</button>
+                    <button
+                      type="button"
+                      className="inline-action card-action"
+                      onClick={() => {
+                        const reason = reasons[Number(item.id)] || "not_interested";
+                        const aspect = ["genre", "visual", "pace", "length"].includes(reason) ? reason : "item";
+                        void feedback(item, "dismiss", reason, aspect);
+                      }}
+                    >移除</button>
                   </div>
                 )}
+                {(claims.length > 0 || item.review_consensus || list<string>(item.quality_badges).length > 0) ? (
+                  <details className="rec-evidence-details">
+                    <summary>查看口碑与推荐依据</summary>
+                    {fitClaims.slice(0, 4).map((claim, idx) => (
+                      <div className="rec-claim" key={`fit-${idx}`}>
+                        <strong>{text(claim.text)}</strong>
+                        {list<string>(claim.support).length ? <small>依据：{list<string>(claim.support).join("；")}</small> : null}
+                      </div>
+                    ))}
+                    {riskClaims.slice(0, 3).map((claim, idx) => (
+                      <div className="rec-claim" key={`risk-${idx}`}>
+                        <strong>{text(claim.text)}</strong>
+                        {list<string>(claim.support).length ? <small>依据：{list<string>(claim.support).join("；")}</small> : null}
+                      </div>
+                    ))}
+                    {(qualityClaims.length ? qualityClaims : item.review_consensus ? [{ text: item.review_consensus }] : []).slice(0, 2).map((claim, idx) => (
+                      <div className="rec-claim rec-quality" key={`quality-${idx}`}><strong>口碑概况</strong><span>{text(claim.text)}</span></div>
+                    ))}
+                    {list<string>(item.quality_badges).length ? (
+                      <div className="evidence-row tight">{list<string>(item.quality_badges).slice(0, 3).map((badge) => <Badge key={badge} tone="warn">{badge}</Badge>)}</div>
+                    ) : null}
+                    {(provenanceClaims.length || list<string>(item.why_recalled).length) ? (
+                      <div className="rec-provenance">
+                        <small>候选是怎么被找到的（不等于适合你的证据）</small>
+                        {(provenanceClaims.length ? provenanceClaims.map((claim) => text(claim.text)) : list<string>(item.why_recalled)).slice(0, 4).map((value, idx) => <span key={idx}>{value}</span>)}
+                      </div>
+                    ) : null}
+                  </details>
+                ) : null}
                 {nextStep && <div className="compact-list inline next-step"><span>{nextStep}</span></div>}
               </div>
             </article>
           );
         })}
       </div>
+      {items.length > 3 ? (
+        <div className="panel-actions">
+          <button type="button" className="ghost" onClick={() => setExpanded((value) => !value)}>{expanded ? "收起其他候选" : `查看另外 ${items.length - 3} 部`}</button>
+        </div>
+      ) : null}
       {onNextBatch && setId && (
         <div className="panel-actions"><button type="button" className="ghost" disabled={loadingNext} onClick={() => void nextBatch()}>{loadingNext ? "正在重排…" : "换一批"}</button></div>
       )}

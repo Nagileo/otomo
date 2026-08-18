@@ -3,31 +3,22 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
-  Bell, BookOpen, CalendarDays, Command, Compass, ListChecks, LogIn, LogOut,
+  Bell, CalendarDays, CircleUserRound, Command, Compass, ListChecks, LogIn, LogOut,
   MessageCircle, MessagesSquare, MonitorCog, Palette, Sparkles, Users,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 
 import { BACKEND } from "../lib/api";
 import { useExperience } from "../lib/experience";
 import { ExperienceOverlays } from "./experience-overlays";
 import { UserAvatar } from "./identity-avatar";
 
-type AuthState = {
-  authenticated?: boolean;
-  username?: string;
-  avatar_url?: string;
-  oauth_configured?: boolean;
-  csrf_token?: string;
-};
-
 const primary = [
   { href: "/", label: "今日", icon: CalendarDays },
   { href: "/chat", label: "对话", icon: MessageCircle },
   { href: "/discover", label: "发现", icon: Compass },
-  { href: "/library", label: "收藏", icon: BookOpen },
-  { href: "/workspace", label: "清单", icon: ListChecks },
-  { href: "/community", label: "社区", icon: MessagesSquare },
+  { href: "/community", label: "同好", icon: MessagesSquare },
+  { href: "/me", label: "我的", icon: CircleUserRound },
 ];
 
 function active(pathname: string, href: string) {
@@ -44,25 +35,16 @@ function aggregateVisitPath(pathname: string) {
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const exp = useExperience();
-  const [auth, setAuth] = useState<AuthState | null>(null);
-  const authReady = auth !== null;
 
   useEffect(() => {
-    fetch(`${BACKEND}/auth/session`, { credentials: "include" })
-      .then((response) => response.json())
-      .then(setAuth)
-      .catch(() => setAuth({ authenticated: false }));
-  }, [pathname]);
-
-  useEffect(() => {
-    if (!authReady) return;
+    if (!exp.authReady) return;
     fetch(`${BACKEND}/community/visit`, {
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path: aggregateVisitPath(pathname) }),
     }).catch(() => undefined);
-  }, [pathname, authReady]);
+  }, [pathname, exp.authReady]);
 
   if (pathname.startsWith("/share/") && pathname !== "/share/mine") return <>{children}</>;
 
@@ -70,7 +52,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     await fetch(`${BACKEND}/auth/logout`, {
       method: "POST",
       credentials: "include",
-      headers: auth?.csrf_token ? { "x-otomo-csrf": auth.csrf_token } : {},
+      headers: exp.csrf ? { "x-otomo-csrf": exp.csrf } : {},
       body: "{}",
     });
     window.location.href = "/";
@@ -100,15 +82,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <Link className="secondary-nav" href="/settings/subscriptions"><MonitorCog size={17} /><span>订阅设置</span></Link>
         <Link className="secondary-nav" href="/share/mine"><Sparkles size={17} /><span>我的分享</span></Link>
         <div className="account-block">
-          {auth?.authenticated ? (
+          {exp.authenticated ? (
             <>
-              <UserAvatar className="account-avatar" username={auth.username} avatarUrl={auth.avatar_url} />
-              <span className="account-copy"><strong>@{auth.username}</strong><small>Bangumi 已连接</small></span>
+              <UserAvatar className="account-avatar" username={exp.username} avatarUrl={exp.avatarUrl} />
+              <span className="account-copy"><strong>@{exp.username}</strong><small>Bangumi 已连接</small></span>
               <button className="icon-plain" onClick={() => void logout()} title="退出 Bangumi"><LogOut size={17} /></button>
             </>
           ) : (
             <a className="account-login" href={`${BACKEND}/auth/bangumi/start`}>
-              <LogIn size={17} /><span>{auth?.oauth_configured === false ? "配置 OAuth" : "连接 Bangumi"}</span>
+              <LogIn size={17} /><span>{exp.authReady && !exp.oauthConfigured ? "配置 OAuth" : "连接 Bangumi"}</span>
             </a>
           )}
         </div>

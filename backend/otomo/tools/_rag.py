@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 from functools import lru_cache
+import os
 from pathlib import Path
 
 _RECALL = 10  # hybrid：RRF 融合后送进 reranker 的候选数
@@ -23,7 +24,30 @@ _LOCAL_MODELS = Path(__file__).resolve().parents[3] / "models"
 
 def _resolve_model(hf_name: str) -> str:
     local = _LOCAL_MODELS / hf_name.split("/")[-1]
-    return str(local) if local.is_dir() else hf_name
+    if local.is_dir():
+        return str(local)
+    if os.getenv("OTOMO_ALLOW_MODEL_DOWNLOAD", "1").strip().lower() in {"1", "true", "yes", "on"}:
+        return hf_name
+    raise FileNotFoundError(
+        f"本地模型 {local.name} 不存在，且当前部署禁止运行时下载"
+    )
+
+
+def semantic_model_status() -> dict[str, object]:
+    models = {
+        "embedder": _LOCAL_MODELS / "bge-small-zh-v1.5",
+        "reranker": _LOCAL_MODELS / "bge-reranker-v2-m3",
+    }
+    allow_download = os.getenv("OTOMO_ALLOW_MODEL_DOWNLOAD", "1").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    available = {name: path.is_dir() for name, path in models.items()}
+    return {
+        "local_models": available,
+        "allow_runtime_download": allow_download,
+        "semantic_rerank_ready": available["embedder"] or allow_download,
+        "hybrid_rag_ready": all(available.values()) or allow_download,
+    }
 
 
 def chunk_text(text: str, size: int = 400) -> list[str]:

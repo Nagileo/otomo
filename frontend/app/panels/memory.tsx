@@ -55,12 +55,21 @@ export function InboxPanel({ data }: { data: AnyRecord }) {
 export function SpoilerBadge({ spoiler }: { spoiler: SpoilerState | null }) {
   if (!spoiler) return null;
   const mode = spoiler.mode || "none";
+  if (
+    mode === "none"
+    && !spoiler.soft_warning
+    && spoiler.progress_episode == null
+    && !spoiler.pending_followup
+    && (!spoiler.memory_default || spoiler.memory_default === "none")
+  ) return null;
   const tone = mode === "full" ? "bad" : mode === "mild" ? "warn" : "good";
+  const modeLabel = mode === "full" ? "完整剧透" : mode === "mild" ? "轻微剧透" : "无剧透";
+  const defaultLabel = spoiler.memory_default === "full" ? "完整剧透" : spoiler.memory_default === "mild" ? "轻微剧透" : "无剧透";
   return (
     <div className="spoiler-state">
-      <Badge tone={tone}>剧透: {mode}</Badge>
+      <Badge tone={tone}>{modeLabel}</Badge>
       {spoiler.memory_default && spoiler.memory_default !== mode && (
-        <Badge tone="dim">长期默认 {spoiler.memory_default}</Badge>
+        <Badge tone="dim">平时默认：{defaultLabel}</Badge>
       )}
       {spoiler.soft_warning && <Badge tone="warn">先标注剧透</Badge>}
       {spoiler.progress_episode !== undefined && spoiler.progress_episode !== null && (

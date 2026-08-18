@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import random
 import sys
-import time
 from collections import Counter, defaultdict
 
 import lightgbm as lgb

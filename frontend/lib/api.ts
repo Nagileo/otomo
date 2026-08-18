@@ -43,12 +43,11 @@ export async function createShareSnapshot(
   csrfToken: string,
   sources: Record<string, any>[] = [],
 ) {
-  const token = csrfToken || (await authSession()).csrf_token || "";
   return productFetch("/share/snapshots", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      ...(token ? { "x-otomo-csrf": token } : {}),
+      ...(csrfToken ? { "x-otomo-csrf": csrfToken } : {}),
     },
     body: JSON.stringify({
       type: request.type,

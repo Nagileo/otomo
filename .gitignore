@@ -19,6 +19,7 @@ dist/
 npm-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
+*.tsbuildinfo
 
 # ---- 数据与缓存（许可证红线：萌娘语料绝不入库）----
 # 萌娘百科 / 维基的按需抓取缓存属于运行时产物，禁止提交（CC BY-NC-SA + ai-train=no）

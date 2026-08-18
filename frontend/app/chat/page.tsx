@@ -6,6 +6,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { PageHeader } from "../../components/page-header";
 import { OtomoAvatar, UserAvatar } from "../../components/identity-avatar";
+import { useExperience } from "../../lib/experience";
 import { TasteQuiz } from "../taste-quiz";
 import {
   EvidencePanels,
@@ -238,34 +239,20 @@ function sessionActivityLabel(session: ChatSession) {
 
 function evidenceSummary(evidence: EvidenceMap) {
   const rows = [
-    ["recommend_subjects", "推荐候选"],
     ["season_guide_brief", "季番导视"],
     ["where_to_watch", "正版观看"],
     ["get_anime_release_feeds", "离线资源/RSS"],
     ["get_bangumi_index", "Bangumi目录"],
     ["review_subject", "评价矩阵"],
-    ["route_subject_sources", "源路由"],
     ["get_broadcast_calendar", "放送日历"],
     ["get_airing_progress", "追番进度"],
-    ["watch_cockpit", "追番驾驶舱"],
     ["subject_dossier", "作品档案"],
     ["franchise_map", "IP图谱"],
-    ["monthly_watch_report", "月度报告"],
     ["anime_music_themes", "OP/ED音乐"],
     ["search_anime_themes", "AnimeThemes"],
-    ["route_image_source", "图片来源路由"],
-    ["extract_visual_text", "OCR 结构化"],
-    ["recommend_by_visual_style", "视觉推荐"],
     ["search_image_source", "图片溯源"],
-    ["analyze_video_frames", "视频帧分析"],
     ["summarize_bilibili_video_content", "B站视频分析"],
-    ["compare_user_taste", "同步率"],
-    ["plan_watch_order", "补番路线"],
-    ["build_aspect_profile", "Aspect 画像"],
-    ["build_collection_dashboard", "收藏仪表盘"],
     ["episode_buzz_radar", "分集口碑"],
-    ["explore_voice_network", "角色/声优网络"],
-    ["claim_check", "事实校验"],
   ];
   return rows
     .map(([key, label]) => ({ key, label, count: list(evidence[key]).length }))
@@ -274,14 +261,11 @@ function evidenceSummary(evidence: EvidenceMap) {
 
 function AnswerSupport({ sources, evidence }: { sources: Source[]; evidence: EvidenceMap }) {
   const summary = evidenceSummary(evidence);
-  if (!sources.length && !summary.length) return null;
-  const compactSources = sources.slice(0, 6);
-  const visualSources = sources.filter((s) => s.image);
-  const evidenceCount = summary.reduce((total, item) => total + item.count, 0);
-  const countLabel = [
-    compactSources.length ? `${compactSources.length} 个来源` : "",
-    evidenceCount ? `${evidenceCount} 项资料` : "",
-  ].filter(Boolean).join(" · ");
+  const verifiableSources = sources.filter((source) => /^https?:\/\//i.test(String(source.url || "")));
+  if (!verifiableSources.length) return null;
+  const compactSources = verifiableSources.slice(0, 6);
+  const visualSources = verifiableSources.filter((s) => s.image);
+  const countLabel = `${compactSources.length} 个可打开来源`;
   return (
     <details className="answer-support">
       <summary className="support-summary">
@@ -289,7 +273,7 @@ function AnswerSupport({ sources, evidence }: { sources: Source[]; evidence: Evi
         <i aria-hidden>⌄</i>
       </summary>
       <div className="support-body">
-        <p>这里是这条回答参考的资料，需要时再展开核对。</p>
+        <p>这些链接是这条回答实际引用、可以直接打开核对的来源。</p>
         {summary.length > 0 && (
           <div className="support-pills">
             {summary.map((item) => (
@@ -440,6 +424,7 @@ function TracePanel({
 }
 
 export default function Home() {
+  const experience = useExperience();
   const [messages, setMessages] = useState<Msg[]>([]);
   const [trace, setTrace] = useState<TraceItem[]>([]);
   const runTraceRef = useRef<TraceItem[]>([]);
@@ -599,13 +584,10 @@ export default function Home() {
 
   async function refreshAuthSession(): Promise<AuthState | null> {
     try {
-      const res = await fetch(`${BACKEND}/auth/session`, { credentials: "include" });
-      if (res.ok) {
-        const payload = await res.json();
-        csrfToken.current = payload.csrf_token || "";
-        setAuth(payload);
-        return payload;
-      }
+      const payload = await experience.refreshAuthSession();
+      csrfToken.current = payload.csrf_token || "";
+      setAuth(payload);
+      return payload;
     } catch {
       setAuth({ authenticated: false });
     }
@@ -1448,6 +1430,7 @@ export default function Home() {
       }
       setAuth(payload.identity);
       csrfToken.current = payload.identity?.csrf_token || csrfToken.current;
+      await experience.refreshAuthSession();
       setAuthNotice({ tone: "good", text: `已使用本地 BANGUMI_TOKEN 绑定：@${payload.identity?.username || "unknown"}` });
       const rows = await loadSessions();
       await restoreLastSession(rows);
@@ -1465,6 +1448,7 @@ export default function Home() {
     });
     csrfToken.current = "";
     setAuth({ authenticated: false });
+    await experience.refreshAuthSession();
     setAuthNotice({ tone: "warn", text: "已退出当前浏览器会话的 Bangumi 绑定" });
     setMemory(null);
     newChat();
@@ -1534,9 +1518,9 @@ export default function Home() {
   return (
     <main className={`page-frame chat-page mode-${evidenceMode}`}>
       <PageHeader
-        eyebrow="Agent workspace"
+        eyebrow="智能助手"
         title="与 Otomo 对话"
-        description="组合查询、考据、图片识别和长尾任务从这里开始；高频任务也可以直接使用固定页面。"
+        description="可以直接问作品、推荐、考据或发截图；执行过程和可核对来源会跟在回答旁边。"
         actions={(
           <>
             <button className="button-secondary icon-label" onClick={() => setContextOpen((x) => !x)} title="执行与证据上下文"><PanelRightOpen size={17} />上下文</button>

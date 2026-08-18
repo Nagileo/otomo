@@ -10,6 +10,30 @@ import random
 import pandas as pd
 
 
+def remove_held_out_interactions(
+    frame: pd.DataFrame,
+    test: dict[int, set[int]],
+    *,
+    item_col: str = "subject_id",
+) -> pd.DataFrame:
+    """Remove each user's held-out item from every weighted training signal.
+
+    The same item may remain for other users. This matters for signed implicit
+    data: removing it only from the positive matrix would leak that user's
+    held-out row through the weighted ALS matrix.
+    """
+    held_pairs = {
+        (int(user_id), int(item_id))
+        for user_id, item_ids in test.items()
+        for item_id in item_ids
+    }
+    keep = [
+        (int(user_id), int(item_id)) not in held_pairs
+        for user_id, item_id in zip(frame["user_id"], frame[item_col], strict=False)
+    ]
+    return frame.loc[keep].copy()
+
+
 def leave_one_out(
     df: pd.DataFrame, seed: int = 42, min_items: int = 2, item_col: str = "anime_id"
 ) -> tuple[list[tuple[int, int]], dict[int, set[int]]]:

@@ -23,6 +23,11 @@ class CFModelStatus(BaseModel):
     n_items: int = 0
     n_interactions: int = 0
     version: str = ""
+    weighting_version: str = ""
+    quality_gate_passed: bool | None = None
+    baseline_ndcg_at_10: float | None = None
+    selected_ndcg_at_10: float | None = None
+    relative_lift: float | None = None
     warnings: list[str] = Field(default_factory=list)
 
 
@@ -81,6 +86,23 @@ class CFModelRegistry:
             n_items=int(meta.get("n_items") or len(payload["items"])),
             n_interactions=int(meta.get("n_interactions") or 0),
             version=str(meta.get("version") or built_at or path.stat().st_mtime_ns),
+            weighting_version=str(meta.get("weighting_version") or "legacy-binary"),
+            quality_gate_passed=(
+                bool(meta.get("quality_gate_passed"))
+                if "quality_gate_passed" in meta else None
+            ),
+            baseline_ndcg_at_10=(
+                float(meta["baseline_ndcg_at_10"])
+                if meta.get("baseline_ndcg_at_10") is not None else None
+            ),
+            selected_ndcg_at_10=(
+                float(meta["selected_ndcg_at_10"])
+                if meta.get("selected_ndcg_at_10") is not None else None
+            ),
+            relative_lift=(
+                float(meta["relative_lift"])
+                if meta.get("relative_lift") is not None else None
+            ),
             warnings=warnings,
         )
         self._cache[subject_type] = (mtime, payload, status)

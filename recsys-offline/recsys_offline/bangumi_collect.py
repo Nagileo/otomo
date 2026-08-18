@@ -23,6 +23,7 @@ import csv
 import os
 import sys
 import time
+from typing import Literal
 
 import httpx
 
@@ -34,47 +35,53 @@ for _s in (sys.stdout, sys.stderr):
 
 SUBJECT_TYPE = {"book": 1, "anime": 2, "music": 3, "game": 4, "real": 6}
 # 礼貌 UA（Bangumi 拒绝通用 UA）。自建客户端，不接 bgm-cli/Bangumi-MCP。
-USER_AGENT = "otomo-recsys/0.1 (https://github.com/otomo; personal research, non-commercial)"
+USER_AGENT = (
+    "otomo-recsys/0.1 (https://github.com/Nagileo/otomo; "
+    "personal research, non-commercial)"
+)
 _BASE = "https://api.bgm.tv"
 _RETRY_STATUS = {429, 500, 502, 503, 504}
 _PAGE = 50
 _SCHEMA_VERSION = 2
+FetchState = Literal["ok", "missing", "failed"]
 
 
 async def _fetch_page(
     client: httpx.AsyncClient, uid: int, stype: int, offset: int, retries: int = 3
-) -> tuple[list[dict], bool]:
-    """拉一页收藏。返回 (data, exists)。404→([],False)。其余错误重试后返回 ([],True)。"""
+) -> tuple[list[dict], FetchState]:
+    """拉一页收藏；瞬时失败不得伪装成空收藏写入断点。"""
     params = {"subject_type": stype, "limit": _PAGE, "offset": offset}
     for attempt in range(retries):
         try:
             r = await client.get(f"/v0/users/{uid}/collections", params=params)
             if r.status_code == 404:
-                return [], False  # uid 不存在
+                return [], "missing"  # uid 不存在
             if r.status_code in _RETRY_STATUS:
                 await asyncio.sleep(0.6 * (attempt + 1))
                 continue
             r.raise_for_status()
-            return (r.json().get("data") or []), True
+            return (r.json().get("data") or []), "ok"
         except httpx.HTTPStatusError as e:
             if e.response is not None and e.response.status_code == 404:
-                return [], False
+                return [], "missing"
             await asyncio.sleep(0.6 * (attempt + 1))
         except httpx.TransportError:
             await asyncio.sleep(0.6 * (attempt + 1))
-    return [], True
+    return [], "failed"
 
 
 async def fetch_user(
     client: httpx.AsyncClient, uid: int, stype: int, max_items: int = 400
-) -> list[tuple[int, int, int, int, str]]:
-    """某 uid 的全部公开收藏。私有/空/不存在→[]。"""
+) -> list[tuple[int, int, int, int, str]] | None:
+    """某 uid 的公开收藏；失败返回 None，确保下次会重试。"""
     rows: list[tuple[int, int, int, int, str]] = []
     offset = 0
     while offset < max_items:
-        data, exists = await _fetch_page(client, uid, stype, offset)
-        if not exists:
+        data, state = await _fetch_page(client, uid, stype, offset)
+        if state == "missing":
             return []
+        if state == "failed":
+            return None
         for it in data:
             subj = it.get("subject") or {}
             sid = subj.get("id")
@@ -139,14 +146,16 @@ async def collect(start: int, end: int, stype: int, outdir: str, concurrency: in
         writer.writerow(["user_id", "subject_id", "ctype", "rate", "updated_at"])
 
     sem = asyncio.Semaphore(concurrency)
-    hit = inter = 0
+    hit = inter = failed = 0
     t0 = time.monotonic()
 
     async with httpx.AsyncClient(
         base_url=_BASE, headers={"User-Agent": USER_AGENT, "Accept": "application/json"}, timeout=20.0
     ) as client:
 
-        async def work(uid: int) -> tuple[int, list[tuple[int, int, int, int, str]]]:
+        async def work(
+            uid: int,
+        ) -> tuple[int, list[tuple[int, int, int, int, str]] | None]:
             async with sem:
                 rows = await fetch_user(client, uid, stype)
                 await asyncio.sleep(delay)  # 礼貌限流
@@ -157,6 +166,9 @@ async def collect(start: int, end: int, stype: int, outdir: str, concurrency: in
                 batch = todo[i : i + 200]
                 for coro in asyncio.as_completed([work(u) for u in batch]):
                     uid, rows = await coro
+                    if rows is None:
+                        failed += 1
+                        continue
                     done_f.write(f"{uid}\n")
                     if rows:
                         hit += 1
@@ -169,7 +181,8 @@ async def collect(start: int, end: int, stype: int, outdir: str, concurrency: in
                 rate = seen_n / el if el else 0
                 eta = (len(todo) - seen_n) / rate / 60 if rate else 0
                 print(
-                    f"  进度 {seen_n}/{len(todo)}  命中用户 {hit}  交互 {inter}  "
+                    f"  进度 {seen_n}/{len(todo)}  命中用户 {hit}  失败待重试 {failed}  "
+                    f"交互 {inter}  "
                     f"{rate:.0f} uid/s  ETA {eta:.0f}min",
                     flush=True,
                 )
@@ -179,7 +192,10 @@ async def collect(start: int, end: int, stype: int, outdir: str, concurrency: in
             csv_f.close()
             done_f.close()
     el = time.monotonic() - t0
-    print(f"\n完成：命中用户 {hit}（命中率 {hit/max(len(todo),1)*100:.1f}%），交互 {inter}，耗时 {el/60:.1f}min")
+    print(
+        f"\n完成：命中用户 {hit}（命中率 {hit/max(len(todo),1)*100:.1f}%），"
+        f"失败待重试 {failed}，交互 {inter}，耗时 {el/60:.1f}min"
+    )
     print(f"  → {csv_path}")
 
 

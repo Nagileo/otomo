@@ -17,11 +17,12 @@ from .memory.models import FeedbackItem
 from .security_context import tenant_scope
 
 RecommendationEvent = Literal[
-    "impression", "open", "wishlist", "started", "dismiss", "more", "less", "watched",
+    "impression", "open", "wishlist", "started", "dismiss", "more", "less", "watched", "undo",
 ]
 DismissReason = Literal[
     "not_interested", "already_seen", "genre", "visual", "pace", "length", "temporary",
 ]
+FeedbackAspect = Literal["item", "genre", "visual", "pace", "length"]
 
 
 class RecommendationFeedbackRequest(BaseModel):
@@ -29,6 +30,7 @@ class RecommendationFeedbackRequest(BaseModel):
     subject_id: int = Field(..., ge=1)
     event: RecommendationEvent
     reason: DismissReason | None = None
+    aspect: FeedbackAspect = "item"
     note: str = Field("", max_length=500)
 
 
@@ -61,7 +63,7 @@ class RecommendationEventStore:
                 );
                 CREATE TABLE IF NOT EXISTS recommendation_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, set_id TEXT NOT NULL, username TEXT NOT NULL,
-                    subject_id INTEGER NOT NULL, event TEXT NOT NULL, reason TEXT, note TEXT NOT NULL,
+                    subject_id INTEGER NOT NULL, event TEXT NOT NULL, reason TEXT, aspect TEXT NOT NULL DEFAULT 'item', note TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_rec_events_user_time
@@ -70,6 +72,14 @@ class RecommendationEventStore:
                     ON recommendation_events(set_id, subject_id, event);
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(recommendation_events)").fetchall()
+            }
+            if "aspect" not in columns:
+                conn.execute(
+                    "ALTER TABLE recommendation_events ADD COLUMN aspect TEXT NOT NULL DEFAULT 'item'"
+                )
 
     def create_set(
         self, username: str, subject_type: str, scenario: str,
@@ -145,7 +155,7 @@ class RecommendationEventStore:
             raise PermissionError("推荐批次不存在、已过期或不属于当前用户")
         now = datetime.now(timezone.utc).isoformat()
         # Browser retries and React strict mode must not duplicate durable preference signals.
-        preference_events = {"wishlist", "started", "dismiss", "more", "less", "watched"}
+        preference_events = {"wishlist", "started", "dismiss", "more", "less", "watched", "undo"}
         with self._connect() as conn:
             if req.event == "impression":
                 exists = conn.execute(
@@ -157,20 +167,26 @@ class RecommendationEventStore:
                     return {"recorded": False, "deduplicated": True, "created_at": now}
             elif req.event in preference_events:
                 latest = conn.execute(
-                    """SELECT event,reason FROM recommendation_events
+                    """SELECT event,reason,aspect FROM recommendation_events
                        WHERE set_id=? AND username=? AND subject_id=?
-                         AND event IN ('wishlist','started','dismiss','more','less','watched')
+                         AND event IN ('wishlist','started','dismiss','more','less','watched','undo')
                        ORDER BY id DESC LIMIT 1""",
                     (req.recommendation_set_id, username, req.subject_id),
                 ).fetchone()
-                if latest and latest["event"] == req.event and (latest["reason"] or None) == req.reason:
+                if (
+                    latest
+                    and latest["event"] == req.event
+                    and (latest["reason"] or None) == req.reason
+                    and str(latest["aspect"] or "item") == req.aspect
+                ):
                     return {"recorded": False, "deduplicated": True, "created_at": now}
             conn.execute(
-                """INSERT INTO recommendation_events(set_id,username,subject_id,event,reason,note,created_at)
-                   VALUES(?,?,?,?,?,?,?)""",
+                """INSERT INTO recommendation_events(
+                       set_id,username,subject_id,event,reason,aspect,note,created_at
+                   ) VALUES(?,?,?,?,?,?,?,?)""",
                 (
                     req.recommendation_set_id, username, req.subject_id, req.event,
-                    req.reason, req.note.strip(), now,
+                    req.reason, req.aspect, req.note.strip(), now,
                 ),
             )
         return {"recorded": True, "deduplicated": False, "created_at": now}
@@ -185,7 +201,7 @@ class RecommendationEventStore:
                               ROW_NUMBER() OVER (PARTITION BY subject_id ORDER BY id DESC) AS rn
                        FROM recommendation_events
                        WHERE username=?
-                         AND event IN ('wishlist','started','dismiss','more','less','watched')
+                         AND event IN ('wishlist','started','dismiss','more','less','watched','undo')
                    )
                    SELECT subject_id FROM latest WHERE rn=1 AND (
                        (created_at>=? AND event IN ('dismiss','less')
@@ -210,8 +226,38 @@ class RecommendationEventStore:
                    GROUP BY reason ORDER BY n DESC""",
                 (username, cutoff),
             ).fetchall()
+            visible = conn.execute(
+                """SELECT COUNT(DISTINCT set_id) sets,
+                          COUNT(DISTINCT set_id || ':' || subject_id) items
+                   FROM recommendation_events
+                   WHERE username=? AND created_at>=? AND event='impression'""",
+                (username, cutoff),
+            ).fetchone()
+            dimensions = conn.execute(
+                """SELECT s.subject_type,s.scenario,COUNT(*) n
+                   FROM recommendation_events e
+                   JOIN recommendation_sets s ON s.id=e.set_id
+                   WHERE e.username=? AND e.created_at>=? AND e.event='impression'
+                   GROUP BY s.subject_type,s.scenario ORDER BY n DESC""",
+                (username, cutoff),
+            ).fetchall()
+            model_rows = conn.execute(
+                """SELECT DISTINCT s.request_json
+                   FROM recommendation_events e
+                   JOIN recommendation_sets s ON s.id=e.set_id
+                   WHERE e.username=? AND e.created_at>=? AND e.event='impression'""",
+                (username, cutoff),
+            ).fetchall()
         counts = {row["event"]: int(row["n"]) for row in rows}
         impressions = counts.get("impression", 0)
+        models: dict[str, int] = {}
+        for row in model_rows:
+            try:
+                metadata = json.loads(row["request_json"]).get("_model_metadata") or {}
+            except (TypeError, ValueError, json.JSONDecodeError):
+                metadata = {}
+            label = str(metadata.get("version") or metadata.get("built_at") or "无协同模型")
+            models[label] = models.get(label, 0) + 1
         return {
             "days": days,
             "counts": counts,
@@ -219,6 +265,18 @@ class RecommendationEventStore:
             "start_rate": counts.get("started", 0) / impressions if impressions else 0.0,
             "dismiss_rate": counts.get("dismiss", 0) / impressions if impressions else 0.0,
             "dismiss_reasons": {row["reason"]: int(row["n"]) for row in reasons},
+            "visible_impressions": impressions,
+            "unique_visible_sets": int(visible["sets"] or 0),
+            "unique_visible_items": int(visible["items"] or 0),
+            "segments": [
+                {
+                    "subject_type": row["subject_type"],
+                    "scenario": row["scenario"],
+                    "impressions": int(row["n"]),
+                }
+                for row in dimensions
+            ],
+            "model_versions": models,
         }
 
 
@@ -242,7 +300,7 @@ def record_recommendation_feedback(
         signal = "less"
     elif req.event == "dismiss" and req.reason in {"not_interested", "genre"}:
         signal = "dislike"
-    replace_memory = req.event in {"more", "less", "wishlist", "started", "watched", "dismiss"}
+    replace_memory = req.event in {"more", "less", "wishlist", "started", "watched", "dismiss", "undo"}
     if event.get("recorded") and replace_memory:
         with tenant_scope(username, authenticated=True):
             memory = ltm.load_user(username)
@@ -254,12 +312,13 @@ def record_recommendation_feedback(
                     and item.note.startswith("recommendation_card:")
                 )
             ]
-            if signal:
+            if signal and req.event != "undo":
                 note = req.note or req.reason or req.event
                 memory.feedback.append(FeedbackItem(
                     subject_id=req.subject_id,
                     name=str(payload.get("name") or ""),
                     signal=signal,
+                    scope=req.aspect,
                     note=f"recommendation_card:{channel}:{note}"[:500],
                     source="explicit_user",
                     confidence=0.9,

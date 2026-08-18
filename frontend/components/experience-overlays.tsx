@@ -180,7 +180,16 @@ function PlusIcon() { return <span aria-hidden="true">+</span>; }
 
 export function TaskCenter() {
   const exp = useExperience();
-  const active = exp.tasks.filter((x) => x.status !== "success").slice(0, 4);
+  const [clock, setClock] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setTimeout(() => setClock(Date.now()), 650);
+    return () => window.clearTimeout(timer);
+  }, [exp.tasks]);
+  const active = exp.tasks.filter((task) => {
+    if (task.status === "success") return false;
+    if (task.status !== "running") return true;
+    return clock - new Date(task.startedAt).getTime() >= 600;
+  }).slice(0, 4);
   if (!active.length) return null;
   return <aside className="task-center" aria-label="任务提示">{active.map((task) => <div className={task.status} key={task.id}>{task.status === "running" ? <LoaderCircle className="spin" size={15} /> : task.status === "interrupted" ? <RefreshCw size={15} /> : <X size={15} />}<button onClick={() => window.dispatchEvent(new CustomEvent("otomo:navigate", { detail: { href: task.href } }))}><strong>{task.label}</strong><small>{task.status === "running" ? "正在处理…" : task.status === "interrupted" ? "页面刷新使任务中断，点击返回重试" : task.error || "执行失败，请稍后重试"}</small></button><button className="icon-plain task-dismiss" onClick={() => exp.dismissTask(task.id)} title="关闭这条提示" aria-label={`关闭“${task.label}”提示`}><X size={14} /></button></div>)}</aside>;
 }

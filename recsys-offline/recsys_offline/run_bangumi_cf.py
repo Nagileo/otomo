@@ -8,11 +8,12 @@
 
 两段：
   1) 评测：leave-one-out，ItemCF(BM25)/ALS 对比流行度基线（证明学到协同口味结构）。
-  2) 生产：用**全量**交互重训 ALS → similar_items 导 top-K 邻居 → JSON。
+  2) 生产：按时间切分 NDCG 自动择优 → 质量门禁 → 全量加权重训 → i2i JSON。
 """
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 import os
 import random
@@ -25,10 +26,11 @@ import scipy.sparse as sp
 from implicit.als import AlternatingLeastSquares
 from implicit.nearest_neighbours import BM25Recommender
 
-from .bangumi_data import filter_active, load_bangumi_positive
+from .bangumi_data import WEIGHTING_VERSION, filter_active, load_bangumi_weighted
 from .baseline import PopularityRecommender
 from .metrics import evaluate
-from .split import leave_one_out, temporal_leave_one_out
+from .model_selection import choose_export_model
+from .split import leave_one_out, remove_held_out_interactions, temporal_leave_one_out
 
 for _s in (sys.stdout, sys.stderr):
     try:
@@ -43,6 +45,13 @@ def _csr(pairs, u2idx, i2idx, n_u, n_i):
     return sp.csr_matrix((np.ones(len(pairs), np.float32), (rows, cols)), shape=(n_u, n_i))
 
 
+def _weighted_csr(frame, u2idx, i2idx, n_u, n_i):
+    rows = np.fromiter((u2idx[int(u)] for u in frame["user_id"]), np.int32, len(frame))
+    cols = np.fromiter((i2idx[int(i)] for i in frame["subject_id"]), np.int32, len(frame))
+    values = frame["weight"].to_numpy(dtype=np.float32)
+    return sp.csr_matrix((values, (rows, cols)), shape=(n_u, n_i))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", default="data/bangumi/collections_anime.csv")
@@ -51,20 +60,39 @@ def main() -> None:
     ap.add_argument("--factors", type=int, default=64)
     ap.add_argument("--sample-users", type=int, default=5000)
     ap.add_argument("--topk", type=int, default=50, help="i2i 每个物品导出的邻居数")
-    ap.add_argument("--export-model", choices=["bm25", "als"], default="bm25",
-                    help="导出 i2i 用的模型：小数据 bm25 更稳，数据够大可切 als")
+    ap.add_argument("--export-model", choices=["auto", "bm25", "als"], default="auto",
+                    help="auto 按 NDCG@10 择优；所有模式都必须超过流行度质量门禁")
+    ap.add_argument("--min-relative-lift", type=float, default=0.01,
+                    help="auto 发布所需的相对流行度基线增益")
+    ap.add_argument("--half-life-days", type=float, default=730.0,
+                    help="行为时间权重半衰期；相对数据快照最新时间计算")
+    ap.add_argument("--time-floor", type=float, default=0.55,
+                    help="时间权重下限，避免抹掉长期经典口味")
     ap.add_argument("--out", default="", help="i2i JSON 输出路径（默认与 data 同目录 i2i_<stype>.json）")
     ap.add_argument("--split", choices=["temporal", "random"], default="temporal")
     args = ap.parse_args()
+    if args.min_relative_lift < 0:
+        ap.error("--min-relative-lift must be >= 0")
+    if not 0 <= args.time_floor <= 1:
+        ap.error("--time-floor must be between 0 and 1")
 
-    df = load_bangumi_positive(args.data)
-    raw_u, raw_i = df["user_id"].nunique(), df["subject_id"].nunique()
+    df = load_bangumi_weighted(
+        args.data,
+        half_life_days=args.half_life_days,
+        time_floor=args.time_floor,
+    )
+    raw_u, raw_i, raw_n = df["user_id"].nunique(), df["subject_id"].nunique(), len(df)
     df = filter_active(df, args.min_user, args.min_item)
-    uids = df["user_id"].unique()
-    sids = df["subject_id"].unique()
+    positive = df[(df["ctype"].isin((2, 3))) & (df["weight"] > 0)].copy()
+    uids = positive["user_id"].unique()
+    sids = positive["subject_id"].unique()
+    df = df[df["user_id"].isin(uids) & df["subject_id"].isin(sids)].copy()
+    positive = positive[positive["user_id"].isin(uids) & positive["subject_id"].isin(sids)]
+    negative_count = int((df["weight"] < 0).sum())
     print(
-        f"原始 {len(df):,} 交互前 {raw_u:,}用户/{raw_i:,}物品 → 过滤后 "
-        f"{len(df):,} 交互 / {len(uids):,}用户 / {len(sids):,}物品"
+        f"原始 {raw_n:,} 交互 / {raw_u:,}用户 / {raw_i:,}物品 → 过滤后 "
+        f"{len(df):,} 加权交互（正 {int((df['weight'] > 0).sum()):,} / 负 {negative_count:,}）"
+        f" / {len(uids):,}用户 / {len(sids):,}物品"
         f"（密度 {len(df)/max(len(uids)*len(sids),1)*100:.3f}%）"
     )
     if len(uids) < 50 or len(sids) < 50:
@@ -77,17 +105,23 @@ def main() -> None:
 
     # ---------- 1) 评测：leave-one-out ---------- #
     split_used = args.split
-    if args.split == "temporal" and "updated_at" in df.columns:
-        train, test = temporal_leave_one_out(df, item_col="subject_id")
+    has_timestamps = (
+        "updated_at" in positive.columns
+        and positive["updated_at"].astype(str).str.strip().replace("nan", "").ne("").any()
+    )
+    if args.split == "temporal" and has_timestamps:
+        train, test = temporal_leave_one_out(positive, item_col="subject_id")
     else:
         if args.split == "temporal":
             print("⚠ CSV 没有 updated_at，评测降级为固定随机 leave-one-out；新采集任务会写入时间戳。")
             split_used = "random_fallback"
-        train, test = leave_one_out(df, item_col="subject_id")
-    mat = _csr(train, u2idx, i2idx, len(uids), len(sids))
+        train, test = leave_one_out(positive, item_col="subject_id")
+    train_weighted = remove_held_out_interactions(df, test)
+    positive_mat = _csr(train, u2idx, i2idx, len(uids), len(sids))
+    weighted_mat = _weighted_csr(train_weighted, u2idx, i2idx, len(uids), len(sids))
     seen: dict[int, set[int]] = defaultdict(set)
-    for u, i in train:
-        seen[u].add(i)
+    for row in train_weighted.itertuples():
+        seen[int(row.user_id)].add(int(row.subject_id))
 
     users = list(test)
     if args.sample_users and len(users) > args.sample_users:
@@ -103,15 +137,21 @@ def main() -> None:
     recs = {u: pop.recommend(seen[u], 20) for u in users}
     results["流行度baseline"] = (evaluate(recs, truth, ks=(10,)), time.monotonic() - t0)
 
-    for name, model in {
-        "ItemCF(BM25)": BM25Recommender(K=100),
-        "ALS-MF": AlternatingLeastSquares(
-            factors=args.factors, iterations=15, regularization=0.05, random_state=42
+    model_specs = {
+        "ItemCF(BM25)": (
+            BM25Recommender(K=100), positive_mat,
         ),
-    }.items():
+        "ALS-MF": (
+            AlternatingLeastSquares(
+                factors=args.factors, iterations=15, regularization=0.05, random_state=42
+            ),
+            weighted_mat,
+        ),
+    }
+    for name, (model, matrix) in model_specs.items():
         t0 = time.monotonic()
-        model.fit(mat, show_progress=False)
-        ids, _ = model.recommend(uidx, mat[uidx], N=20, filter_already_liked_items=True)
+        model.fit(matrix, show_progress=False)
+        ids, _ = model.recommend(uidx, matrix[uidx], N=20, filter_already_liked_items=True)
         recs = {users[k]: [int(idx2item[j]) for j in ids[k]] for k in range(len(users))}
         results[name] = (evaluate(recs, truth, ks=(10,)), time.monotonic() - t0)
 
@@ -125,25 +165,40 @@ def main() -> None:
             f"{m['hit@10']:>12.4f}{m['mrr']:>9.4f}{dt:>8.1f}  {lift}"
         )
 
-    # ---------- 2) 生产：全量重训选定模型 → 导出 i2i ---------- #
-    # 用评测胜出的模型导出：小数据 BM25 更稳(本身即共现 i2i)，数据够大时 ALS 泛化更好。
-    print(f"\n用全量交互重训 {args.export_model.upper()}（生产模型）…")
-    full = _csr(
-        list(df[["user_id", "subject_id"]].itertuples(index=False, name=None)),
+    # ---------- 2) 自动择优 + 质量门禁 + 全量重训 ---------- #
+    selected_model, publishable, selected_score = choose_export_model(
+        results, args.export_model, args.min_relative_lift,
+    )
+    baseline_score = float(results["流行度baseline"][0]["ndcg@10"])
+    relative_lift = selected_score / baseline_score - 1 if baseline_score else 0.0
+    print(
+        f"\n选择 {selected_model.upper()}：NDCG@10={selected_score:.4f}，"
+        f"相对流行度 {relative_lift * 100:+.1f}%"
+    )
+    if not publishable:
+        print("⚠ 所选协同模型未通过流行度质量门禁；保留线上旧模型，不发布本次产物。")
+        raise SystemExit(3)
+
+    print(f"用全量加权交互重训 {selected_model.upper()}（生产模型）…")
+    full_positive = _csr(
+        list(positive[["user_id", "subject_id"]].itertuples(index=False, name=None)),
         u2idx, i2idx, len(uids), len(sids),
     )
-    if args.export_model == "als":
+    full_weighted = _weighted_csr(df, u2idx, i2idx, len(uids), len(sids))
+    if selected_model == "als":
         prod = AlternatingLeastSquares(
             factors=args.factors, iterations=20, regularization=0.05, random_state=42
         )
+        full = full_weighted
     else:
         prod = BM25Recommender(K=max(args.topk + 1, 100))
+        full = full_positive
     prod.fit(full, show_progress=False)
 
     print(f"导出 i2i（每物品 top-{args.topk} 邻居）…")
     all_idx = np.arange(len(sids), dtype=np.int32)
     nbr_ids, nbr_scores = prod.similar_items(all_idx, N=args.topk + 1)  # 含自身
-    item_counts = np.asarray(full.sum(axis=0)).ravel()  # 各物品交互数（写进 meta，便于在线兜底）
+    item_counts = np.asarray(full_positive.sum(axis=0)).ravel()
 
     i2i: dict[str, list] = {}
     for k in range(len(sids)):
@@ -162,17 +217,32 @@ def main() -> None:
     if not out:
         base_name = os.path.basename(args.data).replace("collections_", "i2i_").replace(".csv", ".json")
         out = os.path.join(os.path.dirname(args.data), base_name)
+    built_at = datetime.now(timezone.utc)
     payload = {
         "meta": {
-            "model": args.export_model,
+            "model": selected_model,
             "factors": args.factors,
             "n_items": len(i2i),
             "topk": args.topk,
             "n_interactions": int(len(df)),
+            "n_positive_interactions": int((df["weight"] > 0).sum()),
+            "n_negative_interactions": negative_count,
             "n_users": int(len(uids)),
-            "built_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "version": time.strftime("%Y%m%d-%H%M%S"),
+            "built_at": built_at.isoformat(),
+            "version": built_at.strftime("%Y%m%d-%H%M%S"),
             "eval_split": split_used,
+            "eval": {
+                name: metrics
+                for name, (metrics, _duration) in results.items()
+            },
+            "baseline_ndcg_at_10": round(baseline_score, 6),
+            "selected_ndcg_at_10": round(selected_score, 6),
+            "relative_lift": round(relative_lift, 6),
+            "quality_gate_passed": publishable,
+            "weighting_version": WEIGHTING_VERSION,
+            "half_life_days": args.half_life_days,
+            "time_floor": args.time_floor,
+            "time_weighting_applied": bool(has_timestamps),
             "subject_type": os.path.basename(args.data).removeprefix("collections_").removesuffix(".csv"),
             "popular": [int(idx2item[k]) for k in np.argsort(-item_counts)[:200]],  # 热度兜底
         },

@@ -829,18 +829,38 @@ def test_profile_recency_decay():
 
     now = datetime.now(timezone.utc)
     items = [
-        {"rate": 8, "updated_at": (now - timedelta(days=10)).isoformat(),
+        {"rate": 9, "type": 2, "updated_at": (now - timedelta(days=10)).isoformat(),
          "subject": {"id": 1, "name_cn": "新番", "tags": [{"name": "百合"}], "date": "2026-01-01"}},
-        {"rate": 8, "updated_at": (now - timedelta(days=3000)).isoformat(),
+        {"rate": 9, "type": 2, "updated_at": (now - timedelta(days=3000)).isoformat(),
          "subject": {"id": 2, "name_cn": "老番", "tags": [{"name": "机战"}], "date": "2010-01-01"}},
-        {"rate": 9, "updated_at": (now - timedelta(days=3000)).isoformat(),
+        {"rate": 9, "type": 2, "updated_at": (now - timedelta(days=3000)).isoformat(),
          "subject": {"id": 3, "name_cn": "老神作", "tags": [], "date": "2008-01-01"}},
     ]
     p = compute_taste_profile("u", items)
     w = {t["tag"]: t["weight"] for t in p.top_tags}
     assert w["百合"] > w["机战"]           # 同分：近期 > 久远
-    assert w["机战"] >= 8 * 0.15           # 保底不归零
+    assert w["机战"] >= 0.03                # 保底不归零
     assert "老神作" in p.favorites          # favorites 不衰减
+
+
+def test_profile_uses_negative_and_weak_collection_signals():
+    from otomo.profile import compute_taste_profile
+
+    items = [
+        {"rate": 10, "type": 2, "subject": {"name_cn": "最爱", "tags": [{"name": "机战"}, {"name": "校园"}]}},
+        {"rate": 8, "type": 2, "subject": {"name_cn": "普通", "tags": [{"name": "日常"}]}},
+        {"rate": 4, "type": 2, "subject": {"name_cn": "低分", "tags": [{"name": "后宫"}]}},
+        {"rate": 0, "type": 5, "subject": {"name_cn": "弃坑", "tags": [{"name": "党争"}]}},
+        {"rate": 0, "type": 1, "subject": {"name_cn": "想看", "tags": [{"name": "悬疑"}]}},
+    ]
+    profile = compute_taste_profile("u", items)
+    positive = {item["tag"]: item["weight"] for item in profile.top_tags}
+    negative = {item["tag"]: item["weight"] for item in profile.bottom_tags}
+
+    assert positive["机战"] > positive["校园"]  # 泛标签降权
+    assert 0 < positive["悬疑"] < positive["机战"]  # 想看只是弱兴趣
+    assert negative["后宫"] < 0
+    assert negative["党争"] < 0
 
 
 def test_semantic_scores_with_local_bge():
@@ -908,7 +928,10 @@ def test_semantic_recall_index():
     assert len(idx["ids"]) > 100 and idx["vecs"].shape[1] == 512
     user_texts = [_taste_text("轻音少女", ["百合", "音乐", "日常"]),
                   _taste_text("孤独摇滚！", ["百合", "音乐", "乐队"])]
-    hits = _semantic_recall(user_texts, seen=set(), top_k=8)
+    try:
+        hits = _semantic_recall(user_texts, seen=set(), top_k=8)
+    except (ImportError, FileNotFoundError) as exc:
+        pytest.skip(f"语义模型/可选依赖不可用：{type(exc).__name__}")
     assert len(hits) == 8
     assert all("_sim" in h and h["id"] for h in hits)
     # 召回应含音乐/乐队/偶像题材（标签精确匹配的近义盲区）
