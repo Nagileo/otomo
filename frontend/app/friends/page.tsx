@@ -43,6 +43,8 @@ export default function FriendsPage() {
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [importOpen, setImportOpen] = useState(false);
+  const [importError, setImportError] = useState("");
   const [importCandidates, setImportCandidates] = useState<FriendCandidate[] | null>(null);
   const [importSearch, setImportSearch] = useState("");
   const [selectedImports, setSelectedImports] = useState<Set<string>>(new Set());
@@ -50,6 +52,15 @@ export default function FriendsPage() {
   useEffect(() => {
     if (exp.authReady && exp.authenticated) void loadFriends();
   }, [exp.authReady, exp.authenticated]);
+
+  useEffect(() => {
+    if (!importOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && busy !== "import") closeImportPicker();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [importOpen, busy]);
 
   async function loadFriends() {
     setError("");
@@ -74,16 +85,21 @@ export default function FriendsPage() {
   }
 
   async function openImportPicker() {
-    setBusy("import-preview"); setError(""); setNotice("");
+    setImportOpen(true); setImportCandidates(null); setSelectedImports(new Set()); setImportSearch("");
+    setBusy("import-preview"); setError(""); setImportError(""); setNotice("");
     try {
       const payload = await productFetch("/workspace/friends/import", {
         method: "GET",
       }, { track: true, label: "读取 Bangumi 好友" });
       setImportCandidates(payload.data || []);
-      setSelectedImports(new Set());
-      setImportSearch("");
-    } catch (e) { setError(String(e)); }
+    } catch (e) { setImportError(readableError("读取 Bangumi 好友", e)); }
     finally { setBusy(""); }
+  }
+
+  function closeImportPicker() {
+    if (busy === "import") return;
+    setImportOpen(false); setImportCandidates(null); setSelectedImports(new Set());
+    setImportSearch(""); setImportError("");
   }
 
   async function importSelectedFriends() {
@@ -96,10 +112,11 @@ export default function FriendsPage() {
         body: JSON.stringify({ usernames: [...selectedImports] }),
       }, { track: true, label: "导入选中的 Bangumi 好友" });
       setFriends(payload.data || []);
+      setImportOpen(false);
       setImportCandidates(null);
       setSelectedImports(new Set());
       setNotice(`已加入 ${payload.imported || 0} 位好友；只处理了你明确勾选的人。`);
-    } catch (e) { setError(String(e)); }
+    } catch (e) { setImportError(readableError("导入选中的 Bangumi 好友", e)); }
     finally { setBusy(""); }
   }
 
@@ -186,30 +203,6 @@ export default function FriendsPage() {
             <button className="button-primary" disabled={!username.trim() || Boolean(busy)} onClick={() => void addFriend()}>{busy === "add" ? <LoaderCircle className="spin" size={16} /> : <Plus size={16} />}添加</button>
             <button className="button-secondary" disabled={Boolean(busy)} onClick={() => void openImportPicker()}>{busy === "import-preview" ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}从 Bangumi 选择</button>
           </div>
-          {importCandidates ? <section className="friend-import-picker" aria-label="选择 Bangumi 好友">
-            <header>
-              <div><strong>选择要加入的人</strong><small>默认不选任何人，点击卡片或复选框才会加入待导入列表。</small></div>
-              <button className="icon-plain" onClick={() => { setImportCandidates(null); setSelectedImports(new Set()); }} title="关闭"><X size={17} /></button>
-            </header>
-            <div className="friend-import-toolbar">
-              <label><Search size={15} /><input value={importSearch} onChange={(event) => setImportSearch(event.target.value)} placeholder="搜索昵称或用户名" /></label>
-              <span>已选 <strong>{selectedImports.size}</strong> 位</span>
-              <button className="button-secondary compact" disabled={!selectableVisible.length} onClick={() => setSelectedImports((current) => new Set([...current, ...selectableVisible.map((friend) => friend.username)]))}>选择当前结果</button>
-              <button className="button-secondary compact" disabled={!selectedImports.size} onClick={() => setSelectedImports(new Set())}>清空选择</button>
-            </div>
-            {visibleCandidates.length ? <div className="friend-candidate-grid">
-              {visibleCandidates.map((friend) => {
-                const selected = selectedImports.has(friend.username);
-                return <label className={`${selected ? "selected" : ""}${friend.saved ? " saved" : ""}`} key={friend.username}>
-                  <input type="checkbox" checked={Boolean(friend.saved || selected)} disabled={Boolean(friend.saved || busy)} onChange={() => toggleImport(friend.username)} />
-                  <span className="friend-avatar">{(friend.nickname || friend.username).slice(0, 1).toUpperCase()}</span>
-                  <span><strong>{friend.nickname || `@${friend.username}`}</strong><small>@{friend.username}</small></span>
-                  <i>{friend.saved ? "已在名单" : selected ? <Check size={15} /> : "选择"}</i>
-                </label>;
-              })}
-            </div> : <div className="friend-import-empty">没有匹配的好友</div>}
-            <footer><span>Bangumi 共返回 {importCandidates.length} 位候选</span><button className="button-primary" disabled={!selectedImports.size || Boolean(busy)} onClick={() => void importSelectedFriends()}>{busy === "import" ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}加入选中的 {selectedImports.size} 位</button></footer>
-          </section> : null}
           {notice ? <div className="inline-notice">{notice}</div> : null}
           {error ? <div className="surface-error">{error}</div> : null}
           {friends.length ? <div className="friend-chips">{friends.map((friend) => <article key={friend.username}><span className="friend-avatar">{(friend.nickname || friend.username).slice(0, 1).toUpperCase()}</span><span><strong>{friend.nickname || `@${friend.username}`}</strong>{friend.nickname ? <small>@{friend.username}</small> : <small>Bangumi 用户</small>}</span><button className="icon-plain" onClick={() => void loadFriendDetail(friend.username)} title="查看公开追番">{busy === `detail:${friend.username}` ? <LoaderCircle className="spin" size={14} /> : <Eye size={14} />}</button><a className="icon-plain" href={`https://bgm.tv/user/${friend.username}`} target="_blank" rel="noreferrer" title="打开 Bangumi"><ExternalLink size={14} /></a><button className="icon-plain" onClick={() => void removeFriend(friend.username)} title="移出名单"><Trash2 size={14} /></button></article>)}</div> : <div className="friend-empty"><Users size={24} /><strong>还没有关注好友</strong><span>添加用户名，或从 Bangumi 好友候选中勾选你真正关心的人。</span></div>}
@@ -221,9 +214,48 @@ export default function FriendsPage() {
           <div className="section-heading"><div><span className="section-kicker">PULSE</span><h2>好友都在看什么</h2></div><div className="filter-row"><nav className="media-switch">{media.map(([value, label]) => <button key={value} className={subjectType === value ? "active" : ""} onClick={() => { setSubjectType(value); setData(null); setDetail(null); }}>{label}</button>)}</nav><button className="button-primary" onClick={() => void analyze()} disabled={Boolean(busy)}>{busy === "analyze" ? <LoaderCircle className="spin" size={16} /> : <HeartHandshake size={16} />}生成好友圈视图</button></div></div>
           {!data ? <div className="feature-empty compact"><HeartHandshake size={22} /><strong>名单已经准备好</strong><span>生成后会读取好友的公开收藏，聚合在追、想看、圈内高分和同步率。</span></div> : <FriendsDashboard data={data} />}
         </section> : null}
+        {importOpen ? <div className="global-overlay friend-import-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeImportPicker(); }}>
+          <section className="global-modal wide friend-import-modal" role="dialog" aria-modal="true" aria-labelledby="friend-import-title">
+            <header className="global-modal-head">
+              <div><strong id="friend-import-title">从 Bangumi 选择好友</strong><span>默认不选任何人，只有你勾选的好友会加入 Otomo 关注名单。</span></div>
+              <button className="icon-plain" disabled={busy === "import"} onClick={closeImportPicker} title="关闭好友选择"><X size={18} /></button>
+            </header>
+            <div className="friend-import-picker">
+              {busy === "import-preview" ? <div className="friend-import-loading"><LoaderCircle className="spin" size={20} /><strong>正在读取 Bangumi 好友…</strong><span>候选较多时可能需要几秒钟</span></div> : null}
+              {importError ? <div className="friend-import-error"><div className="surface-error">{importError}</div><button className="button-secondary" onClick={() => void openImportPicker()}>重新读取</button></div> : null}
+              {importCandidates ? <>
+                <div className="friend-import-toolbar">
+                  <label><Search size={15} /><input autoFocus value={importSearch} onChange={(event) => setImportSearch(event.target.value)} placeholder="搜索昵称或用户名" /></label>
+                  <span>已选 <strong>{selectedImports.size}</strong> 位</span>
+                  <button className="button-secondary compact" disabled={!selectableVisible.length || Boolean(busy)} onClick={() => setSelectedImports((current) => new Set([...current, ...selectableVisible.map((friend) => friend.username)]))}>选择当前结果</button>
+                  <button className="button-secondary compact" disabled={!selectedImports.size || Boolean(busy)} onClick={() => setSelectedImports(new Set())}>清空选择</button>
+                </div>
+                {visibleCandidates.length ? <div className="friend-candidate-grid">
+                  {visibleCandidates.map((friend) => {
+                    const selected = selectedImports.has(friend.username);
+                    return <label className={`${selected ? "selected" : ""}${friend.saved ? " saved" : ""}`} key={friend.username}>
+                      <input type="checkbox" checked={Boolean(friend.saved || selected)} disabled={Boolean(friend.saved || busy)} onChange={() => toggleImport(friend.username)} />
+                      <span className="friend-avatar">{(friend.nickname || friend.username).slice(0, 1).toUpperCase()}</span>
+                      <span><strong>{friend.nickname || `@${friend.username}`}</strong><small>@{friend.username}</small></span>
+                      <i>{friend.saved ? "已在名单" : selected ? <Check size={15} /> : "选择"}</i>
+                    </label>;
+                  })}
+                </div> : <div className="friend-import-empty">没有匹配的好友</div>}
+                <footer><span>Bangumi 共返回 {importCandidates.length} 位候选</span><button className="button-primary" disabled={!selectedImports.size || Boolean(busy)} onClick={() => void importSelectedFriends()}>{busy === "import" ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}加入选中的 {selectedImports.size} 位</button></footer>
+              </> : null}
+            </div>
+          </section>
+        </div> : null}
       </> : null}
     </main>
   );
+}
+
+function readableError(action: string, error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/failed to fetch|network\s*error|load failed/i.test(message)) return `${action}失败，请检查网络后重试。`;
+  const detail = message.replace(/^Error:\s*/i, "").trim();
+  return detail ? `${action}失败：${detail}` : `${action}失败，请稍后重试。`;
 }
 
 function FriendDetailPanel({ data }: { data: FriendDetail }) {

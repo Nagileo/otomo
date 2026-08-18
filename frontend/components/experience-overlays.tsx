@@ -182,7 +182,7 @@ export function TaskCenter() {
   const exp = useExperience();
   const active = exp.tasks.filter((x) => x.status !== "success").slice(0, 4);
   if (!active.length) return null;
-  return <aside className="task-center" aria-label="后台任务">{active.map((task) => <div className={task.status} key={task.id}>{task.status === "running" ? <LoaderCircle className="spin" size={15} /> : task.status === "interrupted" ? <RefreshCw size={15} /> : <X size={15} />}<button onClick={() => window.dispatchEvent(new CustomEvent("otomo:navigate", { detail: { href: task.href } }))}><strong>{task.label}</strong><small>{task.status === "running" ? "处理中" : task.status === "interrupted" ? "页面刷新使任务中断，点击返回重试" : task.error || "执行失败，点击返回重试"}</small></button><button className="icon-plain" onClick={() => exp.dismissTask(task.id)}><X size={13} /></button></div>)}</aside>;
+  return <aside className="task-center" aria-label="任务提示">{active.map((task) => <div className={task.status} key={task.id}>{task.status === "running" ? <LoaderCircle className="spin" size={15} /> : task.status === "interrupted" ? <RefreshCw size={15} /> : <X size={15} />}<button onClick={() => window.dispatchEvent(new CustomEvent("otomo:navigate", { detail: { href: task.href } }))}><strong>{task.label}</strong><small>{task.status === "running" ? "正在处理…" : task.status === "interrupted" ? "页面刷新使任务中断，点击返回重试" : task.error || "执行失败，请稍后重试"}</small></button><button className="icon-plain task-dismiss" onClick={() => exp.dismissTask(task.id)} title="关闭这条提示" aria-label={`关闭“${task.label}”提示`}><X size={14} /></button></div>)}</aside>;
 }
 
 export function ExperienceOverlays() {

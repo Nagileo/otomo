@@ -62,6 +62,19 @@ const ExperienceContext = createContext<ExperienceContextValue | null>(null);
 const APPEARANCE_KEY = "otomo:appearance:v1";
 const COMPARE_KEY = "otomo:compare:v1";
 const TASK_KEY = "otomo:tasks:v2";
+const TASK_LIFETIME = { success: 3_000, error: 10_000, interrupted: 10_000 } as const;
+
+function taskErrorMessage(error?: string) {
+  const message = String(error || "").replace(/^Error:\s*/i, "").trim();
+  if (/failed to fetch|network\s*error|load failed/i.test(message)) return "网络连接失败，请稍后重试";
+  return message || "执行失败，请稍后重试";
+}
+
+function keepRecentTask(task: TaskRecord, now = Date.now()) {
+  if (task.status === "running") return true;
+  const updated = new Date(task.updatedAt).getTime();
+  return Number.isFinite(updated) && now - updated < TASK_LIFETIME[task.status];
+}
 
 function parseLocal<T>(key: string, fallback: T): T {
   if (typeof window === "undefined") return fallback;
@@ -125,10 +138,10 @@ export function ExperienceProvider({ children }: { children: ReactNode }) {
     try { setCompareItems(JSON.parse(localStorage.getItem(COMPARE_KEY) || "[]").slice(0, 3)); } catch { /* ignore */ }
     try {
       const previous: TaskRecord[] = JSON.parse(localStorage.getItem(TASK_KEY) || "[]");
-      const cutoff = Date.now() - 15 * 60 * 1000;
+      const now = Date.now();
       setTasks(previous
-        .filter((task) => task.status === "running" || new Date(task.updatedAt).getTime() >= cutoff)
-        .map<TaskRecord>((task) => task.status === "running" ? { ...task, status: "interrupted" } : task)
+        .filter((task) => keepRecentTask(task, now))
+        .map<TaskRecord>((task) => task.status === "running" ? { ...task, status: "interrupted", updatedAt: new Date(now).toISOString() } : task)
         .slice(0, 12));
     } catch { /* ignore */ }
     wallpaperAsset("get").then((blob) => {
@@ -168,11 +181,11 @@ export function ExperienceProvider({ children }: { children: ReactNode }) {
       const now = new Date().toISOString();
       const label = d.label || (key ? labels[key] : "后台任务");
       const record: TaskRecord = { id: d.id, label, href: d.href || pathname, status: "running", startedAt: now, updatedAt: now };
-      setTasks((rows) => [record, ...rows].slice(0, 12));
+      setTasks((rows) => [record, ...rows.filter((task) => task.status === "running" || task.label !== label)].slice(0, 12));
     };
     const finished = (event: Event) => {
       const d = (event as CustomEvent<{ id: string; error?: string }>).detail;
-      setTasks((rows) => rows.map((x) => x.id === d.id ? { ...x, status: d.error ? "error" : "success", error: d.error, updatedAt: new Date().toISOString() } : x));
+      setTasks((rows) => rows.map((x) => x.id === d.id ? { ...x, status: d.error ? "error" : "success", error: d.error ? taskErrorMessage(d.error) : undefined, updatedAt: new Date().toISOString() } : x));
     };
     window.addEventListener("otomo:task-start", started); window.addEventListener("otomo:task-finish", finished);
     return () => { window.removeEventListener("otomo:task-start", started); window.removeEventListener("otomo:task-finish", finished); };
@@ -180,6 +193,17 @@ export function ExperienceProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => { localStorage.setItem(COMPARE_KEY, JSON.stringify(compareItems)); }, [compareItems]);
   useEffect(() => { localStorage.setItem(TASK_KEY, JSON.stringify(tasks.slice(0, 12))); }, [tasks]);
+  useEffect(() => {
+    const now = Date.now();
+    const delays = tasks.map((task) => {
+      if (task.status === "running") return null;
+      const updated = new Date(task.updatedAt).getTime();
+      return TASK_LIFETIME[task.status] - (now - updated);
+    }).filter((delay): delay is number => delay !== null);
+    if (!delays.length) return;
+    const timer = window.setTimeout(() => setTasks((rows) => rows.filter((task) => keepRecentTask(task))), Math.max(0, Math.min(...delays)) + 20);
+    return () => window.clearTimeout(timer);
+  }, [tasks]);
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") { event.preventDefault(); setCommandOpen(true); }
@@ -227,9 +251,9 @@ export function ExperienceProvider({ children }: { children: ReactNode }) {
   const startTask = useCallback((label: string, href = pathname) => {
     const id = crypto.randomUUID(); const now = new Date().toISOString();
     const record: TaskRecord = { id, label, href, status: "running", startedAt: now, updatedAt: now };
-    setTasks((rows) => [record, ...rows].slice(0, 12)); return id;
+    setTasks((rows) => [record, ...rows.filter((task) => task.status === "running" || task.label !== label)].slice(0, 12)); return id;
   }, [pathname]);
-  const finishTask = useCallback((id: string, error?: string) => setTasks((rows) => rows.map((x) => x.id === id ? { ...x, status: error ? "error" : "success", error, updatedAt: new Date().toISOString() } : x)), []);
+  const finishTask = useCallback((id: string, error?: string) => setTasks((rows) => rows.map((x) => x.id === id ? { ...x, status: error ? "error" : "success", error: error ? taskErrorMessage(error) : undefined, updatedAt: new Date().toISOString() } : x)), []);
 
   const value = useMemo<ExperienceContextValue>(() => ({
     appearance, setAppearance, wallpaperUrl, saveWallpaper, clearWallpaper,
