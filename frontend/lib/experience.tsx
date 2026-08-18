@@ -23,7 +23,7 @@ export type Appearance = {
 export type CompareItem = { id: number; name: string; image?: string; type?: string };
 export type TaskRecord = {
   id: string; label: string; href: string; status: "running" | "success" | "error" | "interrupted";
-  startedAt: string; updatedAt: string; error?: string;
+  startedAt: string; updatedAt: string; error?: string; server?: boolean;
 };
 
 const DEFAULT_APPEARANCE: Appearance = {
@@ -180,7 +180,7 @@ export function ExperienceProvider({ children }: { children: ReactNode }) {
       const now = Date.now();
       setTasks(previous
         .filter((task) => keepRecentTask(task, now))
-        .map<TaskRecord>((task) => task.status === "running" ? { ...task, status: "interrupted", updatedAt: new Date(now).toISOString() } : task)
+        .map<TaskRecord>((task) => task.status === "running" && !task.server ? { ...task, status: "interrupted", updatedAt: new Date(now).toISOString() } : task)
         .slice(0, 12));
     } catch { /* ignore */ }
     wallpaperAsset("get").then((blob) => {
@@ -203,6 +203,44 @@ export function ExperienceProvider({ children }: { children: ReactNode }) {
     }
     return () => { window.removeEventListener("online", syncOnline); window.removeEventListener("offline", syncOnline); };
   }, [refreshAuthSession]);
+
+  useEffect(() => {
+    if (!authReady) return;
+    let cancelled = false;
+    async function syncServerTasks() {
+      try {
+        const payload = await productFetch("/tasks?limit=24");
+        if (cancelled) return;
+        const now = Date.now();
+        const serverRows: TaskRecord[] = (payload.data || []).flatMap((row: Record<string, any>) => {
+          const rawStatus = String(row.status || "");
+          if (rawStatus === "completed") return [];
+          const status: TaskRecord["status"] = ["queued", "running"].includes(rawStatus)
+            ? "running" : rawStatus === "failed" ? "error" : "interrupted";
+          const startedAt = new Date(Number(row.started_at || 0) * 1000).toISOString();
+          const finishedAt = Number(row.finished_at || 0);
+          const updatedAt = new Date((finishedAt || Number(row.started_at || 0)) * 1000).toISOString();
+          const task: TaskRecord = {
+            id: `server:${row.namespace}:${row.id}`,
+            label: String(row.label || "后台任务"), href: String(row.href || "/"),
+            status, startedAt, updatedAt, server: true,
+            error: String(row.error || (rawStatus === "cancelled" ? "任务已取消" : "")),
+          };
+          return keepRecentTask(task, now) ? [task] : [];
+        });
+        setTasks((rows) => [
+          ...serverRows,
+          ...rows.filter((task) => !task.server && !serverRows.some((server) => (
+            server.id === task.id
+            || (server.href === task.href && server.label === task.label)
+          ))),
+        ].slice(0, 12));
+      } catch { /* transient task sync failure must not remove local status */ }
+    }
+    void syncServerTasks();
+    const timer = window.setInterval(() => void syncServerTasks(), 8_000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [authReady, pathname]);
 
   useEffect(() => {
     const labels: Record<string, string> = {

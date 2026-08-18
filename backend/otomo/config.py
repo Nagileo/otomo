@@ -26,10 +26,13 @@ class Settings(BaseSettings):
     csrf_cookie_name: str = "otomo_csrf"
     csrf_header_name: str = "x-otomo-csrf"
     session_store_path: str = "cache/sessions.sqlite3"
+    background_run_store_path: str = "cache/background_runs.sqlite3"
     share_store_path: str = "cache/share_snapshots.sqlite3"
     subscription_store_path: str = "cache/subscriptions.sqlite3"
     today_store_path: str = "cache/today_preferences.sqlite3"
     recommendation_event_store_path: str = "cache/recommendation_events.sqlite3"
+    recommendation_artifact_cache_path: str = "cache/recommendation_artifacts.sqlite3"
+    recommendation_review_cache_ttl: float = 60 * 60 * 24 * 7
     workspace_store_path: str = "cache/workspace.sqlite3"
     community_store_path: str = "cache/community.sqlite3"
     community_admin_usernames: str = ""
@@ -161,7 +164,10 @@ class Settings(BaseSettings):
     serpapi_api_key: str = ""  # 可选付费兜底：Google Reverse Image（只处理可公开访问图片 URL）
 
     # ---- B站 ASR（可选；默认 off，不影响普通字幕/弹幕/评论读取）----
-    asr_provider: str = "off"  # off | local | dashscope(预留)
+    asr_provider: str = "off"  # off | local | worker
+    asr_worker_url: str = "http://asr:8010"
+    asr_worker_token: str = ""
+    asr_worker_timeout: float = 1800.0
     asr_model: str = "small"
     asr_device: str = "cpu"
     asr_compute_type: str = "int8"

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import {
-  BellRing, BookOpen, ListChecks, Palette, Share2, Users,
+  BellRing, BookOpen, Brain, ListChecks, Palette, Share2, Users,
 } from "lucide-react";
 
 import { PageHeader } from "../../components/page-header";
@@ -12,6 +12,7 @@ const entries = [
   { href: "/library", label: "我的收藏", description: "查看收藏、评分和观看报告", icon: BookOpen },
   { href: "/workspace", label: "我的清单", description: "待看计划、保存的推荐和自定义视图", icon: ListChecks },
   { href: "/friends", label: "好友圈", description: "选择好友并查看口味与动态", icon: Users },
+  { href: "/memory", label: "记忆管理", description: "查看、修正或清除 Otomo 记住的偏好", icon: Brain },
   { href: "/settings/subscriptions", label: "订阅提醒", description: "每日追番、周报、好友动态与口碑变化", icon: BellRing },
   { href: "/share/mine", label: "我的分享", description: "管理已经生成的公开快照", icon: Share2 },
 ];

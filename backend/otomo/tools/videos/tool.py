@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import urllib.parse
 import html
 import re
@@ -61,7 +62,7 @@ class GuideVideosArgs(BaseModel):
 class BiliGuideSearchArgs(BaseModel):
     query: str = Field(..., description="导视/漫评搜索词，如『2026年7月 新番导视』")
     tags: list[str] | None = Field(None, description="可选题材标签，如 百合/芳文社/数据向")
-    whitelist_only: bool = Field(True, description="是否只保留白名单 UP；默认 true")
+    whitelist_only: bool = Field(False, description="是否强制只保留白名单 UP；默认 false，白名单仅作信任加分")
     limit: int = Field(8, ge=1, le=20)
 
 
@@ -139,13 +140,26 @@ class BiliVideoMeta(BaseModel):
     danmaku: int | None = None
     pubdate: int | None = None
     matched_whitelist: bool = False
+    match_confidence: float = 0.0
     match_reason: str = ""
+    verified: bool = False
+    verification_status: Literal["view_verified", "search_metadata"] = "search_metadata"
+
+
+class BiliRejectedCandidate(BaseModel):
+    title: str
+    author: str = ""
+    match_confidence: float = 0.0
+    reason: str = ""
 
 
 class BiliGuideSearchResult(BaseModel):
     query: str
     count: int
     videos: list[BiliVideoMeta] = Field(default_factory=list)
+    navigation_url: str = ""
+    rejected: list[BiliRejectedCandidate] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class BiliVideoCommentsResult(BaseModel):
@@ -470,6 +484,35 @@ def _guide_links(query: str, intent: str, limit: int, tags: list[str] | None = N
     return [x[2] for x in ranked[:limit]]
 
 
+def _season_markers(value: str) -> dict[str, str]:
+    lower = value.lower()
+    year = re.search(r"(?<!\d)(20\d{2})(?!\d)", lower)
+    month = re.search(r"(?<!\d)(1[0-2]|[1-9])\s*月", lower)
+    numbered = re.search(r"第\s*([0-9一二三四五六七八九十]+)\s*[季期部]", lower)
+    if numbered is None:
+        numbered = re.search(r"(?:season|s)\s*([0-9]+)", lower)
+    edition = next((token for token in ("剧场版", "重制版", "重制", "remake") if token in lower), "")
+    return {
+        "year": year.group(1) if year else "",
+        "month": month.group(1) if month else "",
+        "numbered": numbered.group(1) if numbered else "",
+        "edition": edition,
+    }
+
+
+def _content_terms(value: str) -> list[str]:
+    cleaned = re.sub(
+        r"(20\d{2}\s*年?|[0-9]{1,2}\s*月|新番导视|新番推荐|导视|漫评|评价|杂谈|推荐|解析|盘点|视频)",
+        " ",
+        value,
+        flags=re.IGNORECASE,
+    )
+    return [
+        term for term in re.split(r"[\s,，。:：/|·\-]+", cleaned)
+        if len(_norm_video_text(term)) >= 2
+    ][:8]
+
+
 def _hit_relevance(raw: dict, *, up_name: str, aliases: list[str], tags: list[str], season_query: str = "") -> tuple[float, str]:
     title = _clean_bili_title(raw.get("title") or "")
     author = raw.get("author") or ""
@@ -478,15 +521,39 @@ def _hit_relevance(raw: dict, *, up_name: str, aliases: list[str], tags: list[st
     score = 0.0
     reasons: list[str] = []
     if author == up_name:
-        score += 0.35
-        reasons.append("UP 精确命中")
-    if any(k and (k in title_key or title_key in k) and min(len(k), len(title_key)) >= 4 for k in alias_keys):
-        score += 0.38
-        reasons.append("标题命中作品名")
-    season_key = _norm_video_text(season_query)
-    if season_key and season_key in title_key:
-        score += 0.22
-        reasons.append("标题命中季度查询")
+        score += 0.08
+        reasons.append("白名单 UP 信任加分")
+    exact_aliases = [
+        key for key in alias_keys
+        if key and key in title_key and len(key) >= 3
+    ]
+    if exact_aliases:
+        score += 0.58
+        reasons.append("标题明确命中作品/查询别名")
+    terms = _content_terms(" ".join([*aliases, season_query]))
+    term_hits = [term for term in terms if _norm_video_text(term) in title_key]
+    if term_hits:
+        coverage = len(term_hits) / max(len(terms), 1)
+        score += min(0.48, 0.18 + 0.3 * coverage)
+        reasons.append("标题关键词覆盖：" + "、".join(term_hits[:3]))
+    query_markers = _season_markers(" ".join([season_query, *aliases]))
+    title_markers = _season_markers(title)
+    marker_conflict = False
+    for key, label, bonus, penalty in (
+        ("year", "年份", 0.22, 0.5),
+        ("month", "月份", 0.16, 0.36),
+        ("numbered", "季度/续作编号", 0.14, 0.5),
+        ("edition", "版本", 0.1, 0.35),
+    ):
+        expected = query_markers[key]
+        actual = title_markers[key]
+        if expected and actual == expected:
+            score += bonus
+            reasons.append(f"{label}精确匹配")
+        elif expected and actual and actual != expected:
+            score -= penalty
+            marker_conflict = True
+            reasons.append(f"{label}冲突：需要 {expected}，候选是 {actual}")
     guide_hits = [k for k in ("新番", "导视", "推荐", "评价", "杂谈", "百合", "芳文", "kirara", "きらら") if k.lower() in title.lower()]
     if guide_hits:
         score += min(0.18, 0.06 * len(guide_hits))
@@ -495,7 +562,20 @@ def _hit_relevance(raw: dict, *, up_name: str, aliases: list[str], tags: list[st
     if tag_hits:
         score += min(0.12, 0.04 * len(tag_hits))
         reasons.append("标题命中标签：" + "、".join(tag_hits[:3]))
-    return min(score, 1.0), "；".join(reasons) or "弱相关搜索结果"
+    pubdate = int(raw.get("pubdate") or 0)
+    if query_markers["year"] and pubdate:
+        published_year = datetime.fromtimestamp(pubdate, timezone.utc).year
+        target_year = int(query_markers["year"])
+        if published_year < target_year - 1:
+            score -= 0.28
+            reasons.append(f"发布时间偏旧（{published_year}）")
+    has_content_match = bool(exact_aliases or term_hits or any(query_markers.values()))
+    if not has_content_match:
+        score = min(score, 0.28)
+        reasons.append("只有作者/泛导视词命中，不能证明是目标视频")
+    if marker_conflict:
+        score = min(score, 0.34)
+    return max(0.0, min(score, 1.0)), "；".join(reasons) or "弱相关搜索结果"
 
 
 async def verify_guide_video_links(
@@ -888,19 +968,41 @@ async def _local_bili_asr(source_url: str, max_segments: int) -> list[BiliSubtit
     return await asyncio.to_thread(_sync_local_bili_asr, source_url, max_segments)
 
 
+@acached(ttl=settings.asr_cache_ttl)
+async def _worker_bili_asr(source_url: str, max_segments: int) -> list[BiliSubtitleSegment]:
+    headers = {
+        "Authorization": f"Bearer {settings.asr_worker_token}"
+    } if settings.asr_worker_token else {}
+    async with httpx.AsyncClient(timeout=settings.asr_worker_timeout) as client:
+        response = await client.post(
+            f"{settings.asr_worker_url.rstrip('/')}/transcribe",
+            json={"url": source_url, "max_segments": max_segments},
+            headers=headers,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    if not payload.get("ok"):
+        raise RuntimeError(str(payload.get("error") or "ASR worker 返回失败"))
+    return [BiliSubtitleSegment.model_validate(item) for item in payload.get("segments") or []]
+
+
 async def _maybe_asr_segments(source_url: str, max_segments: int) -> tuple[list[BiliSubtitleSegment], list[str], str | None]:
     provider = (settings.asr_provider or "off").strip().lower()
     if provider in {"", "off", "none", "false"}:
         return [], ["ASR_PROVIDER=off，未启用本地转写。"], None
-    if provider != "local":
-        return [], [f"ASR_PROVIDER={settings.asr_provider} 暂未接入；当前仅支持 local。"], None
+    if provider not in {"local", "worker"}:
+        return [], [f"ASR_PROVIDER={settings.asr_provider} 暂未接入；当前支持 local/worker。"], None
     try:
-        segments = await _local_bili_asr(source_url, max_segments)
+        segments = (
+            await _worker_bili_asr(source_url, max_segments)
+            if provider == "worker" else
+            await _local_bili_asr(source_url, max_segments)
+        )
     except Exception as e:  # noqa: BLE001
         hint = "（B站 412 风控：导出浏览器 cookies.txt 并配置 ASR_COOKIES_FILE 可解除）" if "412" in str(e) else ""
         return [], [f"本地 ASR 转写失败：{type(e).__name__}: {e}{hint}"], str(e)
     caveats = [
-        "本地 ASR 由 faster-whisper 识别公开视频音频，可能漏字、错字或错分段。",
+        f"{'独立 ASR 服务' if provider == 'worker' else '本地 ASR'}由 faster-whisper 识别公开视频音频，可能漏字、错字或错分段。",
         "B站 ASR 是视频话语源，不是 canonical 事实源；事实需回到 Bangumi/yuc 等源核验。",
     ]
     return segments, caveats, None
@@ -952,34 +1054,40 @@ class FindGuideVideosTool(Tool):
 class SearchBiliGuideVideosTool(Tool):
     name = "search_bilibili_guide_videos"
     description = (
-        "搜索 B站导视/漫评视频元数据，返回标题、UP、播放量、BV 链接；默认只保留白名单 UP。"
-        "用于新番导视和作品评价延伸的辅助排序。不读取评论、不抓视频内容、不做字幕转写。"
+        "搜索 B站导视/漫评视频元数据，校验作品名、季度/续作和视频详情后返回高置信 BV 链接。"
+        "白名单 UP 只提供小幅信任加分；标题精确的非白名单漫评也可进入。"
     )
     args_model = BiliGuideSearchArgs
     result_model = BiliGuideSearchResult
 
     async def run(self, args: BiliGuideSearchArgs) -> ToolResult[BiliGuideSearchResult]:
-        q = " ".join([args.query.strip()] + (args.tags or [])).strip()
+        base_query = args.query.strip()
+        q = " ".join([base_query] + (args.tags or [])).strip()
         whitelist = _whitelist_by_name()
-        videos: list[BiliVideoMeta] = []
+        candidates: list[tuple[float, str, dict, bool]] = []
         seen: set[str] = set()
-        try:
-            data = await _bili_search_async(q)
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code != 412:
-                return ToolResult(ok=False, error=f"B站导视元数据搜索失败：HTTP {e.response.status_code}")
-            try:
-                data = await asyncio.to_thread(_sync_bili_search, q)
-            except (httpx.HTTPError, httpx.TransportError, ValueError) as fallback_e:
-                return ToolResult(ok=False, error=f"B站导视元数据搜索失败：HTTP 412 / fallback {type(fallback_e).__name__}")
-        except (httpx.HTTPError, httpx.TransportError, ValueError) as e:
-            return ToolResult(ok=False, error=f"B站导视元数据搜索失败：{type(e).__name__}")
+        warnings: list[str] = []
 
-        def add_from(data_obj: dict, only_author: str | None = None) -> None:
+        async def search_variant(query: str) -> dict | None:
+            try:
+                return await _bili_search_async(query)
+            except (httpx.HTTPError, httpx.TransportError, ValueError):
+                try:
+                    return await asyncio.to_thread(_sync_bili_search, query)
+                except (httpx.HTTPError, httpx.TransportError, ValueError) as exc:
+                    warnings.append(f"搜索变体《{query}》不可用：{type(exc).__name__}")
+                    return None
+
+        variants = list(dict.fromkeys([
+            q,
+            f"{base_query} 漫评",
+            f"{base_query} 新番导视" if any(key in base_query for key in ("年", "月", "季度", "新番")) else f"{base_query} 评价",
+        ]))[:3]
+        payloads = await asyncio.gather(*(search_variant(query) for query in variants))
+
+        def add_from(data_obj: dict) -> None:
             for raw in ((data_obj.get("data") or {}).get("result") or []):
                 author = raw.get("author") or ""
-                if only_author and author != only_author:
-                    continue
                 matched = author in whitelist
                 if args.whitelist_only and not matched:
                     continue
@@ -991,38 +1099,85 @@ class SearchBiliGuideVideosTool(Tool):
                 if key in seen:
                     continue
                 seen.add(key)
-                reason = whitelist[author]["positioning"] if matched else "非白名单搜索结果"
-                videos.append(
-                    BiliVideoMeta(
-                        title=_clean_bili_title(raw.get("title") or ""),
-                        url=url,
-                        aid=raw.get("aid") or raw.get("id"),
-                        bvid=raw.get("bvid"),
-                        author=author,
-                        mid=raw.get("mid"),
-                        play=raw.get("play"),
-                        danmaku=raw.get("video_review"),
-                        pubdate=raw.get("pubdate"),
-                        matched_whitelist=matched,
-                        match_reason=reason,
-                    )
+                confidence, reason = _hit_relevance(
+                    raw,
+                    up_name=author if matched else "",
+                    aliases=[base_query],
+                    tags=args.tags or [],
+                    season_query=base_query,
                 )
-                if len(videos) >= args.limit:
-                    return
+                candidates.append((confidence, reason, raw, matched))
 
-        add_from(data)
-        if args.whitelist_only and not videos:
-            for up_name in whitelist:
-                try:
-                    narrowed = await asyncio.to_thread(_sync_bili_search, f"{q} {up_name}")
-                except (httpx.HTTPError, httpx.TransportError, ValueError):
-                    continue
-                add_from(narrowed, only_author=up_name)
-                if len(videos) >= args.limit:
-                    break
+        for payload in payloads:
+            if payload:
+                add_from(payload)
+        candidates.sort(key=lambda item: (-item[0], -int(item[2].get("pubdate") or 0)))
+
+        async def verify(candidate: tuple[float, str, dict, bool]):
+            _confidence, _reason, raw, _matched = candidate
+            try:
+                payload = await asyncio.to_thread(
+                    _sync_bili_view, raw.get("aid") or raw.get("id"), raw.get("bvid"),
+                )
+                detail = payload.get("data") or {}
+                if not detail:
+                    return candidate, None
+                normalized = {
+                    **raw,
+                    "title": detail.get("title") or raw.get("title"),
+                    "author": (detail.get("owner") or {}).get("name") or raw.get("author"),
+                    "aid": detail.get("aid") or raw.get("aid") or raw.get("id"),
+                    "bvid": detail.get("bvid") or raw.get("bvid"),
+                    "pubdate": detail.get("pubdate") or raw.get("pubdate"),
+                    "play": (detail.get("stat") or {}).get("view") or raw.get("play"),
+                    "video_review": (detail.get("stat") or {}).get("danmaku") or raw.get("video_review"),
+                }
+                author = normalized.get("author") or ""
+                matched = author in whitelist
+                confidence, reason = _hit_relevance(
+                    normalized, up_name=author if matched else "", aliases=[base_query],
+                    tags=args.tags or [], season_query=base_query,
+                )
+                return (confidence, reason, normalized, matched), detail
+            except (httpx.HTTPError, httpx.TransportError, ValueError):
+                return candidate, None
+
+        verified_rows = await asyncio.gather(*(
+            verify(candidate) for candidate in candidates[: min(max(args.limit * 2, 8), 16)]
+        ))
+        videos: list[BiliVideoMeta] = []
+        rejected: list[BiliRejectedCandidate] = []
+        for (confidence, reason, raw, matched), detail in verified_rows:
+            title = _clean_bili_title(raw.get("title") or "")
+            author = str(raw.get("author") or "")
+            if confidence < 0.58:
+                rejected.append(BiliRejectedCandidate(
+                    title=title, author=author,
+                    match_confidence=round(confidence, 3), reason=reason,
+                ))
+                continue
+            url = raw.get("arcurl") or f"https://www.bilibili.com/video/{raw.get('bvid') or ('av' + str(raw.get('aid') or raw.get('id')))}"
+            videos.append(BiliVideoMeta(
+                title=title, url=str(url).replace("http://", "https://"),
+                aid=raw.get("aid") or raw.get("id"), bvid=raw.get("bvid"),
+                author=author, mid=raw.get("mid"), play=raw.get("play"),
+                danmaku=raw.get("video_review"), pubdate=raw.get("pubdate"),
+                matched_whitelist=matched, match_confidence=round(confidence, 3),
+                match_reason=reason, verified=bool(detail),
+                verification_status="view_verified" if detail else "search_metadata",
+            ))
+        videos.sort(key=lambda video: (-video.match_confidence, not video.verified, -(video.pubdate or 0)))
+        videos = videos[: args.limit]
+        if not videos:
+            warnings.append("没有候选通过标题/季度一致性阈值；仅返回 B站搜索导航，避免给出错误直链。")
+        elif any(not video.verified for video in videos):
+            warnings.append("部分候选仅通过搜索元数据校验；打开后仍建议核对标题与发布时间。")
         return ToolResult(
             ok=True,
-            data=BiliGuideSearchResult(query=q, count=len(videos), videos=videos),
+            data=BiliGuideSearchResult(
+                query=q, count=len(videos), videos=videos,
+                navigation_url=_bili(q), rejected=rejected[:8], warnings=warnings,
+            ),
             sources=[
                 Citation(title=f"Bilibili — {v.title}", url=v.url, source="bilibili")
                 for v in videos[:5]

@@ -13,7 +13,7 @@ from .config import settings
 _PRODUCT_TZ = timezone(timedelta(hours=8))
 _VISIT_PATHS = {
     "/", "/chat", "/community", "/discover", "/friends", "/library",
-    "/me", "/settings/subscriptions", "/share", "/share/mine", "/subject", "/today", "/workspace",
+    "/me", "/memory", "/settings/subscriptions", "/share", "/share/mine", "/subject", "/today", "/workspace",
 }
 
 
@@ -108,6 +108,14 @@ class CommunityStore:
                 conn.execute(
                     "ALTER TABLE community_comments ADD COLUMN avatar_url TEXT NOT NULL DEFAULT ''"
                 )
+            for name, ddl in {
+                "moderation_status": "TEXT NOT NULL DEFAULT 'visible'",
+                "moderated_by": "TEXT NOT NULL DEFAULT ''",
+                "moderated_at": "TEXT NOT NULL DEFAULT ''",
+                "moderation_note": "TEXT NOT NULL DEFAULT ''",
+            }.items():
+                if name not in columns:
+                    conn.execute(f"ALTER TABLE community_comments ADD COLUMN {name} {ddl}")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS community_comment_reports (
@@ -120,6 +128,18 @@ class CommunityStore:
                 )
                 """
             )
+            report_columns = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(community_comment_reports)").fetchall()
+            }
+            for name, ddl in {
+                "status": "TEXT NOT NULL DEFAULT 'pending'",
+                "resolved_by": "TEXT NOT NULL DEFAULT ''",
+                "resolved_at": "TEXT NOT NULL DEFAULT ''",
+                "resolution_note": "TEXT NOT NULL DEFAULT ''",
+            }.items():
+                if name not in report_columns:
+                    conn.execute(f"ALTER TABLE community_comment_reports ADD COLUMN {name} {ddl}")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_community_views_time ON community_page_views(viewed_at DESC)"
             )
@@ -189,7 +209,9 @@ class CommunityStore:
                     "SELECT COALESCE(SUM(views), 0) FROM community_page_counts WHERE day=?", (day,)
                 ).fetchone()[0]
             )
-            comment_count = int(conn.execute("SELECT COUNT(*) FROM community_comments").fetchone()[0])
+            comment_count = int(conn.execute(
+                "SELECT COUNT(*) FROM community_comments WHERE moderation_status='visible'"
+            ).fetchone()[0])
             tracking_since = conn.execute(
                 "SELECT MIN(first_seen) FROM community_visitors"
             ).fetchone()[0]
@@ -221,20 +243,24 @@ class CommunityStore:
         admin_usernames: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         admins = admin_usernames or set()
+        is_admin = viewer in admins
         with self._connect() as conn:
             rows = conn.execute(
                 """
                 SELECT c.id, c.owner, c.display_name, c.avatar_url, c.content,
-                       c.created_at, c.updated_at,
-                       COUNT(r.id) AS report_count,
+                       c.created_at, c.updated_at, c.moderation_status,
+                       c.moderated_by, c.moderated_at, c.moderation_note,
+                       COUNT(CASE WHEN r.status='pending' THEN r.id END) AS report_count,
                        MAX(CASE WHEN r.reporter=? THEN 1 ELSE 0 END) AS viewer_reported
                 FROM community_comments AS c
                 LEFT JOIN community_comment_reports AS r ON r.comment_id=c.id
+                WHERE c.moderation_status='visible' OR ?=1
                 GROUP BY c.id, c.owner, c.display_name, c.avatar_url, c.content,
-                         c.created_at, c.updated_at
+                         c.created_at, c.updated_at, c.moderation_status,
+                         c.moderated_by, c.moderated_at, c.moderation_note
                 ORDER BY c.created_at DESC LIMIT ?
                 """,
-                (viewer, max(1, min(int(limit), 100))),
+                (viewer, int(is_admin), max(1, min(int(limit), 100))),
             ).fetchall()
         return [
             {
@@ -253,9 +279,15 @@ class CommunityStore:
                     and not bool(row["viewer_reported"])
                 ),
                 "reported": bool(row["viewer_reported"]),
+                "moderation_status": str(row["moderation_status"] or "visible"),
                 **(
-                    {"report_count": int(row["report_count"] or 0)}
-                    if viewer in admins else {}
+                    {
+                        "report_count": int(row["report_count"] or 0),
+                        "moderated_by": str(row["moderated_by"] or ""),
+                        "moderated_at": str(row["moderated_at"] or ""),
+                        "moderation_note": str(row["moderation_note"] or ""),
+                    }
+                    if is_admin else {}
                 ),
             }
             for row in rows
@@ -325,3 +357,77 @@ class CommunityStore:
                 )
             except sqlite3.IntegrityError as exc:
                 raise ValueError("你已经举报过这条留言") from exc
+
+    def moderation_overview(self, limit: int = 100) -> dict[str, Any]:
+        with self._connect() as conn:
+            counts = conn.execute(
+                """SELECT
+                     (SELECT COUNT(*) FROM community_comments WHERE moderation_status='visible') visible,
+                     (SELECT COUNT(*) FROM community_comments WHERE moderation_status='hidden') hidden,
+                     (SELECT COUNT(*) FROM community_comment_reports WHERE status='pending') pending_reports,
+                     (SELECT COUNT(*) FROM community_comment_reports WHERE status!='pending') resolved_reports"""
+            ).fetchone()
+            reports = conn.execute(
+                """SELECT r.id,r.comment_id,r.reporter,r.reason,r.created_at,r.status,
+                          r.resolved_by,r.resolved_at,r.resolution_note,
+                          c.display_name,c.content,c.moderation_status
+                   FROM community_comment_reports r
+                   LEFT JOIN community_comments c ON c.id=r.comment_id
+                   ORDER BY CASE WHEN r.status='pending' THEN 0 ELSE 1 END,r.created_at DESC
+                   LIMIT ?""",
+                (max(1, min(int(limit), 300)),),
+            ).fetchall()
+        return {
+            "counts": {key: int(counts[key] or 0) for key in counts.keys()},
+            "reports": [dict(row) for row in reports],
+        }
+
+    def moderate_comment(
+        self, comment_id: str, action: str, moderator: str, note: str = "",
+    ) -> dict[str, Any] | None:
+        if action not in {"hide", "restore", "delete"}:
+            raise ValueError("未知的治理操作")
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT id FROM community_comments WHERE id=?", (comment_id,),
+            ).fetchone()
+            if row is None:
+                raise FileNotFoundError("留言不存在")
+            if action == "delete":
+                conn.execute("DELETE FROM community_comment_reports WHERE comment_id=?", (comment_id,))
+                conn.execute("DELETE FROM community_comments WHERE id=?", (comment_id,))
+                return None
+            status = "hidden" if action == "hide" else "visible"
+            timestamp = _iso()
+            conn.execute(
+                """UPDATE community_comments SET moderation_status=?,moderated_by=?,
+                   moderated_at=?,moderation_note=? WHERE id=?""",
+                (status, moderator, timestamp, _clean_report_reason(note), comment_id),
+            )
+            updated = conn.execute(
+                """SELECT id,display_name,content,moderation_status,moderated_by,
+                   moderated_at,moderation_note FROM community_comments WHERE id=?""",
+                (comment_id,),
+            ).fetchone()
+        return dict(updated) if updated else None
+
+    def resolve_report(
+        self, report_id: str, status: str, moderator: str, note: str = "",
+    ) -> dict[str, Any]:
+        if status not in {"resolved", "dismissed"}:
+            raise ValueError("举报处理状态无效")
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT id FROM community_comment_reports WHERE id=?", (report_id,),
+            ).fetchone()
+            if row is None:
+                raise FileNotFoundError("举报不存在")
+            conn.execute(
+                """UPDATE community_comment_reports SET status=?,resolved_by=?,
+                   resolved_at=?,resolution_note=? WHERE id=?""",
+                (status, moderator, _iso(), _clean_report_reason(note), report_id),
+            )
+            updated = conn.execute(
+                "SELECT * FROM community_comment_reports WHERE id=?", (report_id,),
+            ).fetchone()
+        return dict(updated)

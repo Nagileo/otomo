@@ -60,6 +60,31 @@ services:
     profiles: ["discord"]
     restart: unless-stopped
 
+  # 可选独立 ASR：重依赖和模型不进入默认 backend 镜像。
+  # backend/.env 设 ASR_PROVIDER=worker 后，用 --profile asr 启动。
+  asr:
+    build:
+      context: ./backend
+      target: asr
+    command: ["uvicorn", "otomo.asr_worker:app", "--host", "0.0.0.0", "--port", "8010"]
+    env_file:
+      - ./backend/.env
+    environment:
+      ASR_PROVIDER: "local"
+    volumes:
+      - ./cache:/app/cache
+      - ./models:/models
+    expose:
+      - "8010"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8010/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    profiles: ["asr"]
+    restart: unless-stopped
+
   frontend:
     build:
       context: ./frontend

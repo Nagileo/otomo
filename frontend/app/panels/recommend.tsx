@@ -190,7 +190,7 @@ export function RecommendPanel({
         {Number(performance.total_ms) > 0 ? (
           <span>
             本轮精筛 {(Number(performance.total_ms) / 1000).toFixed(1)} 秒
-            {performance.evidence_policy === "full_finalist_pool" ? " · 已核验最终候选池" : ""}
+            {["full_finalist_pool", "verified_finalist_pool"].includes(performance.evidence_policy) ? " · 已核验最终候选池" : ""}
           </span>
         ) : null}
       </div>

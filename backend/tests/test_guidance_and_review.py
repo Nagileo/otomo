@@ -288,6 +288,99 @@ def test_bili_title_cleaner_friend_parser_and_sentiment():
     assert friends[0].avatar_url == "https://lain.bgm.tv/pic/user/l/1.jpg"
 
 
+def test_bili_relevance_rejects_whitelist_wrong_title_and_accepts_exact_non_whitelist():
+    from otomo.tools.videos.tool import _hit_relevance
+
+    wrong_score, wrong_reason = _hit_relevance(
+        {"title": "十年前的经典动画闲聊", "author": "泛式"},
+        up_name="泛式", aliases=["孤独摇滚"], tags=[], season_query="孤独摇滚",
+    )
+    exact_score, exact_reason = _hit_relevance(
+        {"title": "《孤独摇滚》完整漫评：为什么它打动人", "author": "认真漫评人"},
+        up_name="", aliases=["孤独摇滚"], tags=[], season_query="孤独摇滚",
+    )
+
+    assert wrong_score < 0.58
+    assert "不能证明" in wrong_reason
+    assert exact_score >= 0.58
+    assert "标题明确命中" in exact_reason
+
+    short_title_score, _ = _hit_relevance(
+        {"title": "迷宫饭 深度漫评", "author": "认真漫评人"},
+        up_name="", aliases=["迷宫饭"], tags=[], season_query="迷宫饭",
+    )
+    assert short_title_score >= 0.58
+
+
+def test_bili_relevance_downranks_stale_season_and_rejects_sequel_mismatch():
+    from datetime import datetime, timezone
+    from otomo.tools.videos.tool import _hit_relevance
+
+    fresh = int(datetime(2026, 6, 1, tzinfo=timezone.utc).timestamp())
+    stale = int(datetime(2022, 6, 1, tzinfo=timezone.utc).timestamp())
+    base = {"title": "2026年7月新番导视", "author": "普通UP"}
+    fresh_score, _ = _hit_relevance(
+        {**base, "pubdate": fresh}, up_name="", aliases=["2026年7月新番导视"],
+        tags=[], season_query="2026年7月新番导视",
+    )
+    stale_score, stale_reason = _hit_relevance(
+        {**base, "pubdate": stale}, up_name="", aliases=["2026年7月新番导视"],
+        tags=[], season_query="2026年7月新番导视",
+    )
+    mismatch_score, mismatch_reason = _hit_relevance(
+        {"title": "测试作品 第二季 漫评", "author": "泛式"}, up_name="泛式",
+        aliases=["测试作品 第三季"], tags=[], season_query="测试作品 第三季",
+    )
+
+    assert fresh_score > stale_score
+    assert "发布时间偏旧" in stale_reason
+    assert mismatch_score < 0.58
+    assert "季度/续作编号冲突" in mismatch_reason
+
+
+@pytest.mark.asyncio
+async def test_bili_balanced_search_accepts_verified_non_whitelist(monkeypatch):
+    from otomo.tools.videos import tool as videos
+
+    async def fake_search(_query):
+        return {"data": {"result": [
+            {"title": "孤独摇滚 深度漫评", "author": "新锐漫评", "aid": 10,
+             "bvid": "BV1abcDEF23x", "arcurl": "https://www.bilibili.com/video/BV1abcDEF23x"},
+            {"title": "别的动画盘点", "author": "泛式", "aid": 11,
+             "bvid": "BV1abcDEF24y", "arcurl": "https://www.bilibili.com/video/BV1abcDEF24y"},
+        ]}}
+
+    def fake_view(aid, bvid):
+        title = "孤独摇滚 深度漫评" if aid == 10 else "别的动画盘点"
+        author = "新锐漫评" if aid == 10 else "泛式"
+        return {"data": {"aid": aid, "bvid": bvid, "title": title,
+                         "owner": {"name": author}, "stat": {"view": 1000}}}
+
+    monkeypatch.setattr(videos, "_bili_search_async", fake_search)
+    monkeypatch.setattr(videos, "_sync_bili_view", fake_view)
+    result = await videos.SearchBiliGuideVideosTool().run(
+        videos.BiliGuideSearchArgs(query="孤独摇滚", limit=5),
+    )
+
+    assert result.ok and result.data
+    assert [item.author for item in result.data.videos] == ["新锐漫评"]
+    assert result.data.videos[0].verified is True
+    assert any(item.author == "泛式" for item in result.data.rejected)
+
+
+def test_asr_worker_only_accepts_bilibili_video_urls():
+    from fastapi import HTTPException
+    from otomo.asr_worker import _validate_bilibili_url
+
+    assert _validate_bilibili_url(
+        "https://www.bilibili.com/video/BV1abcDEF23x"
+    ).endswith("BV1abcDEF23x")
+    with pytest.raises(HTTPException):
+        _validate_bilibili_url("https://example.com/video/BV1abcDEF23x")
+    with pytest.raises(HTTPException):
+        _validate_bilibili_url("https://www.bilibili.com/read/cv1")
+
+
 def test_bili_video_content_aggregates_public_layers(monkeypatch):
     def fake_view(_aid, _bvid):
         return {

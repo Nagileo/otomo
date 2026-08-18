@@ -10,7 +10,7 @@ import html
 import math
 import re
 from collections import Counter
-from typing import Literal
+from typing import Any, Literal
 
 import httpx
 from pydantic import BaseModel, Field
@@ -99,6 +99,9 @@ class PulseEntry(BaseModel):
     count: int = 0                       # 命中好友数
     friends: list[str] = Field(default_factory=list)
     avg_rate: float | None = None        # 好友均分（top_rated 榜用）
+    weighted_score: float = 0.0          # 按 peer_weight 汇总的相似好友支持度
+    weighted_avg_rate: float | None = None
+    friend_weights: list[dict[str, Any]] = Field(default_factory=list)
     my_status: str = ""                  # 我的状态：在看/看过/想看/未收藏…
 
 
@@ -116,6 +119,7 @@ class FriendSyncEntry(BaseModel):
     shrunk_score: int | None = None     # 贝叶斯收缩分：μ + n/(n+k)·(score-μ)，防小样本虚高
     sync_level: int | None = None       # Lv1-10
     common_rated: int = 0
+    peer_weight: float = 0.0
     note: str = ""
 
 
@@ -887,6 +891,10 @@ class CompareUserTasteTool(Tool):
             if isinstance(items, Exception):
                 continue
             counted += 1
+            affinity = _build_affinity(name, own_items, items)
+            # Saved friends with sparse public overlap still contribute a tiny
+            # signal, but cannot outweigh a high-confidence similar friend.
+            peer_weight = max(0.08, float(affinity.peer_weight))
             for item in items:
                 sid = _subject_id(item)
                 if not sid:
@@ -895,21 +903,27 @@ class CompareUserTasteTool(Tool):
                 rate = int(item.get("rate") or 0)
                 base = {"name": _subject_name(item), "image": _subject_image(item)}
                 if t == 3:
-                    slot = watching.setdefault(sid, {**base, "friends": [], "rates": []})
+                    slot = watching.setdefault(sid, {**base, "friends": [], "rates": [], "weights": [], "weighted_rates": []})
                     slot["friends"].append(name)
+                    slot["weights"].append((name, peer_weight))
                 elif t == 1:
-                    slot = wishing.setdefault(sid, {**base, "friends": [], "rates": []})
+                    slot = wishing.setdefault(sid, {**base, "friends": [], "rates": [], "weights": [], "weighted_rates": []})
                     slot["friends"].append(name)
+                    slot["weights"].append((name, peer_weight))
                 if rate > 0:
-                    slot = rated.setdefault(sid, {**base, "friends": [], "rates": []})
+                    slot = rated.setdefault(sid, {**base, "friends": [], "rates": [], "weights": [], "weighted_rates": []})
                     slot["friends"].append(name)
                     slot["rates"].append(rate)
+                    slot["weights"].append((name, peer_weight))
+                    slot["weighted_rates"].append((rate, peer_weight))
 
         def board(pool: dict[int, dict], *, need_rates: bool = False, top: int = 12) -> list[PulseEntry]:
             entries = []
             for sid, slot in pool.items():
                 if need_rates and len(slot["rates"]) < 2:
                     continue  # 高分榜至少 2 人评分，防单人样本
+                weighted_score = sum(weight for _name, weight in slot["weights"])
+                weighted_rate_denominator = sum(weight for _rate, weight in slot["weighted_rates"])
                 entries.append(PulseEntry(
                     subject_id=sid,
                     name=slot["name"],
@@ -917,9 +931,22 @@ class CompareUserTasteTool(Tool):
                     count=len(slot["friends"]),
                     friends=slot["friends"][:8],
                     avg_rate=round(sum(slot["rates"]) / len(slot["rates"]), 2) if slot["rates"] else None,
+                    weighted_score=round(weighted_score, 3),
+                    weighted_avg_rate=(
+                        round(sum(rate * weight for rate, weight in slot["weighted_rates"]) / weighted_rate_denominator, 2)
+                        if weighted_rate_denominator else None
+                    ),
+                    friend_weights=[
+                        {"username": name, "weight": round(weight, 3)}
+                        for name, weight in sorted(slot["weights"], key=lambda pair: -pair[1])[:8]
+                    ],
                     my_status=my_status.get(sid, ""),
                 ))
-            key = (lambda e: (-(e.avg_rate or 0), -e.count)) if need_rates else (lambda e: (-e.count, -(e.avg_rate or 0)))
+            key = (
+                (lambda e: (-(e.weighted_avg_rate or 0), -e.weighted_score, -e.count))
+                if need_rates else
+                (lambda e: (-e.weighted_score, -e.count, -(e.avg_rate or 0)))
+            )
             return sorted(entries, key=key)[:top]
 
         pulse = FriendsPulse(
@@ -937,6 +964,7 @@ class CompareUserTasteTool(Tool):
                 pulse=pulse,
                 caveats=[
                     f"聚合了 {counted} 位好友的公开收藏（上限 {args.friends_limit}）；高分榜要求至少 2 人评分。",
+                    "榜单按口味亲和度加权；人数仍展示为原始好友数，不把弱关系伪装成强共识。",
                     "好友收藏只读取公开数据；私密收藏或读取失败的用户不会计入聚合。",
                 ],
             ),
@@ -977,6 +1005,7 @@ class CompareUserTasteTool(Tool):
                 sync_score=aff.sync_score,
                 sync_level=aff.sync_level,
                 common_rated=aff.common_rated,
+                peer_weight=aff.peer_weight,
             ))
         scored = [e for e in entries if e.sync_score is not None]
         if scored:

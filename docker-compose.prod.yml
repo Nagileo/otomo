@@ -14,6 +14,9 @@ services:
   discord:
     image: ghcr.io/nagileo/otomo-backend:${OTOMO_IMAGE_TAG:?生产部署必须设置 OTOMO_IMAGE_TAG 为当前 commit SHA}
     pull_policy: always
+  asr:
+    image: ghcr.io/nagileo/otomo-backend-asr:${OTOMO_IMAGE_TAG:?ASR 镜像使用的 commit SHA}
+    pull_policy: always
   frontend:
     image: ghcr.io/nagileo/otomo-frontend:${OTOMO_IMAGE_TAG:?生产部署必须设置 OTOMO_IMAGE_TAG 为当前 commit SHA}
     pull_policy: always

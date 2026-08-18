@@ -32,6 +32,16 @@ jobs:
             target: full
             publish_on_push: false
             build_args: ""
+          - name: backend-browser
+            context: ./backend
+            target: browser
+            publish_on_push: false
+            build_args: ""
+          - name: backend-asr
+            context: ./backend
+            target: asr
+            publish_on_push: false
+            build_args: ""
           - name: frontend
             context: ./frontend
             target: runner

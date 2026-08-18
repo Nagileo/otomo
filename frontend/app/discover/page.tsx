@@ -220,6 +220,17 @@ export default function DiscoverPage() {
       window.sessionStorage.removeItem(ACTIVE_RECOMMENDATION_RUN);
       source.close();
     });
+    source.addEventListener("interrupted", (raw) => {
+      const event = raw as MessageEvent;
+      rememberSequence(event);
+      try { setError(JSON.parse(event.data).message || "服务重启，推荐任务已中断"); }
+      catch { setError("服务重启，推荐任务已中断"); }
+      setRecommendBusy(false);
+      setRecommendRunId("");
+      setRecommendProgress([]);
+      window.sessionStorage.removeItem(ACTIVE_RECOMMENDATION_RUN);
+      source.close();
+    });
     source.addEventListener("error", (raw) => {
       if (!(raw instanceof MessageEvent)) return;
       rememberSequence(raw);

@@ -33,7 +33,10 @@ def _unique(values: list[str]) -> list[str]:
 
 
 def _evidence_sources(item: Any) -> list[str]:
-    return _unique([str(getattr(ev, "source", "")) for ev in getattr(item, "evidence", [])])[:4]
+    return _unique([
+        *[str(getattr(ev, "source", "")) for ev in getattr(item, "evidence", [])],
+        *[str(source) for source in (getattr(item, "review_sources", []) or [])],
+    ])[:4]
 
 
 def refresh_item_explanation(item: Any, scenario: str) -> None:

@@ -1,7 +1,8 @@
 "use client";
 
-import { BarChart3, ExternalLink, Flag, LogIn, MessageSquareText, Send, Trash2, Users } from "lucide-react";
+import { BarChart3, ExternalLink, Flag, LogIn, MessageSquareText, Send, Settings, Trash2, Users } from "lucide-react";
 import { useEffect, useState } from "react";
+import Link from "next/link";
 
 import { PageHeader } from "../../components/page-header";
 import { UserAvatar } from "../../components/identity-avatar";
@@ -60,12 +61,14 @@ export default function CommunityPage() {
   const [content, setContent] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [isAdmin, setIsAdmin] = useState(false);
 
   async function load() {
     try {
       const overview = await readJson(await fetch(`${BACKEND}/community`, { credentials: "include" }));
       setStats(overview.stats || {});
       setComments(Array.isArray(overview.comments) ? overview.comments : []);
+      setIsAdmin(Boolean(overview.is_admin));
       setError("");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -150,6 +153,7 @@ export default function CommunityPage() {
         eyebrow="同好交流"
         title="同好留言"
         description="看看大家最近在用 Otomo 做什么，也可以留下建议、体验或想要的能力。"
+        actions={isAdmin ? <Link className="button-secondary icon-label" href="/admin"><Settings size={15} />管理后台</Link> : null}
       />
 
       {error ? <div className="surface-error">{error}</div> : null}

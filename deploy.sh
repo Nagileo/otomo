@@ -24,6 +24,11 @@ COMPOSE=(docker compose -f docker-compose.yml -f docker-compose.prod.yml)
 if [[ -n "$(env_value DISCORD_BOT_TOKEN)" ]]; then
   COMPOSE+=(--profile discord)
 fi
+release_services=(backend frontend)
+if [[ "$(env_value ASR_PROVIDER)" == "worker" ]]; then
+  COMPOSE+=(--profile asr)
+  release_services+=(asr)
+fi
 
 before_pull_sha="$(git rev-parse --verify HEAD)"
 echo "==> git pull --ff-only"
@@ -94,16 +99,57 @@ echo "==> 部署域名: ${OTOMO_DOMAIN}"
 echo "==> 校验 Compose 配置"
 "${COMPOSE[@]}" config --quiet
 
+# Remember the actually running immutable release before changing containers.
+# This is independent from Git HEAD and lets a failed switch restore service.
+previous_backend_id="$("${COMPOSE[@]}" ps -q backend 2>/dev/null || true)"
+previous_release_tag=""
+if [[ -n "$previous_backend_id" ]]; then
+  previous_backend_image="$(docker inspect --format '{{.Config.Image}}' "$previous_backend_id")"
+  previous_release_tag="${previous_backend_image##*:}"
+fi
+
+restore_previous_release() {
+  if [[ ! "$previous_release_tag" =~ ^[0-9a-f]{40}$ || "$previous_release_tag" == "$OTOMO_IMAGE_TAG" ]]; then
+    echo "ERROR: 没有可自动恢复的上一版完整 SHA，请按容器日志人工处理。" >&2
+    return 1
+  fi
+  local failed_tag="$OTOMO_IMAGE_TAG"
+  echo "==> 新版本 ${failed_tag} 未通过上线检查，自动恢复 ${previous_release_tag}" >&2
+  export OTOMO_IMAGE_TAG="$previous_release_tag"
+  if ! "${COMPOSE[@]}" up -d --remove-orphans; then
+    echo "ERROR: 自动恢复命令失败，请立即运行 bash deploy/rollback.sh ${previous_release_tag}" >&2
+    return 1
+  fi
+  local restored_id status
+  restored_id="$("${COMPOSE[@]}" ps -q backend)"
+  for _ in $(seq 1 60); do
+    status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$restored_id")"
+    if [[ "$status" == "healthy" ]]; then
+      echo "==> 已恢复上一版: ${previous_release_tag}" >&2
+      return 0
+    fi
+    if [[ "$status" == "unhealthy" || "$status" == "exited" || "$status" == "dead" ]]; then
+      break
+    fi
+    sleep 2
+  done
+  echo "ERROR: 上一版也未恢复健康，请立即检查服务日志。" >&2
+  return 1
+}
+
 # CI runs before build-images, so a deployment may begin a few minutes before
 # the SHA-tagged images exist. Wait without touching the currently running
 # containers; a failed/timeout build therefore cannot replace production.
-otomo_wait_for_release_images backend frontend
+otomo_wait_for_release_images "${release_services[@]}"
 
 echo "==> 拉取其余基础镜像"
 "${COMPOSE[@]}" pull
 
 echo "==> 重启服务"
-"${COMPOSE[@]}" up -d --remove-orphans
+if ! "${COMPOSE[@]}" up -d --remove-orphans; then
+  restore_previous_release || true
+  exit 1
+fi
 
 echo "==> 等待 backend 健康检查"
 backend_id="$("${COMPOSE[@]}" ps -q backend)"
@@ -128,6 +174,7 @@ if [[ "$healthy" != "true" ]]; then
   echo "ERROR: backend 未通过健康检查" >&2
   "${COMPOSE[@]}" ps
   "${COMPOSE[@]}" logs --tail=120 backend
+  restore_previous_release || true
   exit 1
 fi
 
@@ -149,12 +196,34 @@ verify_service_image() {
 
 echo "==> 校验运行版本"
 expected_backend_image="ghcr.io/nagileo/otomo-backend:${OTOMO_IMAGE_TAG}"
-verify_service_image backend "$expected_backend_image"
-verify_service_image scheduler "$expected_backend_image"
-verify_service_image frontend "ghcr.io/nagileo/otomo-frontend:${OTOMO_IMAGE_TAG}"
+if ! verify_service_image backend "$expected_backend_image" \
+  || ! verify_service_image scheduler "$expected_backend_image" \
+  || ! verify_service_image frontend "ghcr.io/nagileo/otomo-frontend:${OTOMO_IMAGE_TAG}"; then
+  restore_previous_release || true
+  exit 1
+fi
 if [[ -n "$(env_value DISCORD_BOT_TOKEN)" ]]; then
-  verify_service_image discord "$expected_backend_image"
+  verify_service_image discord "$expected_backend_image" || {
+    restore_previous_release || true
+    exit 1
+  }
+fi
+if [[ "$(env_value ASR_PROVIDER)" == "worker" ]]; then
+  verify_service_image asr "ghcr.io/nagileo/otomo-backend-asr:${OTOMO_IMAGE_TAG}" || {
+    restore_previous_release || true
+    exit 1
+  }
 fi
 
 echo "==> 状态"
 "${COMPOSE[@]}" ps
+
+# This append happens only after health and exact-image checks. The file lives
+# in the persistent cache volume and becomes the source of truth for rollback.
+mkdir -p cache
+deployment_log="cache/deployments.log"
+last_sha="$(tail -n 1 "$deployment_log" 2>/dev/null | awk '{print $2}' || true)"
+if [[ "$last_sha" != "$OTOMO_IMAGE_TAG" ]]; then
+  printf '%s %s deploy\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$OTOMO_IMAGE_TAG" >> "$deployment_log"
+fi
+echo "==> 已记录成功部署: ${OTOMO_IMAGE_TAG}"

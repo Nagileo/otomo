@@ -1024,7 +1024,7 @@ class SubscriptionService:
         query = str(rule.filters.get("query") or rule.filters.get("up_name") or "新番导视").strip()
         tags = rule.filters.get("tags") if isinstance(rule.filters.get("tags"), list) else []
         res = await SearchBiliGuideVideosTool().run(
-            BiliGuideSearchArgs(query=query, tags=tags, whitelist_only=bool(rule.filters.get("whitelist_only", True)), limit=int(rule.filters.get("limit") or 8))
+            BiliGuideSearchArgs(query=query, tags=tags, whitelist_only=bool(rule.filters.get("whitelist_only", False)), limit=int(rule.filters.get("limit") or 8))
         )
         items = [x.model_dump(mode="json", exclude_none=True) for x in (res.data.videos if res.ok and res.data else [])]
         return {

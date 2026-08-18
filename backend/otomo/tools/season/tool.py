@@ -462,7 +462,7 @@ class SeasonGuideBriefTool(Tool):
         self, guide_query: str, wanted: list[str], video_limit: int, comment_limit: int
     ) -> list[GuideCommentDigest]:
         search = await self._bili_search_tool.run(
-            BiliGuideSearchArgs(query=guide_query, tags=wanted[:5], whitelist_only=True, limit=max(video_limit, 3))
+            BiliGuideSearchArgs(query=guide_query, tags=wanted[:5], whitelist_only=False, limit=max(video_limit, 3))
         )
         if not search.ok or not search.data:
             return []

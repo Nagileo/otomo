@@ -16,11 +16,12 @@ type Friend = { username: string; nickname?: string; avatar_url?: string; create
 type FriendCandidate = Friend & { url?: string; saved?: boolean };
 type PulseItem = {
   subject_id: number; name: string; image?: string; count: number; friends: string[];
-  avg_rate?: number; my_status?: string;
+  avg_rate?: number; weighted_avg_rate?: number; weighted_score?: number;
+  friend_weights?: { username: string; weight: number }[]; my_status?: string;
 };
 type MatrixItem = {
   username: string; nickname?: string; sync_score?: number; shrunk_score?: number;
-  sync_level?: number; common_rated?: number; note?: string;
+  sync_level?: number; peer_weight?: number; common_rated?: number; note?: string;
 };
 type FriendCollectionItem = {
   subject_id: number; name: string; image?: string; collection_type: number;
@@ -276,8 +277,8 @@ function FriendsDashboard({ data }: { data: any }) {
     ["好友圈高分", pulse.top_rated || [], "rate"],
   ];
   return <div className="friends-dashboard">
-    <div className="friend-pulse-grid">{boards.map(([title, items, metric]) => <section key={title}><header><h3>{title}</h3><span>{items.length} 部</span></header>{items.length ? <div>{items.slice(0, 8).map((item) => <Link className="friend-pulse-item" href={`/subject/${item.subject_id}`} key={item.subject_id}>{item.image ? <img src={item.image} alt="" /> : <span className="friend-cover" />}<span><strong>{item.name}</strong><small>{metric === "rate" && item.avg_rate ? `圈内均分 ${item.avg_rate}` : `${item.count} 位好友`}{item.my_status ? ` · 我：${item.my_status}` : ""}</small><i>{(item.friends || []).slice(0, 3).map((x) => `@${x}`).join("  ")}</i></span></Link>)}</div> : <div className="friend-board-empty">暂时没有可聚合的公开收藏</div>}</section>)}</div>
-    <section className="friend-ranking"><header><div><span className="section-kicker">AFFINITY</span><h3>口味同步率</h3></div><small>共同评分少时会自动向中位收缩</small></header>{(data.matrix || []).length ? <div>{(data.matrix as MatrixItem[]).map((item, index) => <article key={item.username}><b>{index + 1}</b><span><strong>@{item.username}</strong><small>{item.note || `共同评分 ${item.common_rated || 0} 部`}</small></span>{item.shrunk_score != null ? <em>{item.shrunk_score}<small>Lv {item.sync_level}</small></em> : <em className="muted">--</em>}</article>)}</div> : <div className="friend-board-empty">公开评分样本不足</div>}</section>
+    <div className="friend-pulse-grid">{boards.map(([title, items, metric]) => <section key={title}><header><h3>{title}</h3><span>{items.length} 部</span></header>{items.length ? <div>{items.slice(0, 8).map((item) => <Link className="friend-pulse-item" href={`/subject/${item.subject_id}`} key={item.subject_id}>{item.image ? <img src={item.image} alt="" /> : <span className="friend-cover" />}<span><strong>{item.name}</strong><small>{metric === "rate" && (item.weighted_avg_rate || item.avg_rate) ? `加权均分 ${item.weighted_avg_rate || item.avg_rate}` : `${item.count} 位好友 · 相似支持 ${Number(item.weighted_score || 0).toFixed(2)}`}{item.my_status ? ` · 我：${item.my_status}` : ""}</small><i>{(item.friend_weights || []).slice(0, 3).map((x: any) => `@${x.username} ${Number(x.weight || 0).toFixed(2)}`).join("  ") || (item.friends || []).slice(0, 3).map((x) => `@${x}`).join("  ")}</i></span></Link>)}</div> : <div className="friend-board-empty">暂时没有可聚合的公开收藏</div>}</section>)}</div>
+    <section className="friend-ranking"><header><div><span className="section-kicker">AFFINITY</span><h3>口味同步率</h3></div><small>共同评分少时会自动向中位收缩；推荐使用右侧亲和权重</small></header>{(data.matrix || []).length ? <div>{(data.matrix as MatrixItem[]).map((item: any, index) => <article key={item.username}><b>{index + 1}</b><span><strong>@{item.username}</strong><small>{item.note || `共同评分 ${item.common_rated || 0} 部 · 推荐权重 ${Number(item.peer_weight || 0).toFixed(2)}`}</small></span>{item.shrunk_score != null ? <em>{item.shrunk_score}<small>Lv {item.sync_level}</small></em> : <em className="muted">--</em>}</article>)}</div> : <div className="friend-board-empty">公开评分样本不足</div>}</section>
     {data.caveats?.length ? <p className="friend-caveat">{data.caveats.join(" ")}</p> : null}
   </div>;
 }

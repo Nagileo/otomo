@@ -51,6 +51,7 @@ export function CommandPalette() {
     ["/", "今天看什么", "今日追番与落后进度"], ["/chat", "打开对话", "向 Otomo 提问"],
     ["/discover", "发现作品", "季番导视与跨媒介推荐"], ["/library", "查看收藏", "仪表盘与月报"],
     ["/workspace", "我的工作区", "保存视图与自定义清单"], ["/friends", "打开好友圈", "追番动态与口味同步率"],
+    ["/memory", "记忆管理", "查看和修正 Otomo 记住的偏好"],
     ["/settings/subscriptions", "订阅中心", "推送规则与投递记录"],
   ];
   function go(href: string) { exp.setCommandOpen(false); router.push(href); }
@@ -191,7 +192,7 @@ export function TaskCenter() {
     return clock - new Date(task.startedAt).getTime() >= 1_400;
   }).slice(0, 3);
   if (!active.length) return null;
-  return <aside className="task-center" aria-label="任务提示">{active.map((task) => <div className={task.status} key={task.id}>{task.status === "running" ? <LoaderCircle className="spin" size={15} /> : task.status === "interrupted" ? <RefreshCw size={15} /> : <X size={15} />}<button onClick={() => window.dispatchEvent(new CustomEvent("otomo:navigate", { detail: { href: task.href } }))}><strong>{task.label}</strong><small>{task.status === "running" ? "正在处理…" : task.status === "interrupted" ? "页面刷新使任务中断，点击返回重试" : task.error || "执行失败，请稍后重试"}</small></button><button className="icon-plain task-dismiss" onClick={() => exp.dismissTask(task.id)} title="关闭这条提示" aria-label={`关闭“${task.label}”提示`}><X size={14} /></button></div>)}</aside>;
+  return <aside className="task-center" aria-label="任务提示">{active.map((task) => <div className={task.status} key={task.id}>{task.status === "running" ? <LoaderCircle className="spin" size={15} /> : task.status === "interrupted" ? <RefreshCw size={15} /> : <X size={15} />}<button onClick={() => window.dispatchEvent(new CustomEvent("otomo:navigate", { detail: { href: task.href } }))}><strong>{task.label}</strong><small>{task.status === "running" ? (task.server ? "服务器仍在后台处理，可离开页面" : "正在处理…") : task.status === "interrupted" ? (task.error || "任务已中断，点击返回查看") : task.error || "执行失败，请稍后重试"}</small></button><button className="icon-plain task-dismiss" onClick={() => exp.dismissTask(task.id)} title="关闭这条提示" aria-label={`关闭“${task.label}”提示`}><X size={14} /></button></div>)}</aside>;
 }
 
 export function ExperienceOverlays() {

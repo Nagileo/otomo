@@ -38,7 +38,16 @@ from ..community import CommunityStore
 from ..config import settings
 from ..memory import LongTermMemory
 from ..memory.consolidate import now_iso
-from ..memory.models import VisualFeedbackItem, VisualFeedbackSignal, memory_summary
+from ..memory.models import (
+    FeedbackItem,
+    MemoryItem,
+    ProgressItem,
+    SpoilerDefault,
+    UserAspectProfile,
+    VisualFeedbackItem,
+    VisualFeedbackSignal,
+    memory_summary,
+)
 from ..memory.runtime import attach_memory_state
 from ..notifications import validate_webhook_url
 from ..obs import append_visual_feedback, traced_stream
@@ -51,6 +60,7 @@ from ..quota import (
     collected_usage,
     estimate_tokens,
 )
+from ..recommendation_cache import RecommendationArtifactCache
 from ..recommendation_events import (
     RecommendationEventStore,
     RecommendationFeedbackRequest,
@@ -97,24 +107,27 @@ from ..workspace import (
     WorkspaceStore,
 )
 from .community import router as community_router
+from .admin import router as admin_router
 
 log = logging.getLogger("otomo.api")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    app.state.started_at = time.time()
     app.state.bangumi = BangumiClient()
     app.state.moegirl = MoegirlClient()
     app.state.ltm = LongTermMemory()
     app.state.auth = AuthStore()
     app.state.session_store = SessionStore()
     app.state.session_realtime = SessionRealtimeHub()
-    app.state.chat_runs = ChatRunHub()
-    app.state.recommendation_runs = ChatRunHub()
+    app.state.chat_runs = ChatRunHub(namespace="chat")
+    app.state.recommendation_runs = ChatRunHub(namespace="recommendation")
     app.state.share_store = ShareSnapshotStore()
     app.state.subscription_store = SubscriptionStore(cipher=app.state.auth.cipher)
     app.state.today_store = TodayPreferenceStore()
     app.state.recommendation_event_store = RecommendationEventStore()
+    app.state.recommendation_artifact_cache = RecommendationArtifactCache()
     app.state.workspace_store = WorkspaceStore()
     app.state.community_store = CommunityStore()
     app.state.subscription_service = SubscriptionService(
@@ -175,6 +188,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="Otomo Backend", version="0.1.0", lifespan=lifespan)
 app.include_router(community_router)
+app.include_router(admin_router)
 
 
 def _cors_origins() -> list[str]:
@@ -210,6 +224,17 @@ class ChatRequest(BaseModel):
     progress_episode: int | None = None
     attachments: list[dict[str, Any]] = Field(default_factory=list)
     device_id: str = Field("", max_length=96)
+
+
+class MemoryPreferencesUpdate(BaseModel):
+    """User-controllable memory, excluding inboxes, plans and pending writes."""
+
+    likes: list[MemoryItem] | None = None
+    dislikes: list[MemoryItem] | None = None
+    spoiler_default: SpoilerDefault | None = None
+    progress: dict[str, ProgressItem] | None = None
+    feedback: list[FeedbackItem] | None = None
+    aspect_profiles: dict[str, UserAspectProfile] | None = None
 
 
 class UploadImageRequest(BaseModel):
@@ -406,6 +431,130 @@ def _check_share_limits(request: Request, username: str) -> None:
         window_seconds=3600,
     )
     limiter.cleanup()
+
+
+def _manageable_memory(mem: Any) -> dict[str, Any]:
+    likes = [item.model_dump(mode="json", exclude_none=True) for item in mem.likes]
+    dislikes = [item.model_dump(mode="json", exclude_none=True) for item in mem.dislikes]
+    feedback = [item.model_dump(mode="json", exclude_none=True) for item in mem.feedback]
+    progress = {
+        key: item.model_dump(mode="json", exclude_none=True)
+        for key, item in mem.progress.items()
+    }
+    aspects = {
+        key: item.model_dump(mode="json", exclude_none=True)
+        for key, item in mem.aspect_profiles.items()
+    }
+    sources = [
+        str(item.get("source", ""))
+        for item in [*likes, *dislikes, *feedback, *progress.values()]
+    ]
+    derived_aspects = sum(
+        len(profile.get("likes", [])) + len(profile.get("dislikes", []))
+        for profile in aspects.values()
+    )
+    return {
+        "username": mem.username,
+        "likes": likes,
+        "dislikes": dislikes,
+        "spoiler_default": mem.spoiler_default,
+        "progress": progress,
+        "feedback": feedback,
+        "aspect_profiles": aspects,
+        "updated_at": mem.updated_at,
+        "counts": {
+            "explicit": sources.count("explicit_user"),
+            "derived": sources.count("derived_from_feedback") + derived_aspects,
+            "profile": sources.count("bangumi_profile"),
+            "progress": len(progress),
+        },
+    }
+
+
+@app.get("/memory")
+async def get_memory(request: Request, response: Response) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    identity = _authenticated_identity(session.auth_session_id)
+    with tenant_scope(identity.username, authenticated=True):
+        mem = app.state.ltm.load_user(identity.username)
+    return {"ok": True, "data": _manageable_memory(mem)}
+
+
+@app.get("/memory/export")
+async def export_memory(request: Request, response: Response) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    identity = _authenticated_identity(session.auth_session_id)
+    with tenant_scope(identity.username, authenticated=True):
+        mem = app.state.ltm.load_user(identity.username)
+    return {
+        "ok": True,
+        "exported_at": now_iso(),
+        "schema": "otomo-memory-v1",
+        "data": mem.model_dump(mode="json", exclude_none=True),
+    }
+
+
+@app.patch("/memory")
+async def update_memory(
+    req: MemoryPreferencesUpdate, request: Request, response: Response,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    identity = _authenticated_identity(session.auth_session_id)
+    updates = req.model_dump(exclude_unset=True)
+    limits = {
+        "likes": 200, "dislikes": 200, "feedback": 500,
+        "progress": 500, "aspect_profiles": 30,
+    }
+    for field, limit in limits.items():
+        value = updates.get(field)
+        if value is not None and len(value) > limit:
+            raise HTTPException(status_code=400, detail=f"{field} 条目过多（最多 {limit} 条）")
+    with tenant_scope(identity.username, authenticated=True):
+        mem = app.state.ltm.load_user(identity.username)
+        for field in (
+            "likes", "dislikes", "spoiler_default", "progress", "feedback", "aspect_profiles",
+        ):
+            value = getattr(req, field)
+            if field in updates and value is not None:
+                setattr(mem, field, value)
+        mem.likes = [item for item in mem.likes if item.value.strip()]
+        mem.dislikes = [item for item in mem.dislikes if item.value.strip()]
+        app.state.ltm.save_user(mem)
+    return {"ok": True, "data": _manageable_memory(mem)}
+
+
+@app.delete("/memory/{category}")
+async def clear_memory_category(
+    category: Literal["likes", "dislikes", "progress", "feedback", "derived", "all"],
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    identity = _authenticated_identity(session.auth_session_id)
+    with tenant_scope(identity.username, authenticated=True):
+        mem = app.state.ltm.load_user(identity.username)
+        if category in {"likes", "dislikes", "progress", "feedback"}:
+            setattr(mem, category, [] if category != "progress" else {})
+        elif category == "derived":
+            mem.likes = [item for item in mem.likes if item.source != "derived_from_feedback"]
+            mem.dislikes = [item for item in mem.dislikes if item.source != "derived_from_feedback"]
+            mem.feedback = [item for item in mem.feedback if item.source != "derived_from_feedback"]
+            mem.aspect_profiles = {}
+            mem.affinity_cache = {}
+        else:
+            mem.likes = []
+            mem.dislikes = []
+            mem.spoiler_default = "none"
+            mem.progress = {}
+            mem.feedback = []
+            mem.aspect_profiles = {}
+            mem.affinity_cache = {}
+            mem.profile_snapshot = {}
+            mem.visual_feedback = []
+        app.state.ltm.save_user(mem)
+    return {"ok": True, "data": _manageable_memory(mem)}
 
 
 def _check_subscription_limits(request: Request, username: str, *, test: bool = False) -> None:
@@ -1595,6 +1744,7 @@ async def product_recommendations(
                 client,
                 app.state.ltm,
                 event_store=app.state.recommendation_event_store,
+                artifact_cache=app.state.recommendation_artifact_cache,
             ).run(args)
         return result.model_dump(mode="json", exclude_none=True)
     finally:
@@ -1635,6 +1785,7 @@ async def start_recommendation_run(
                         client,
                         app.state.ltm,
                         event_store=app.state.recommendation_event_store,
+                        artifact_cache=app.state.recommendation_artifact_cache,
                     ).run(args))
                     try:
                         while not task.done():
@@ -1651,9 +1802,11 @@ async def start_recommendation_run(
                         if not task.done():
                             task.cancel()
                             await asyncio.gather(task, return_exceptions=True)
-                        await run.publish("cancelled", {
-                            "type": "cancelled", "message": "本轮推荐已停止，未完成结果不会展示。",
-                        })
+                        if run.cancel_reason != "shutdown":
+                            await run.publish("cancelled", {
+                                "type": "cancelled",
+                                "message": "本轮推荐已停止，未完成结果不会展示。",
+                            })
                         raise
             if not result.ok:
                 raise RuntimeError(result.error or "推荐生成失败")
@@ -2375,6 +2528,7 @@ async def next_recommendation_batch(
         with tenant_scope(identity.username, authenticated=True):
             result = await RecommendTool(
                 client, app.state.ltm, event_store=app.state.recommendation_event_store,
+                artifact_cache=app.state.recommendation_artifact_cache,
             ).run(RecommendArgs.model_validate(args_raw))
         return result.model_dump(mode="json", exclude_none=True)
     finally:
@@ -2403,9 +2557,45 @@ async def recommendation_history(
     }
 
 
+@app.get("/recommendations/evaluation")
+async def recommendation_evaluation(
+    request: Request, response: Response, days: int = 30,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    identity = _authenticated_identity(session.auth_session_id)
+    return {
+        "ok": True,
+        "data": app.state.recommendation_event_store.evaluation_report(
+            identity.username, min(max(days, 1), 365),
+        ),
+    }
+
+
 @app.get("/recommendations/models")
 async def recommendation_models() -> dict[str, Any]:
     return {
         "ok": True,
         "data": [status.model_dump(mode="json", exclude_none=True) for status in cf_model_registry.statuses()],
     }
+
+
+@app.get("/tasks")
+async def background_tasks(
+    request: Request, response: Response, limit: int = 30,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    owner = _session_owner(session.auth_session_id)
+    bounded = min(max(int(limit), 1), 100)
+    chat, recommendations = await asyncio.gather(
+        app.state.chat_runs.recent(owner, bounded),
+        app.state.recommendation_runs.recent(owner, bounded),
+    )
+    rows = [
+        {**row, "kind": "chat", "label": "Otomo 正在回答", "href": "/chat"}
+        for row in chat
+    ] + [
+        {**row, "kind": "recommendation", "label": "生成个性化推荐", "href": "/discover"}
+        for row in recommendations
+    ]
+    rows.sort(key=lambda row: float(row.get("started_at") or 0), reverse=True)
+    return {"ok": True, "data": rows[:bounded]}

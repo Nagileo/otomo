@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import json
+import math
 from pathlib import Path
 import secrets
 import sqlite3
@@ -382,6 +383,219 @@ class RecommendationEventStore:
                     "已有一定反馈样本，仍以你本轮明确要求为最高优先级。"
                     if confidence == "medium" else
                     "反馈样本较充分，但不会覆盖你本轮明确要求。"
+                ),
+            },
+        }
+
+    def _period_evaluation(
+        self,
+        username: str | None,
+        start: datetime,
+        end: datetime,
+    ) -> dict[str, Any]:
+        where = "s.created_at>=? AND s.created_at<?"
+        params: list[Any] = [start.isoformat(), end.isoformat()]
+        if username:
+            where += " AND s.username=?"
+            params.append(username)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""SELECT s.id,s.subject_type,s.scenario,s.request_json,s.created_at,
+                            i.subject_id,i.position,i.payload_json
+                     FROM recommendation_sets s JOIN recommendation_items i ON i.set_id=s.id
+                     WHERE {where} ORDER BY s.created_at,i.position""",
+                params,
+            ).fetchall()
+            event_where = "e.created_at>=? AND e.created_at<?"
+            event_params: list[Any] = [start.isoformat(), end.isoformat()]
+            if username:
+                event_where += " AND e.username=?"
+                event_params.append(username)
+            events = conn.execute(
+                f"""SELECT e.id,e.set_id,e.subject_id,e.event
+                     FROM recommendation_events e WHERE {event_where} ORDER BY e.id""",
+                event_params,
+            ).fetchall()
+
+        batches: dict[str, dict[str, Any]] = {}
+        all_ids: list[int] = []
+        supported_claims = 0
+        checked_claims = 0
+        supported_cards = 0
+        total_cards = 0
+        durations: list[float] = []
+        cache_hits = 0
+        cache_misses = 0
+        strategies: Counter[str] = Counter()
+        for row in rows:
+            set_id = str(row["id"])
+            batch = batches.setdefault(set_id, {
+                "subject_type": str(row["subject_type"]),
+                "scenario": str(row["scenario"]),
+                "request_json": str(row["request_json"]),
+                "positions": {},
+                "impressions": set(),
+                "latest": {},
+            })
+            subject_id = int(row["subject_id"])
+            batch["positions"][subject_id] = int(row["position"])
+            all_ids.append(subject_id)
+            total_cards += 1
+            try:
+                payload = json.loads(str(row["payload_json"]))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                payload = {}
+            claims = [
+                claim for claim in (payload.get("claims") or [])
+                if claim.get("kind") in {"fit", "risk", "quality"}
+            ]
+            card_supported = any(claim.get("support") for claim in claims)
+            checked_claims += len(claims)
+            supported_claims += sum(1 for claim in claims if claim.get("support"))
+            supported_cards += int(card_supported)
+
+        for batch in batches.values():
+            try:
+                request = json.loads(batch["request_json"])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                request = {}
+            perf = request.get("_performance") or {}
+            if float(perf.get("total_ms") or 0) > 0:
+                durations.append(float(perf["total_ms"]))
+            cache = perf.get("evidence_cache") or {}
+            cache_hits += int(cache.get("hits") or 0)
+            cache_misses += int(cache.get("misses") or 0)
+            strategy = request.get("_strategy_metadata") or {}
+            strategies[str(strategy.get("version") or "legacy")] += 1
+
+        preference_events = {"wishlist", "started", "dismiss", "more", "less", "watched", "undo"}
+        for event in events:
+            batch = batches.get(str(event["set_id"]))
+            if batch is None:
+                continue
+            subject_id = int(event["subject_id"])
+            if event["event"] == "impression":
+                batch["impressions"].add(subject_id)
+            if event["event"] in preference_events:
+                batch["latest"][subject_id] = str(event["event"])
+
+        positive = {"wishlist", "started", "more", "watched"}
+        visible = [batch for batch in batches.values() if batch["impressions"]]
+        hit_counts = {1: 0, 3: 0, 5: 0}
+        reciprocal_ranks: list[float] = []
+        ndcgs: list[float] = []
+        accepted_items = 0
+        visible_items = 0
+        segments: dict[tuple[str, str], dict[str, Any]] = {}
+        for batch in visible:
+            accepted_positions = sorted(
+                batch["positions"][subject_id]
+                for subject_id, event in batch["latest"].items()
+                if event in positive
+                and subject_id in batch["positions"]
+                and subject_id in batch["impressions"]
+            )
+            visible_items += len(batch["impressions"])
+            accepted_items += len({
+                subject_id for subject_id, event in batch["latest"].items()
+                if event in positive and subject_id in batch["impressions"]
+            })
+            for k in hit_counts:
+                hit_counts[k] += int(any(position <= k for position in accepted_positions))
+            reciprocal_ranks.append(1 / accepted_positions[0] if accepted_positions else 0.0)
+            if accepted_positions:
+                dcg = sum(1 / math.log2(position + 1) for position in accepted_positions)
+                ideal = sum(1 / math.log2(position + 1) for position in range(1, len(accepted_positions) + 1))
+                ndcgs.append(dcg / ideal if ideal else 0.0)
+            else:
+                ndcgs.append(0.0)
+            key = (batch["subject_type"], batch["scenario"])
+            segment = segments.setdefault(key, {
+                "subject_type": key[0], "scenario": key[1],
+                "visible_sets": 0, "accepted_sets": 0,
+            })
+            segment["visible_sets"] += 1
+            segment["accepted_sets"] += int(bool(accepted_positions))
+
+        denominator = len(visible)
+        total = len(all_ids)
+        unique = len(set(all_ids))
+        sorted_durations = sorted(durations)
+        p95_index = max(0, math.ceil(len(sorted_durations) * 0.95) - 1)
+        cache_total = cache_hits + cache_misses
+        return {
+            "sets": len(batches),
+            "visible_sets": denominator,
+            "visible_items": visible_items,
+            "accepted_items": accepted_items,
+            "item_acceptance_rate": accepted_items / visible_items if visible_items else 0.0,
+            "acceptance_at_k": {
+                str(k): hit_counts[k] / denominator if denominator else 0.0
+                for k in (1, 3, 5)
+            },
+            "mrr": sum(reciprocal_ranks) / denominator if denominator else 0.0,
+            "ndcg": sum(ndcgs) / denominator if denominator else 0.0,
+            "catalog": {
+                "recommended_items": total,
+                "unique_items": unique,
+                "unique_ratio": unique / total if total else 0.0,
+                "repeat_rate": 1 - unique / total if total else 0.0,
+            },
+            "explanations": {
+                "cards": total_cards,
+                "supported_cards": supported_cards,
+                "card_support_coverage": supported_cards / total_cards if total_cards else 0.0,
+                "claims": checked_claims,
+                "supported_claims": supported_claims,
+                "claim_support_coverage": supported_claims / checked_claims if checked_claims else 0.0,
+            },
+            "performance": {
+                "measured_sets": len(durations),
+                "average_ms": sum(durations) / len(durations) if durations else 0.0,
+                "p95_ms": sorted_durations[p95_index] if sorted_durations else 0.0,
+                "cache_hits": cache_hits,
+                "cache_misses": cache_misses,
+                "cache_hit_rate": cache_hits / cache_total if cache_total else 0.0,
+            },
+            "strategy_versions": dict(strategies),
+            "segments": [
+                {
+                    **segment,
+                    "acceptance_rate": (
+                        segment["accepted_sets"] / segment["visible_sets"]
+                        if segment["visible_sets"] else 0.0
+                    ),
+                }
+                for segment in segments.values()
+            ],
+        }
+
+    def evaluation_report(
+        self, username: str | None = None, days: int = 30,
+    ) -> dict[str, Any]:
+        bounded_days = min(max(int(days), 1), 365)
+        now = datetime.now(timezone.utc)
+        start = now - timedelta(days=bounded_days)
+        previous_start = start - timedelta(days=bounded_days)
+        current = self._period_evaluation(username, start, now)
+        previous = self._period_evaluation(username, previous_start, start)
+        return {
+            "days": bounded_days,
+            "scope": f"user:{username}" if username else "global",
+            "current": current,
+            "previous": previous,
+            "trend": {
+                "acceptance_at_3": (
+                    current["acceptance_at_k"]["3"] - previous["acceptance_at_k"]["3"]
+                ),
+                "ndcg": current["ndcg"] - previous["ndcg"],
+                "explanation_support": (
+                    current["explanations"]["claim_support_coverage"]
+                    - previous["explanations"]["claim_support_coverage"]
+                ),
+                "average_ms": (
+                    current["performance"]["average_ms"]
+                    - previous["performance"]["average_ms"]
                 ),
             },
         }

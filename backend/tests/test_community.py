@@ -40,6 +40,16 @@ def test_community_store_aggregates_visitors_and_guestbook(tmp_path):
     assert reported["can_report"] is False
     assert store.list_comments("moderator", admin_usernames={"moderator"})[0]["report_count"] == 1
 
+    queue = store.moderation_overview()
+    report_id = queue["reports"][0]["id"]
+    store.moderate_comment(comment["id"], "hide", "moderator", "等待复核")
+    assert store.list_comments("bob") == []
+    assert store.list_comments("moderator", admin_usernames={"moderator"})[0]["moderation_status"] == "hidden"
+    store.moderate_comment(comment["id"], "restore", "moderator")
+    resolved = store.resolve_report(report_id, "resolved", "moderator", "已沟通")
+    assert resolved["status"] == "resolved"
+    assert store.moderation_overview()["counts"]["pending_reports"] == 0
+
     try:
         store.delete_comment(comment["id"], "bob")
     except PermissionError:
@@ -57,6 +67,8 @@ def test_community_api_requires_login_and_csrf_for_comments(tmp_path, monkeypatc
     monkeypatch.setattr(config.settings, "subscription_store_path", str(tmp_path / "subs.sqlite3"))
     monkeypatch.setattr(config.settings, "today_store_path", str(tmp_path / "today.sqlite3"))
     monkeypatch.setattr(config.settings, "recommendation_event_store_path", str(tmp_path / "rec.sqlite3"))
+    monkeypatch.setattr(config.settings, "recommendation_artifact_cache_path", str(tmp_path / "rec-cache.sqlite3"))
+    monkeypatch.setattr(config.settings, "background_run_store_path", str(tmp_path / "runs.sqlite3"))
     monkeypatch.setattr(config.settings, "workspace_store_path", str(tmp_path / "workspace.sqlite3"))
     monkeypatch.setattr(config.settings, "community_store_path", str(tmp_path / "community.sqlite3"))
     monkeypatch.setattr(config.settings, "ltm_store_path", str(tmp_path / "ltm.sqlite3"))
@@ -111,6 +123,36 @@ def test_community_api_requires_login_and_csrf_for_comments(tmp_path, monkeypatc
             f"/community/comments/{comment['id']}",
             headers={"x-otomo-csrf": bob_auth["csrf_token"]},
         ).status_code == 403
+
+        # The configured moderator sees the quality dashboard and can use
+        # reversible moderation before resolving the report.
+        client.cookies.clear()
+        moderator_auth = client.get("/auth/session").json()
+        moderator_session = client.cookies.get(config.settings.session_cookie_name)
+        assert moderator_session
+        app.state.auth.save_token(BangumiToken(
+            auth_session_id=moderator_session, access_token="token", username="moderator",
+        ))
+        dashboard = client.get("/admin/overview?days=7")
+        assert dashboard.status_code == 200
+        report_id = dashboard.json()["community"]["moderation"]["reports"][0]["id"]
+        hidden = client.post(
+            f"/admin/comments/{comment['id']}/moderate",
+            headers={"x-otomo-csrf": moderator_auth["csrf_token"]},
+            json={"action": "hide", "note": "等待复核"},
+        )
+        assert hidden.status_code == 200
+        assert client.get("/community").json()["comments"][0]["moderation_status"] == "hidden"
+        assert client.post(
+            f"/admin/comments/{comment['id']}/moderate",
+            headers={"x-otomo-csrf": moderator_auth["csrf_token"]},
+            json={"action": "restore"},
+        ).status_code == 200
+        assert client.post(
+            f"/admin/reports/{report_id}/resolve",
+            headers={"x-otomo-csrf": moderator_auth["csrf_token"]},
+            json={"status": "resolved", "note": "已复核"},
+        ).status_code == 200
 
         client.cookies.clear()
         owner_auth = client.get("/auth/session").json()

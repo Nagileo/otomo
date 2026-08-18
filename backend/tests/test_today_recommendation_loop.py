@@ -208,6 +208,46 @@ def test_recommendation_history_and_metrics_explain_learned_preferences(tmp_path
     assert history[0]["items"][1]["latest_reason"] == "genre"
 
 
+def test_online_evaluation_tracks_rank_support_performance_and_repeat(tmp_path):
+    store = RecommendationEventStore(str(tmp_path / "events.sqlite3"))
+    request = {
+        "_strategy_metadata": {"version": "acgn-media-v2"},
+        "_performance": {
+            "total_ms": 1200,
+            "evidence_cache": {"hits": 2, "misses": 1},
+        },
+    }
+    supported = {"kind": "fit", "text": "适合", "support": ["标签：日常"]}
+    unsupported = {"kind": "quality", "text": "口碑好", "support": []}
+    first = store.create_set("alice", "anime", "general", request, [
+        {"id": 1, "name": "A", "claims": [supported]},
+        {"id": 2, "name": "B", "claims": [unsupported]},
+        {"id": 3, "name": "C", "claims": [supported]},
+    ])
+    second = store.create_set("alice", "anime", "tonight", request, [
+        {"id": 1, "name": "A", "claims": [supported]},
+        {"id": 4, "name": "D", "claims": [supported]},
+    ])
+    for set_id, subject_ids in ((first, (1, 2, 3)), (second, (1, 4))):
+        for subject_id in subject_ids:
+            store.record("alice", RecommendationFeedbackRequest(
+                recommendation_set_id=set_id, subject_id=subject_id, event="impression",
+            ))
+    store.record("alice", RecommendationFeedbackRequest(
+        recommendation_set_id=first, subject_id=2, event="more",
+    ))
+
+    report = store.evaluation_report("alice", 30)["current"]
+
+    assert report["visible_sets"] == 2
+    assert report["acceptance_at_k"] == {"1": 0.0, "3": 0.5, "5": 0.5}
+    assert report["mrr"] == 0.25
+    assert report["catalog"]["repeat_rate"] == pytest.approx(0.2)
+    assert report["explanations"]["claim_support_coverage"] == 0.8
+    assert report["performance"]["cache_hit_rate"] == pytest.approx(2 / 3)
+    assert report["strategy_versions"] == {"acgn-media-v2": 2}
+
+
 def test_cf_registry_reports_stale_and_missing_models(tmp_path):
     built = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
     (tmp_path / "i2i_anime.json").write_text(json.dumps({

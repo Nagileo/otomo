@@ -114,6 +114,26 @@ bash deploy.sh
 export OTOMO_IMAGE_TAG="$(git rev-parse HEAD)"
 ```
 
+每次通过健康检查和镜像版本核对后，部署脚本会把成功版本写入
+`cache/deployments.log`。新版本在容器切换后若启动失败、健康检查失败或
+实际镜像不一致，`deploy.sh` 会自动恢复切换前的完整 SHA。也可以手动回到
+上一个成功版本（不改 Git、不删除数据库）：
+
+```bash
+bash deploy/rollback.sh
+```
+
+也可以指定一个已经发布的完整 commit SHA：
+
+```bash
+bash deploy/rollback.sh 0123456789abcdef0123456789abcdef01234567
+```
+
+默认 backend 镜像不再包含 Playwright/Chromium 和 Whisper。若启用
+`ASR_PROVIDER=worker`，先在 GitHub Actions 手动运行 `build-images`，为同一
+commit 发布 `otomo-backend-asr`，再执行 `bash deploy.sh`；否则脚本会在触碰
+当前容器前等待并安全超时。
+
 ---
 
 ## 5. 上线检查清单

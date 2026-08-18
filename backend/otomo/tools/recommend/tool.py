@@ -25,6 +25,7 @@ from ...agent._common import emit_tool_progress
 from ...agent.contracts import Citation, Tool, ToolResult
 from ...memory import LongTermMemory
 from ...memory.models import UserAspectProfile
+from ...recommendation_cache import RecommendationArtifactCache
 from ...recommendation_events import RecommendationEventStore
 from ...recsys_registry import CFModelStatus, cf_model_registry
 from ...security_context import can_access_private_user
@@ -35,7 +36,7 @@ from ..anilist.tool import AniListArgs
 from ..bangumi.client import SUBJECT_TYPE, BangumiClient
 from ..curation import curated_recall_candidates
 from ..erogamescape.tool import EGSRankArgs, RankErogameScapeTool
-from ..review.tool import ReviewSubjectArgs, ReviewSubjectTool, _ASPECT_HINTS
+from ..review.tool import ReviewFusionResult, ReviewSubjectArgs, ReviewSubjectTool, _ASPECT_HINTS
 from .explanations import RecommendationClaim, refresh_item_explanation
 
 _RECALL_PER_TAG = 50
@@ -83,6 +84,37 @@ _MUSIC_SUBTYPE_LABEL = {
     "character_song": "角色歌",
     "artist": "艺人/专辑",
     "music": "音乐",
+}
+
+_MEDIA_POLICY_VERSION = "acgn-media-v2"
+_MEDIA_POLICIES: dict[str, dict[str, Any]] = {
+    # Explicit requests and hard avoidance are intentionally not multiplied:
+    # media policy may tune ranking, never weaken what the user just asked for.
+    "anime": {
+        "affinity": 1.0, "graph": 1.0, "cf": 1.0, "external": 0.9,
+        "semantic": 1.0, "quality": 1.0, "evidence_extra": 4,
+        "summary": "动画兼顾协同口味、标签贴合、系列入口和社区口碑。",
+    },
+    "book": {
+        "affinity": 1.15, "graph": 0.9, "cf": 0.95, "external": 0.85,
+        "semantic": 1.1, "quality": 0.8, "evidence_extra": 3,
+        "summary": "书籍先辨别漫画/轻小说/小说，再提高题材和文本偏好权重。",
+    },
+    "game": {
+        "affinity": 1.0, "graph": 0.85, "cf": 0.9, "external": 1.25,
+        "semantic": 0.8, "quality": 0.7, "evidence_extra": 5,
+        "summary": "游戏降低单站热度权重，强化 EGS/VNDB 等分圈层证据与安全映射。",
+    },
+    "music": {
+        "affinity": 1.2, "graph": 1.15, "cf": 0.8, "external": 0.65,
+        "semantic": 1.1, "quality": 0.55, "evidence_extra": 2,
+        "summary": "音乐优先作品关系、用途和风格，避免把 Bangumi 热度当作绝对音质评价。",
+    },
+    "real": {
+        "affinity": 1.05, "graph": 0.9, "cf": 0.75, "external": 0.8,
+        "semantic": 1.0, "quality": 1.0, "evidence_extra": 3,
+        "summary": "三次元作品以题材、主创和社区口碑为主，协同模型只作弱信号。",
+    },
 }
 
 _MOOD_TAG_MAP: dict[str, list[str]] = {
@@ -531,6 +563,7 @@ class RecItem(BaseModel):
     release_date: str | None = None
     episodes: int | None = None
     review_consensus: str | None = None
+    review_sources: list[str] = Field(default_factory=list)
     evidence: list[RecEvidence] = Field(default_factory=list)
     external_mappings: list[ExternalMappingEvidence] = Field(default_factory=list)
     quality_badges: list[str] = Field(default_factory=list)
@@ -604,6 +637,7 @@ class RecommendTool(Tool):
         ltm: LongTermMemory | None = None,
         rerank_weights: RerankWeights | None = None,
         event_store: RecommendationEventStore | None = None,
+        artifact_cache: RecommendationArtifactCache | None = None,
     ) -> None:
         self.client = client
         self.ltm = ltm
@@ -612,6 +646,9 @@ class RecommendTool(Tool):
         # Offline evaluators construct the tool without LTM; they must not
         # contaminate production impression metrics.
         self.event_store = event_store or (RecommendationEventStore() if ltm is not None else None)
+        self.artifact_cache = artifact_cache or (
+            RecommendationArtifactCache() if ltm is not None else None
+        )
         self.reviewer = ReviewSubjectTool(client)
         self.egs_rank = RankErogameScapeTool()
 
@@ -703,10 +740,13 @@ class RecommendTool(Tool):
                 c["cf"] += 1.0 / (1 + rank)
                 c["cf_from"].add(sid)
 
-    async def _friends_recall(self, cand: dict, stype: int, username: str, seen: set[int]) -> None:
+    async def _friends_recall(
+        self, cand: dict, stype: int, username: str, seen: set[int],
+        own_items: list[dict] | None = None,
+    ) -> None:
         """好友圈社交召回：好友们想看（≥2 人）或打了高分（≥2 人评分且均分≥8）的未看作品。
         经典 RecSys 社交信号通道——比全站 CF 更贴近"我的圈子"。失败静默。"""
-        from ..user_analysis.tool import _fetch_friends
+        from ..user_analysis.tool import _build_affinity, _fetch_friends
 
         try:
             friends, _url = await _fetch_friends(username, 10)
@@ -720,11 +760,14 @@ class RecommendTool(Tool):
             host="bangumi",
             return_exceptions=True,
         )
+        own_items = own_items or []
         wish: dict[int, dict] = {}
         rated: dict[int, dict] = {}
         for name, items in zip(names, peers, strict=False):
             if isinstance(items, Exception):
                 continue
+            affinity = _build_affinity(name, own_items, items)
+            peer_weight = max(0.05, float(affinity.peer_weight))
             for item in items:
                 subj = item.get("subject") or {}
                 sid = subj.get("id")
@@ -734,28 +777,47 @@ class RecommendTool(Tool):
                 t = int(item.get("type") or 0)
                 rate = int(item.get("rate") or 0)
                 if t == 1:
-                    slot = wish.setdefault(sid, {"subj": subj, "n": 0})
+                    slot = wish.setdefault(sid, {"subj": subj, "n": 0, "support": 0.0, "peers": []})
                     slot["n"] += 1
+                    slot["support"] += peer_weight
+                    slot["peers"].append((name, peer_weight))
                 if rate > 0:
-                    slot = rated.setdefault(sid, {"subj": subj, "rates": []})
+                    slot = rated.setdefault(sid, {"subj": subj, "rates": [], "weighted": [], "peers": []})
                     slot["rates"].append(rate)
+                    slot["weighted"].append((rate, peer_weight))
+                    slot["peers"].append((name, peer_weight))
         for sid, slot in wish.items():
-            if slot["n"] < 2:
+            if slot["n"] < 2 and slot["support"] < 0.25:
                 continue
             c = cand.setdefault(sid, _blank(slot["subj"]))
             c["tags"].update(_tag_names(slot["subj"]))
-            c["friends"] = f"{slot['n']} 位好友都想看"
-            c["external_boost"] = max(c.get("external_boost", 0.0), min(0.15 + 0.05 * slot["n"], 0.35))
+            peers_label = "、".join(
+                f"@{name}（相似 {weight:.0%}）"
+                for name, weight in sorted(slot["peers"], key=lambda pair: -pair[1])[:3]
+            )
+            c["friends"] = f"相似好友想看支持 {slot['support']:.2f}：{peers_label}"
+            c["friend_support"] = round(slot["support"], 3)
+            c["external_boost"] = max(
+                c.get("external_boost", 0.0), min(0.1 + 0.32 * slot["support"], 0.45),
+            )
         for sid, slot in rated.items():
-            if len(slot["rates"]) < 2:
+            support = sum(weight for _rate, weight in slot["weighted"])
+            if len(slot["rates"]) < 2 and support < 0.25:
                 continue
-            avg = sum(slot["rates"]) / len(slot["rates"])
+            avg = sum(rate * weight for rate, weight in slot["weighted"]) / support
             if avg < 8:
                 continue
             c = cand.setdefault(sid, _blank(slot["subj"]))
             c["tags"].update(_tag_names(slot["subj"]))
-            c["friends"] = f"好友圈 {len(slot['rates'])} 人均分 {avg:.1f}"
-            c["external_boost"] = max(c.get("external_boost", 0.0), min(0.2 + (avg - 8) * 0.1, 0.4))
+            peers_label = "、".join(
+                f"@{name}（相似 {weight:.0%}）"
+                for name, weight in sorted(slot["peers"], key=lambda pair: -pair[1])[:3]
+            )
+            c["friends"] = f"相似好友加权均分 {avg:.1f} / 支持 {support:.2f}：{peers_label}"
+            c["friend_support"] = round(support, 3)
+            c["external_boost"] = max(
+                c.get("external_boost", 0.0), min(0.16 + (avg - 8) * 0.1 + support * 0.12, 0.5),
+            )
 
     async def _cross_media_recall(self, cand: dict, target_stype: int, source_items: list[dict], seen: set[int]) -> None:
         seeds = sorted(
@@ -945,6 +1007,7 @@ class RecommendTool(Tool):
             phase_started = now
 
         stype = SUBJECT_TYPE[args.subject_type]
+        media_policy = _MEDIA_POLICIES[args.subject_type]
         await emit_tool_progress(tool=self.name, summary="解析推荐目标与用户身份", current=1, total=6)
         if args.username:
             username = args.username
@@ -1127,7 +1190,7 @@ class RecommendTool(Tool):
                 curation_hits += 1
 
         if args.use_friends and username:
-            await self._friends_recall(cand, stype, username, seen)
+            await self._friends_recall(cand, stype, username, seen, items)
 
         # 语义召回（实验性，默认关）：用户高分作品向量 → 全站索引近邻，补标签精确匹配的
         # 盲区（"百合"召不回"GL"）。消融显示小样本上会稀释 top-K，待大样本验证再默认开。
@@ -1361,8 +1424,11 @@ class RecommendTool(Tool):
         prelim = sorted(
             cand.items(),
             key=lambda kv: -(
-                affinity(kv[1]) + graph_bonus(kv[1]) + cf_bonus(kv[1])
-                + external_bonus(kv[1]) + explicit_tag_adjust(kv[1])
+                media_policy["affinity"] * affinity(kv[1])
+                + media_policy["graph"] * graph_bonus(kv[1])
+                + media_policy["cf"] * cf_bonus(kv[1])
+                + media_policy["external"] * external_bonus(kv[1])
+                + explicit_tag_adjust(kv[1])
                 + scenario_tag_adjust(kv[1]) + feedback_tag_adjust(kv[1])
                 + memory_penalty(kv[1]) + temporary_penalty(kv[1])
                 + feedback_avoidance_penalty(kv[1]) + profile_avoidance_penalty(kv[1])
@@ -1398,7 +1464,7 @@ class RecommendTool(Tool):
                     scenario_notes.append(f"语义特征不可用（{type(e).__name__}），已按其余信号重排。")
 
         def semantic_bonus(c: dict, sid: int) -> float:
-            return self.w.semantic * sem_scores.get(sid, 0.0)
+            return media_policy["semantic"] * self.w.semantic * sem_scores.get(sid, 0.0)
 
         def feature_vector(sid: int, c: dict) -> dict[str, float]:
             """LTR 训练用：候选的原始特征分量（未乘权重的语义/质量用裸值，其余为已加权 bonus）。
@@ -1419,25 +1485,35 @@ class RecommendTool(Tool):
                 "subtype_pen": media_subtype_penalty(c),
                 "semantic": sem_scores.get(sid, 0.0),
                 "quality": _quality_popular(c["rating"]),
+                "policy_affinity": float(media_policy["affinity"]),
+                "policy_graph": float(media_policy["graph"]),
+                "policy_cf": float(media_policy["cf"]),
+                "policy_external": float(media_policy["external"]),
+                "policy_quality": float(media_policy["quality"]),
             }
 
         finish_phase("candidate_prepare_ms")
         def score(sid: int, c: dict) -> float:
             if args.niche:  # 挖冷门：协同偏热门，权重压低
-                return (0.5 * affinity(c) + 0.5 * graph_bonus(c)
-                        + 0.4 * cf_bonus(c) + external_bonus(c)
+                return (0.5 * media_policy["affinity"] * affinity(c)
+                        + 0.5 * media_policy["graph"] * graph_bonus(c)
+                        + 0.4 * media_policy["cf"] * cf_bonus(c)
+                        + media_policy["external"] * external_bonus(c)
                         + explicit_tag_adjust(c) + scenario_tag_adjust(c) + feedback_tag_adjust(c)
                         + memory_penalty(c) + temporary_penalty(c)
                         + feedback_avoidance_penalty(c) + profile_avoidance_penalty(c)
                         + aspect_bonus(c) + media_subtype_penalty(c) + semantic_bonus(c, sid)
-                        + 2.0 * _quality_niche(c["rating"]))
+                        + 2.0 * media_policy["quality"] * _quality_niche(c["rating"]))
             return (
-                affinity(c) + graph_bonus(c) + cf_bonus(c) + external_bonus(c)
+                media_policy["affinity"] * affinity(c)
+                + media_policy["graph"] * graph_bonus(c)
+                + media_policy["cf"] * cf_bonus(c)
+                + media_policy["external"] * external_bonus(c)
                 + explicit_tag_adjust(c) + scenario_tag_adjust(c) + feedback_tag_adjust(c)
                 + memory_penalty(c) + temporary_penalty(c)
                 + feedback_avoidance_penalty(c) + profile_avoidance_penalty(c)
                 + aspect_bonus(c) + media_subtype_penalty(c) + semantic_bonus(c, sid)
-                + self.w.quality_popular * _quality_popular(c["rating"])
+                + media_policy["quality"] * self.w.quality_popular * _quality_popular(c["rating"])
             )
 
         def cf_reason(c: dict) -> list[str]:
@@ -1460,7 +1536,7 @@ class RecommendTool(Tool):
         seen_ids: set[int] = set()
         # 系列入口替换后会重新计算分数，因此无论是否补评价证据，都保留一个
         # 稍大的候选池供最终重排，避免续作高分把实际不合适的入口硬塞进 top-N。
-        pool_limit = min(args.limit * 2, 20)
+        pool_limit = min(args.limit + int(media_policy["evidence_extra"]), 18)
         if args.export_features:
             pool_limit = 60  # LTR 训练：导出更大候选池以容纳 hold-out 正样本（训练专用路径）
         series_contexts: dict[int, dict[str, Any]] = {}
@@ -1678,6 +1754,7 @@ class RecommendTool(Tool):
 
         finish_phase("finalist_build_ms")
         evidence_candidate_count = len(out)
+        evidence_cache = {"hits": 0, "misses": 0, "writes": 0}
         if args.enrich_evidence:
             await emit_tool_progress(
                 tool=self.name,
@@ -1685,7 +1762,9 @@ class RecommendTool(Tool):
                 current=5,
                 total=6,
             )
-            await self._enrich_review_evidence(out, aspect_profile, args.subject_type)
+            evidence_cache = await self._enrich_review_evidence(
+                out, aspect_profile, args.subject_type,
+            )
         finish_phase("evidence_ms")
 
         # 评价补全会修改 score/aspect/evidence；必须在所有修改结束后再生成用户
@@ -1767,16 +1846,28 @@ class RecommendTool(Tool):
         if cold_start_questions:
             notes.append("收藏/评分样本偏少，当前结果同时给出冷启动澄清问题。")
         media_strategy = {
+            "version": _MEDIA_POLICY_VERSION,
             "subject_type": args.subject_type,
             "book_subtype": args.book_subtype,
             "music_subtype": args.music_subtype,
             "focus_tags": subtype_focus_tags,
-            "policy": (
-                "book 条目混含漫画/轻小说/小说，显式分型会进入召回与降权；不确定候选保留但标注。"
-                if args.subject_type == "book"
-                else "music 条目以 Bangumi 社区锚点为主，MusicBrainz 只补元数据，不参与口碑评分。"
-                if args.subject_type == "music"
-                else ""
+            "policy": media_policy["summary"],
+            "ranking_multipliers": {
+                key: value for key, value in media_policy.items()
+                if key not in {"summary", "evidence_extra"}
+            },
+        }
+        claims = [claim for item in out for claim in item.claims if claim.kind != "provenance"]
+        supported_claims = [claim for claim in claims if claim.support]
+        performance = {
+            "total_ms": round((time.monotonic() - run_started) * 1000),
+            "phases_ms": phase_timings,
+            "recalled_candidates": len(cand),
+            "evidence_candidates": evidence_candidate_count if args.enrich_evidence else 0,
+            "evidence_policy": "verified_finalist_pool" if args.enrich_evidence else "disabled",
+            "evidence_cache": evidence_cache,
+            "explanation_support_coverage": (
+                round(len(supported_claims) / len(claims), 4) if claims else 1.0
             ),
         }
         recommendation_set_id = ""
@@ -1791,16 +1882,11 @@ class RecommendTool(Tool):
                         **cf_status.model_dump(mode="json", exclude_none=True),
                         "semantic": semantic_model_status(),
                     },
+                    "_strategy_metadata": media_strategy,
+                    "_performance": performance,
                 },
                 [item.model_dump(mode="json", exclude_none=True) for item in out],
             )
-        performance = {
-            "total_ms": round((time.monotonic() - run_started) * 1000),
-            "phases_ms": phase_timings,
-            "recalled_candidates": len(cand),
-            "evidence_candidates": evidence_candidate_count if args.enrich_evidence else 0,
-            "evidence_policy": "full_finalist_pool" if args.enrich_evidence else "disabled",
-        }
         return ToolResult(
             ok=True,
             data=RecommendResult(
@@ -1849,7 +1935,24 @@ class RecommendTool(Tool):
         items: list[RecItem],
         aspect_profile: UserAspectProfile | None = None,
         subject_type: str = "anime",
-    ) -> None:
+    ) -> dict[str, int]:
+        cache_stats = {"hits": 0, "misses": 0, "writes": 0}
+        cached_pairs: list[tuple[RecItem, ToolResult]] = []
+        pending_items: list[RecItem] = []
+        for item in items:
+            key = f"review:v2:{subject_type}:{item.id}"
+            cached = self.artifact_cache.get(key) if self.artifact_cache is not None else None
+            if cached is not None:
+                try:
+                    cached_pairs.append((item, ToolResult(
+                        ok=True, data=ReviewFusionResult.model_validate(cached),
+                    )))
+                    cache_stats["hits"] += 1
+                    continue
+                except Exception:  # noqa: BLE001 - corrupt/old cache is a normal miss
+                    pass
+            pending_items.append(item)
+            cache_stats["misses"] += 1
         async def fetch_review(
             item: RecItem,
             subject_raw: dict | None = None,
@@ -1874,13 +1977,13 @@ class RecommendTool(Tool):
         # 旧实现让每个候选在等待外站时仍占着 Bangumi 槽，16 个候选会被迫分批串行。
         if isinstance(self.reviewer, ReviewSubjectTool):
             raws = await gather_limited(
-                [self.client.get_subject(item.id) for item in items],
+                [self.client.get_subject(item.id) for item in pending_items],
                 host="bangumi",
                 return_exceptions=True,
             )
             valid_pairs = [
                 (item, raw)
-                for item, raw in zip(items, raws, strict=False)
+                for item, raw in zip(pending_items, raws, strict=False)
                 if not isinstance(raw, BaseException)
             ]
             anilist_meta: list[tuple[int, str]] = []
@@ -1915,10 +2018,13 @@ class RecommendTool(Tool):
                 fetch_review(item, raw, precomputed.get(item.id))
                 for item, raw in valid_pairs
             ]
-            pairs = await asyncio.gather(*jobs, return_exceptions=True)
+            pairs = cached_pairs + list(await asyncio.gather(*jobs, return_exceptions=True))
         else:
             # 测试桩和第三方 reviewer 保持原兼容路径。
-            pairs = await gather_limited([fetch_review(item) for item in items], host="bangumi")
+            fetched = await gather_limited(
+                [fetch_review(item) for item in pending_items], host="bangumi",
+            )
+            pairs = cached_pairs + list(fetched)
         for pair in pairs:
             if isinstance(pair, Exception) or pair is None:
                 continue
@@ -1927,7 +2033,22 @@ class RecommendTool(Tool):
                 continue
             if not res.ok or not res.data:
                 continue
+            if self.artifact_cache is not None:
+                self.artifact_cache.set(
+                    f"review:v2:{subject_type}:{item.id}",
+                    res.data.model_dump(mode="json", exclude_none=True),
+                )
+                if not any(cached_item.id == item.id for cached_item, _res in cached_pairs):
+                    cache_stats["writes"] += 1
             item.review_consensus = res.data.consensus
+            item.review_sources = _unique([
+                *(rating.source for rating in res.data.ratings),
+                *(source for summary in res.data.aspect_summary for source in summary.sources),
+                *(
+                    source.source for source in res.data.source_matrix
+                    if source.status == "used"
+                ),
+            ])[:8]
             review_evidence = [
                 RecEvidence(
                     source=r.source,
@@ -1991,6 +2112,7 @@ class RecommendTool(Tool):
             for text in item.aspect_warnings[:3]:
                 if text not in item.reasons:
                     item.reasons.append(text)
+        return cache_stats
 
 
 def _review_bonus(evidence: list[RecEvidence]) -> float:
