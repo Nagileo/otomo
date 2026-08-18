@@ -418,7 +418,7 @@ function TracePanel({
           </div>
         )
       )}
-      {busy && <div className="trace-item processing">● 正在思考…（推荐类问题通常要十几秒）</div>}
+      {busy && <div className="trace-item processing">● 正在思考…（推荐会读取画像、筛候选并核对口碑，复杂条件可能需要几十秒）</div>}
     </div>
   );
 }

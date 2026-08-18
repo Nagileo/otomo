@@ -208,5 +208,79 @@ def test_step_tools_stores_last_recommend_state():
     assert state.short_term["last_recommend"]["items"][0]["id"] == 1
 
 
+def test_direct_recommendation_detection_keeps_compound_tasks_on_adaptive_path():
+    assert C.is_direct_recommendation_request("给我推荐几部治愈系动画")
+    assert C.is_direct_recommendation_request("今晚看什么？想轻松一点")
+    assert C.is_direct_recommendation_request("来点类似摇曳露营的作品")
+    assert not C.is_direct_recommendation_request("推荐几部动画，再告诉我分别在哪看")
+    assert not C.is_direct_recommendation_request("帮我分析一下推荐系统为什么这么慢")
+    assert not C.is_direct_recommendation_request("《摇曳露营》值得看吗")
+
+
+def test_terminal_recommendation_stops_redundant_tool_gate():
+    class Fn:
+        name = "recommend_subjects"
+        arguments = "{}"
+
+    class Call:
+        id = "rec-1"
+        function = Fn()
+
+    class Msg:
+        content = ""
+        tool_calls = [Call()]
+
+    class Choice:
+        message = Msg()
+
+    class Response:
+        choices = [Choice()]
+
+    class Completions:
+        calls = 0
+
+        async def create(self, **_kwargs):
+            self.calls += 1
+            if self.calls > 1:
+                raise AssertionError("完整推荐成功后不应再做一次无效工具决策")
+            return Response()
+
+    class Chat:
+        completions = Completions()
+
+    class LLM:
+        chat = Chat()
+
+    class Selector:
+        allowed_write_tools: set[str] = set()
+
+        def schemas(self):
+            return []
+
+        def note_meta_calls(self, _msg):
+            return []
+
+    registry = ToolRegistry()
+    registry.register(_RecommendStub())
+    state = AgentState()
+    C.begin_presentation_turn(state)
+
+    events = asyncio.run(_collect(C.run_tool_round(
+        LLM(),
+        "fake",
+        registry,
+        [],
+        Selector(),
+        3,
+        [],
+        set(),
+        state,
+        terminal_tools={"recommend_subjects"},
+    )))
+
+    assert any(event.type == "observation" for event in events)
+    assert LLM.chat.completions.calls == 1
+
+
 async def _collect(aiter):
     return [x async for x in aiter]

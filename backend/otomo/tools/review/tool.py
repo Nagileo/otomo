@@ -438,9 +438,15 @@ class ReviewSubjectTool(Tool):
         self.anilist = SearchAniListTool()
         self.musicbrainz = SearchMusicBrainzTool()
 
-    async def run(self, args: ReviewSubjectArgs) -> ToolResult[ReviewFusionResult]:
+    async def run(
+        self,
+        args: ReviewSubjectArgs,
+        *,
+        subject_raw: dict | None = None,
+        external_results: dict[str, ToolResult] | None = None,
+    ) -> ToolResult[ReviewFusionResult]:
         await emit_tool_progress(tool=self.name, summary="读取 Bangumi 条目详情", current=1, total=4)
-        raw = await self.client.get_subject(args.subject_id)
+        raw = subject_raw if subject_raw is not None else await self.client.get_subject(args.subject_id)
         detail = SubjectDetail.from_raw(raw)
         title = args.title_hint or detail.name_cn or detail.name
         subject_type = SUBJECT_TYPE_NAME.get(detail.type or 0, str(detail.type or "unknown"))
@@ -466,6 +472,8 @@ class ReviewSubjectTool(Tool):
 
         comments: list[CommentEvidence] = []
         async_jobs: list[tuple[str, str, object]] = []
+        prepared_results: list[tuple[str, ToolResult]] = []
+        external_results = external_results or {}
         if args.include_comments:
             await emit_tool_progress(tool=self.name, summary="处理短评与剧透边界", current=2, total=4)
             if args.spoiler_level == "none":
@@ -485,10 +493,16 @@ class ReviewSubjectTool(Tool):
 
         await emit_tool_progress(tool=self.name, summary="补充外部评价源", current=3, total=4)
         if detail.type == 2:  # anime
-            async_jobs.append(("anilist_anime", "anilist", self.anilist.run(AniListArgs(keyword=detail.name or title, type="anime", limit=3))))
+            if result := external_results.get("anilist_anime"):
+                prepared_results.append(("anilist_anime", result))
+            else:
+                async_jobs.append(("anilist_anime", "anilist", self.anilist.run(AniListArgs(keyword=detail.name or title, type="anime", limit=3))))
 
         if detail.type == 1:  # book / manga / novel
-            async_jobs.append(("anilist_manga", "anilist", self.anilist.run(AniListArgs(keyword=detail.name or title, type="manga", limit=3))))
+            if result := external_results.get("anilist_manga"):
+                prepared_results.append(("anilist_manga", result))
+            else:
+                async_jobs.append(("anilist_manga", "anilist", self.anilist.run(AniListArgs(keyword=detail.name or title, type="manga", limit=3))))
 
         if detail.type == 4:  # game / galgame
             async_jobs.append(("egs", "egs", self.egs.run(EGSArgs(keyword=title, limit=3))))
@@ -505,12 +519,13 @@ class ReviewSubjectTool(Tool):
             return label, result[0] if result else None
 
         if async_jobs:
-            results = await asyncio.gather(
+            fetched_results = await asyncio.gather(
                 *(run_limited(label, host, coro) for label, host, coro in async_jobs),
                 return_exceptions=True,
             )
         else:
-            results = []
+            fetched_results = []
+        results: list[object] = [*prepared_results, *fetched_results]
 
         for packed in results:
             if isinstance(packed, Exception):

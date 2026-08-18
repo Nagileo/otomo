@@ -76,24 +76,41 @@ class AdaptiveRunner(AgentRunner):
                 yield ev
 
             # ---- 路由：简单→SIMPLE / 复杂→计划 ---- #
-            runtime_prompt = C.runtime_state_prompt(state)
-            router_messages = [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "system", "content": ROUTER_PLAN_PROMPT},
-            ]
-            if runtime_prompt:
-                router_messages.append({"role": "system", "content": runtime_prompt})
-            router_messages.append({"role": "user", "content": user_input})
-            router = await self._chat(router_messages)
-            routed = C.strip_leak(router.choices[0].message.content or "")
+            direct_recommendation = C.is_direct_recommendation_request(user_input)
+            if direct_recommendation:
+                routed = "SIMPLE_RECOMMENDATION"
+            else:
+                runtime_prompt = C.runtime_state_prompt(state)
+                router_messages = [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "system", "content": ROUTER_PLAN_PROMPT},
+                ]
+                if runtime_prompt:
+                    router_messages.append({"role": "system", "content": runtime_prompt})
+                router_messages.append({"role": "user", "content": user_input})
+                router = await self._chat(router_messages)
+                routed = C.strip_leak(router.choices[0].message.content or "")
             up = routed.strip().upper()
             compose_prompt = COMPOSE_PROMPT
 
             if up.startswith("SIMPLE"):
                 # 简单任务：直接 ReAct，一轮执行即可
-                yield PlanEvent(summary="简单任务 → 直接执行（ReAct）")
+                yield PlanEvent(summary=(
+                    "推荐请求 → 直接执行完整个性化推荐器"
+                    if direct_recommendation else
+                    "简单任务 → 直接执行（ReAct）"
+                ))
                 async for ev in C.run_tool_round(
-                    self.llm, self.model, self.registry, state.messages, selector, self.max_iters, sources, seen_urls, state
+                    self.llm,
+                    self.model,
+                    self.registry,
+                    state.messages,
+                    selector,
+                    self.max_iters,
+                    sources,
+                    seen_urls,
+                    state,
+                    terminal_tools={"recommend_subjects"} if direct_recommendation else None,
                 ):
                     if isinstance(ev, ToolCallEvent):
                         steps += 1

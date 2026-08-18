@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from pathlib import Path
 from typing import Any, Literal
 
@@ -30,6 +31,7 @@ from ...security_context import can_access_private_user
 from ...profile import compute_taste_profile
 from .._concurrency import gather_limited
 from .._rag import semantic_model_status
+from ..anilist.tool import AniListArgs
 from ..bangumi.client import SUBJECT_TYPE, BangumiClient
 from ..curation import curated_recall_candidates
 from ..erogamescape.tool import EGSRankArgs, RankErogameScapeTool
@@ -552,6 +554,7 @@ class RecommendResult(BaseModel):
     recommendation_set_id: str = ""
     model_metadata: dict = Field(default_factory=dict)
     diversity: dict = Field(default_factory=dict)
+    performance: dict = Field(default_factory=dict)
 
 
 class RerankWeights(BaseModel):
@@ -606,14 +609,32 @@ class RecommendTool(Tool):
 
     async def _tag_recall(self, cand, stype, recall_tags, user_tags, maxw, mood, seen, niche):
         offset = _NICHE_OFFSET if niche else 0
-        for tag in recall_tags:
-            w = maxw if tag in mood else user_tags.get(tag, 1.0)
+        async def fetch_tag(tag: str):
             offsets = [0, 50, 100] if tag in mood else [offset]
+            batches: list[list[dict]] = []
             for off in offsets:
                 res = await self.client.search_subjects(
                     "", stype, sort="heat", limit=_RECALL_PER_TAG, tags=[tag], offset=off
                 )
                 batch = res.get("data", []) or []
+                batches.append(batch)
+                if len(batch) < _RECALL_PER_TAG:
+                    break
+            return tag, batches
+
+        # 标签彼此独立；每个标签内部仍按 offset 顺序翻页，因此候选集合和原逻辑一致，
+        # 只是避免 6~8 个标签逐个等待网络往返。
+        results = await gather_limited(
+            [fetch_tag(tag) for tag in recall_tags],
+            host="bangumi",
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+            tag, batches = result
+            w = maxw if tag in mood else user_tags.get(tag, 1.0)
+            for batch in batches:
                 for x in batch:
                     sid = x.get("id")
                     if not sid or sid in seen:
@@ -622,23 +643,37 @@ class RecommendTool(Tool):
                     c["tags"].update(_tag_names(x))
                     c["matched"].add(tag)
                     c["weight"] += w
-                if len(batch) < _RECALL_PER_TAG:
-                    break
 
     async def _graph_recall(self, cand, stype, fav_ids, seen):
-        for sid in fav_ids[:_GRAPH_FAV]:
-            persons = await self.client.get_subject_persons(sid)
-            picks = [p for p in (persons or []) if p.get("relation") in _GRAPH_ROLES and p.get("id")][:2]
-            for p in picks:
-                works = await self.client.get_person_subjects(p["id"])
-                works = [w for w in (works or []) if w.get("type") == stype and w.get("id")]
-                for w in works[:_GRAPH_WORKS]:  # 每制作组限量，防霸榜
-                    wid = w["id"]
-                    if wid in seen:
-                        continue
-                    c = cand.setdefault(wid, _blank(w))
-                    c["tags"].update(_tag_names(w))
-                    c["graph"].add(f"同{p.get('relation')}·{p.get('name')}")
+        seed_ids = fav_ids[:_GRAPH_FAV]
+        person_results = await gather_limited(
+            [self.client.get_subject_persons(sid) for sid in seed_ids],
+            host="bangumi",
+            return_exceptions=True,
+        )
+        picks: list[dict] = []
+        for persons in person_results:
+            if isinstance(persons, BaseException):
+                raise persons
+            seed_picks = [p for p in (persons or []) if p.get("relation") in _GRAPH_ROLES and p.get("id")][:2]
+            picks.extend(seed_picks)
+
+        work_results = await gather_limited(
+            [self.client.get_person_subjects(p["id"]) for p in picks],
+            host="bangumi",
+            return_exceptions=True,
+        )
+        for p, works in zip(picks, work_results, strict=False):
+            if isinstance(works, BaseException):
+                raise works
+            typed_works = [w for w in (works or []) if w.get("type") == stype and w.get("id")]
+            for work in typed_works[:_GRAPH_WORKS]:  # 每制作组限量，防霸榜
+                wid = work["id"]
+                if wid in seen:
+                    continue
+                c = cand.setdefault(wid, _blank(work))
+                c["tags"].update(_tag_names(work))
+                c["graph"].add(f"同{p.get('relation')}·{p.get('name')}")
 
     def _cf_recall(self, cand: dict, fav_ids: list[int], seen: set[int], i2i: dict) -> None:
         """协同召回：用户最爱作品的 i2i 邻居（看过 X 的人也看 Y）。补在线缺失的协同信号。
@@ -891,6 +926,16 @@ class RecommendTool(Tool):
         }
 
     async def run(self, args: RecommendArgs) -> ToolResult[RecommendResult]:
+        run_started = time.monotonic()
+        phase_started = run_started
+        phase_timings: dict[str, int] = {}
+
+        def finish_phase(name: str) -> None:
+            nonlocal phase_started
+            now = time.monotonic()
+            phase_timings[name] = round((now - phase_started) * 1000)
+            phase_started = now
+
         stype = SUBJECT_TYPE[args.subject_type]
         await emit_tool_progress(tool=self.name, summary="解析推荐目标与用户身份", current=1, total=6)
         if args.username:
@@ -974,14 +1019,19 @@ class RecommendTool(Tool):
             feedback_summary["excluded_ids"] = sorted(feedback_excluded_ids)[:12]
             async def feedback_tags(feedback_items):
                 tags: list[str] = []
-                for f in feedback_items[:12]:
-                    # 只有用户明确选择“题材”时才把一次卡片反馈泛化到标签。
-                    # item/画风/节奏/篇幅反馈都只保留为精确条目或对应维度信号。
-                    if not f.subject_id or f.scope != "genre":
-                        continue
-                    try:
-                        raw = await self.client.get_subject(int(f.subject_id))
-                    except Exception:  # noqa: BLE001
+                # 只有用户明确选择“题材”时才把一次卡片反馈泛化到标签。
+                # item/画风/节奏/篇幅反馈都只保留为精确条目或对应维度信号。
+                selected = [
+                    f for f in feedback_items[:12]
+                    if f.subject_id and f.scope == "genre"
+                ]
+                raws = await gather_limited(
+                    [self.client.get_subject(int(f.subject_id)) for f in selected],
+                    host="bangumi",
+                    return_exceptions=True,
+                )
+                for raw in raws:
+                    if isinstance(raw, BaseException):
                         continue
                     tags.extend(t.get("name", "") for t in (raw.get("tags") or []) if isinstance(t, dict) and t.get("name"))
                 return _unique(tags)[:10]
@@ -1018,6 +1068,7 @@ class RecommendTool(Tool):
             recall_tags = list(dict.fromkeys(recall_tags + _COLD_START_TAGS.get(args.subject_type, [])))[:_MAX_RECALL_TAGS]
 
         cand: dict[int, dict] = {}
+        finish_phase("profile_ms")
         await emit_tool_progress(
             tool=self.name,
             summary="多路召回候选",
@@ -1134,6 +1185,7 @@ class RecommendTool(Tool):
             await self._cross_media_recall(cand, stype, source_items, seen)
         elif effective_cross_media:
             scenario_notes.append("匿名模式无法读取跨媒体收藏；本轮仅使用显式标签和公开内容召回。")
+        finish_phase("recall_ms")
         await emit_tool_progress(
             tool=self.name,
             summary=f"召回完成：{len(cand)} 个候选，开始补评分与封面",
@@ -1361,6 +1413,7 @@ class RecommendTool(Tool):
                 "quality": _quality_popular(c["rating"]),
             }
 
+        finish_phase("candidate_prepare_ms")
         def score(sid: int, c: dict) -> float:
             if args.niche:  # 挖冷门：协同偏热门，权重压低
                 return (0.5 * affinity(c) + 0.5 * graph_bonus(c)
@@ -1423,6 +1476,7 @@ class RecommendTool(Tool):
                 for (sid, _c), res in zip(series_targets, series_results, strict=False):
                     if not isinstance(res, Exception):
                         series_contexts[sid] = res
+        finish_phase("series_check_ms")
 
         def recall_signals(c: dict) -> list[str]:
             signals: list[str] = []
@@ -1612,6 +1666,8 @@ class RecommendTool(Tool):
             if len(out) >= pool_limit:
                 break
 
+        finish_phase("finalist_build_ms")
+        evidence_candidate_count = len(out)
         if args.enrich_evidence:
             await emit_tool_progress(
                 tool=self.name,
@@ -1620,6 +1676,7 @@ class RecommendTool(Tool):
                 total=6,
             )
             await self._enrich_review_evidence(out, aspect_profile, args.subject_type)
+        finish_phase("evidence_ms")
 
         # 评价补全会修改 score/aspect/evidence；必须在所有修改结束后再生成用户
         # 可见解释。随后按“最终条目”的最终分数和标签统一重排。
@@ -1643,8 +1700,15 @@ class RecommendTool(Tool):
             pool_size=len(out),
         )
         out = [payload["item"] for _sid, payload in reranked_items[: args.limit]]
+        finish_phase("final_rerank_ms")
 
-        await emit_tool_progress(tool=self.name, summary=f"推荐完成：输出 {len(out)} 个候选", current=6, total=6)
+        elapsed_ms = round((time.monotonic() - run_started) * 1000)
+        await emit_tool_progress(
+            tool=self.name,
+            summary=f"推荐完成：输出 {len(out)} 个候选，用时 {elapsed_ms / 1000:.1f} 秒",
+            current=6,
+            total=6,
+        )
 
         mode = "niche" if args.niche else ("explore" if args.explore else "normal")
         notes: list[str] = []
@@ -1720,6 +1784,13 @@ class RecommendTool(Tool):
                 },
                 [item.model_dump(mode="json", exclude_none=True) for item in out],
             )
+        performance = {
+            "total_ms": round((time.monotonic() - run_started) * 1000),
+            "phases_ms": phase_timings,
+            "recalled_candidates": len(cand),
+            "evidence_candidates": evidence_candidate_count if args.enrich_evidence else 0,
+            "evidence_policy": "full_finalist_pool" if args.enrich_evidence else "disabled",
+        }
         return ToolResult(
             ok=True,
             data=RecommendResult(
@@ -1755,6 +1826,7 @@ class RecommendTool(Tool):
                     "intra_list_diversity": _intra_list_diversity(out),
                     "series_policy": effective_series_policy,
                 },
+                performance=performance,
             ),
             sources=[
                 Citation(title=it.name, url=f"https://bgm.tv/subject/{it.id}", source="bangumi", image=it.image)
@@ -1768,7 +1840,11 @@ class RecommendTool(Tool):
         aspect_profile: UserAspectProfile | None = None,
         subject_type: str = "anime",
     ) -> None:
-        async def fetch_review(item: RecItem):
+        async def fetch_review(
+            item: RecItem,
+            subject_raw: dict | None = None,
+            external_results: dict[str, ToolResult] | None = None,
+        ):
             try:
                 res = await self.reviewer.run(
                     ReviewSubjectArgs(
@@ -1776,13 +1852,53 @@ class RecommendTool(Tool):
                         title_hint=item.name,
                         include_comments=False,
                         spoiler_level="none",
-                    )
+                    ),
+                    **({"subject_raw": subject_raw} if subject_raw is not None else {}),
+                    **({"external_results": external_results} if external_results else {}),
                 )
             except Exception:  # noqa: BLE001
                 return item, None
             return item, res
 
-        pairs = await gather_limited([fetch_review(item) for item in items], host="bangumi")
+        # 先仅在 Bangumi 槽内批量取详情，再释放这些槽去等待 AniList / EGS / VNDB。
+        # 旧实现让每个候选在等待外站时仍占着 Bangumi 槽，16 个候选会被迫分批串行。
+        if isinstance(self.reviewer, ReviewSubjectTool):
+            raws = await gather_limited(
+                [self.client.get_subject(item.id) for item in items],
+                host="bangumi",
+                return_exceptions=True,
+            )
+            valid_pairs = [
+                (item, raw)
+                for item, raw in zip(items, raws, strict=False)
+                if not isinstance(raw, BaseException)
+            ]
+            anilist_meta: list[tuple[int, str]] = []
+            anilist_args: list[AniListArgs] = []
+            for item, raw in valid_pairs:
+                raw_type = int(raw.get("type") or 0)
+                if raw_type not in {1, 2}:
+                    continue
+                label = "anilist_anime" if raw_type == 2 else "anilist_manga"
+                anilist_meta.append((item.id, label))
+                anilist_args.append(AniListArgs(
+                    keyword=str(raw.get("name") or item.name),
+                    type="anime" if raw_type == 2 else "manga",
+                    limit=3,
+                ))
+            precomputed: dict[int, dict[str, ToolResult]] = {}
+            if anilist_args:
+                anilist_results = await self.reviewer.anilist.run_many(anilist_args)
+                for (item_id, label), result in zip(anilist_meta, anilist_results, strict=False):
+                    precomputed.setdefault(item_id, {})[label] = result
+            jobs = [
+                fetch_review(item, raw, precomputed.get(item.id))
+                for item, raw in valid_pairs
+            ]
+            pairs = await asyncio.gather(*jobs, return_exceptions=True)
+        else:
+            # 测试桩和第三方 reviewer 保持原兼容路径。
+            pairs = await gather_limited([fetch_review(item) for item in items], host="bangumi")
         for pair in pairs:
             if isinstance(pair, Exception) or pair is None:
                 continue

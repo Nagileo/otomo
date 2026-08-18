@@ -38,7 +38,9 @@ export default function DiscoverPage() {
   const [niche, setNiche] = useState(false);
   const [explore, setExplore] = useState(false);
   const [recommendation, setRecommendation] = useState<any>(null);
-  const [busy, setBusy] = useState<"season" | "recommend" | "">("");
+  const [seasonBusy, setSeasonBusy] = useState(false);
+  const [recommendBusy, setRecommendBusy] = useState(false);
+  const [recommendElapsed, setRecommendElapsed] = useState(0);
   const [error, setError] = useState("");
   const [share, setShare] = useState("");
 
@@ -56,17 +58,27 @@ export default function DiscoverPage() {
     void loadSeason(initial.year, initial.month as 1 | 4 | 7 | 10, "hot");
   }, []);
 
+  useEffect(() => {
+    if (!recommendBusy) return;
+    const started = Date.now();
+    setRecommendElapsed(0);
+    const timer = window.setInterval(() => {
+      setRecommendElapsed(Math.floor((Date.now() - started) / 1000));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [recommendBusy]);
+
   async function loadSeason(y = year, m = month, mode = seasonMode) {
-    setBusy("season"); setError("");
+    setSeasonBusy(true); setError("");
     try {
       const payload = await productFetch(`/product/season-guide?year=${y}&month=${m}&mode=${mode}&limit=12`);
       setSeason(payload.data);
     } catch (e) { setError(String(e)); }
-    finally { setBusy(""); }
+    finally { setSeasonBusy(false); }
   }
 
   async function recommend() {
-    setBusy("recommend"); setError("");
+    setRecommendBusy(true); setError("");
     try {
       const payload = await productFetch("/product/recommendations", {
         method: "POST",
@@ -82,7 +94,7 @@ export default function DiscoverPage() {
       });
       setRecommendation(payload.data);
     } catch (e) { setError(String(e)); }
-    finally { setBusy(""); }
+    finally { setRecommendBusy(false); }
   }
 
   async function feedback(payload: Record<string, any>) {
@@ -144,10 +156,16 @@ export default function DiscoverPage() {
             <label><span>最多多少集</span><select value={maxEpisodes} onChange={(e) => setMaxEpisodes(Number(e.target.value))}><option value={0}>不限篇幅</option><option value={6}>6 集以内</option><option value={12}>12 集以内</option><option value={24}>24 集以内</option></select></label>
             <label className="toggle-line"><input type="checkbox" checked={niche} onChange={(e) => setNiche(e.target.checked)} /><span>冷门挖宝</span></label>
             <label className="toggle-line"><input type="checkbox" checked={explore} onChange={(e) => setExplore(e.target.checked)} /><span>拓展口味</span></label>
-            <button className="button-primary icon-label" onClick={() => void recommend()} disabled={busy === "recommend"}><Sparkles size={17} />{busy === "recommend" ? "正在挑选" : "生成推荐"}</button>
+            <button className="button-primary icon-label" onClick={() => void recommend()} disabled={recommendBusy}><Sparkles size={17} />{recommendBusy ? `精筛中 ${recommendElapsed}s` : "生成推荐"}</button>
           </div>
           {!authenticated ? <div className="inline-notice">未连接 Bangumi 时会按你这轮填写的偏好做匿名推荐；<a href={`${BACKEND}/auth/bangumi/start`}>连接 Bangumi</a> 后还会结合收藏和评分。</div> : null}
         </div>
+        {recommendBusy ? (
+          <div className="surface-loading recommend-loading" role="status">
+            <strong>正在认真筛选候选 · {recommendElapsed} 秒</strong>
+            <span>会读取画像与反馈、合并多路候选、排除错误系列入口，再核验最终候选的口碑；不会为了赶时间跳过核心判断。</span>
+          </div>
+        ) : null}
         {recommendation ? <RecommendPanel data={recommendation} onFeedback={feedback} onNextBatch={nextBatch} /> : (
           <div className="feature-empty"><Compass size={24} /><strong>告诉我现在想看什么</strong><span>会先给 3 部重点候选，并分别解释适合点、风险和口碑依据。</span></div>
         )}
@@ -162,10 +180,10 @@ export default function DiscoverPage() {
               <option value={1}>1 月番</option><option value={4}>4 月番</option><option value={7}>7 月番</option><option value={10}>10 月番</option>
             </select>
             <div className="segmented"><button className={seasonMode === "hot" ? "active" : ""} onClick={() => setSeasonMode("hot")}>当前热播</button><button className={seasonMode === "guide" ? "active" : ""} onClick={() => setSeasonMode("guide")}>按我口味</button></div>
-            <button className="button-secondary icon-label" disabled={busy === "season"} onClick={() => void loadSeason()}><RefreshCw size={16} />更新</button>
+            <button className="button-secondary icon-label" disabled={seasonBusy} onClick={() => void loadSeason()}><RefreshCw size={16} />更新</button>
           </div>
         </div>
-        {busy === "season" && !season ? <div className="surface-loading">正在整理本季条目、口碑与播出资料…</div> : null}
+        {seasonBusy && !season ? <div className="surface-loading">正在整理本季条目、口碑与播出资料…</div> : null}
         {season ? <SeasonGuidePanel data={season} onShareSnapshot={authenticated ? (request) => void shareSnapshot(request) : undefined} /> : null}
       </section>
     </main>

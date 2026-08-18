@@ -95,11 +95,10 @@ export function RecommendPanel({
   const scenarioText = SCENARIO_LABEL[String(current.scenario || "general")] || "按你的口味";
   const fb = current.feedback_policy;
   const model = current.model_metadata || {};
-  const personalizationLabel = current.subject_type === "anime"
-    ? model.available && !model.stale
-      ? "正式个性化"
-      : model.available ? "个性化模型待更新" : "画像推荐"
-    : "实验探索";
+  const performance = current.performance || {};
+  const personalizationLabel = model.available && !model.stale
+    ? "正式个性化"
+    : model.available ? "个性化模型待更新" : "画像推荐";
 
   useEffect(() => {
     const root = gridRef.current;
@@ -186,8 +185,14 @@ export function RecommendPanel({
       subtitle={`${scenarioText} · 共 ${items.length} 部，先看最值得考虑的 3 部`}
     >
       <div className="recommend-status-row">
-        <Badge tone={current.subject_type === "anime" && model.available && !model.stale ? "good" : "dim"}>{personalizationLabel}</Badge>
+        <Badge tone={model.available && !model.stale ? "good" : "dim"}>{personalizationLabel}</Badge>
         {model.stale ? <span>协同数据较旧，已自动降权；画像和本轮偏好仍正常参与。</span> : null}
+        {Number(performance.total_ms) > 0 ? (
+          <span>
+            本轮精筛 {(Number(performance.total_ms) / 1000).toFixed(1)} 秒
+            {performance.evidence_policy === "full_finalist_pool" ? " · 已核验最终候选池" : ""}
+          </span>
+        ) : null}
       </div>
       {lastAction ? (
         <div className="rec-feedback-notice" role="status">

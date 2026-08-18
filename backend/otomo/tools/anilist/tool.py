@@ -6,6 +6,7 @@ GraphQL API（graphql.anilist.co），无 token，评分满分 100。
 """
 from __future__ import annotations
 
+import asyncio
 from typing import Literal
 
 import httpx
@@ -15,10 +16,12 @@ from ...agent.contracts import Citation, Tool, ToolResult
 from ...config import settings
 
 _ANILIST_API = "https://graphql.anilist.co"
+_MEDIA_FIELDS = "id title{romaji native english} averageScore seasonYear format episodes"
 _QUERY = (
     "query($s:String,$t:MediaType){Page(perPage:%d){media(search:$s,type:$t)"
-    "{id title{romaji native english} averageScore seasonYear format episodes}}}"
+    "{" + _MEDIA_FIELDS + "}}}"
 )
+_BATCH_SIZE = 8
 
 
 class AniListArgs(BaseModel):
@@ -57,20 +60,8 @@ class SearchAniListTool(Tool):
     args_model = AniListArgs
     result_model = AniListResult
 
-    async def run(self, args: AniListArgs) -> ToolResult[AniListResult]:
-        mtype = "ANIME" if args.type == "anime" else "MANGA"
-        try:
-            async with httpx.AsyncClient(timeout=settings.http_timeout) as c:
-                r = await c.post(
-                    _ANILIST_API,
-                    json={"query": _QUERY % args.limit, "variables": {"s": args.keyword, "t": mtype}},
-                )
-                r.raise_for_status()
-                data = r.json()
-        except (httpx.HTTPError, httpx.TransportError) as e:
-            return ToolResult(ok=False, error=f"AniList 查询失败：{type(e).__name__}")
-
-        media = ((data.get("data") or {}).get("Page") or {}).get("media") or []
+    @staticmethod
+    def _result(args: AniListArgs, media: list[dict]) -> ToolResult[AniListResult]:
         items = [
             AniListMedia(
                 id=m["id"],
@@ -89,10 +80,78 @@ class SearchAniListTool(Tool):
             ok=True,
             data=AniListResult(query=args.keyword, count=len(items), results=items),
             sources=[
-                Citation(title=f"AniList — {i.title_romaji}", url=f"https://anilist.co/{args.type}/{i.id}", source="anilist")
-                for i in items[:5]
+                Citation(title=f"AniList — {item.title_romaji}", url=f"https://anilist.co/{args.type}/{item.id}", source="anilist")
+                for item in items[:5]
             ],
         )
+
+    async def run_many(self, requests: list[AniListArgs]) -> list[ToolResult[AniListResult]]:
+        """Resolve independent title searches with GraphQL aliases.
+
+        Recommendation verification commonly checks 16 finalists. Sending one
+        HTTP request per title adds no evidence quality; aliases preserve every
+        individual search while reducing connection and rate-limit overhead.
+        """
+        if not requests:
+            return []
+        output: list[ToolResult[AniListResult] | None] = [None] * len(requests)
+
+        async def fetch_chunk(client: httpx.AsyncClient, indexed: list[tuple[int, AniListArgs]]) -> None:
+            definitions = ",".join(f"$s{idx}:String" for idx, _args in indexed)
+            selections = []
+            variables: dict[str, str] = {}
+            for idx, args in indexed:
+                mtype = "ANIME" if args.type == "anime" else "MANGA"
+                selections.append(
+                    f"q{idx}:Page(perPage:{args.limit})"
+                    f"{{media(search:$s{idx},type:{mtype}){{{_MEDIA_FIELDS}}}}}"
+                )
+                variables[f"s{idx}"] = args.keyword
+            query = f"query({definitions}){{{''.join(selections)}}}"
+            try:
+                response = await client.post(_ANILIST_API, json={"query": query, "variables": variables})
+                response.raise_for_status()
+                data = (response.json().get("data") or {})
+            except (httpx.HTTPError, httpx.TransportError) as exc:
+                for idx, _args in indexed:
+                    output[idx] = ToolResult(ok=False, error=f"AniList 查询失败：{type(exc).__name__}")
+                return
+            for idx, args in indexed:
+                media = ((data.get(f"q{idx}") or {}).get("media") or [])
+                output[idx] = self._result(args, media)
+
+        try:
+            async with httpx.AsyncClient(timeout=settings.http_timeout) as c:
+                chunks = [
+                    list(enumerate(requests))[start:start + _BATCH_SIZE]
+                    for start in range(0, len(requests), _BATCH_SIZE)
+                ]
+                await asyncio.gather(
+                    *(fetch_chunk(c, chunk) for chunk in chunks),
+                )
+        except (httpx.HTTPError, httpx.TransportError) as exc:
+            return [ToolResult(ok=False, error=f"AniList 查询失败：{type(exc).__name__}") for _args in requests]
+
+        return [
+            result if result is not None else ToolResult(ok=False, error="AniList 批量查询未返回结果")
+            for result in output
+        ]
+
+    async def run(self, args: AniListArgs) -> ToolResult[AniListResult]:
+        # 单标题入口保留原 GraphQL 变量查询；推荐批量核验走 run_many。
+        mtype = "ANIME" if args.type == "anime" else "MANGA"
+        try:
+            async with httpx.AsyncClient(timeout=settings.http_timeout) as c:
+                response = await c.post(
+                    _ANILIST_API,
+                    json={"query": _QUERY % args.limit, "variables": {"s": args.keyword, "t": mtype}},
+                )
+                response.raise_for_status()
+                data = response.json()
+        except (httpx.HTTPError, httpx.TransportError) as exc:
+            return ToolResult(ok=False, error=f"AniList 查询失败：{type(exc).__name__}")
+        media = ((data.get("data") or {}).get("Page") or {}).get("media") or []
+        return self._result(args, media)
 
 
 def build_anilist_tools() -> list[Tool]:

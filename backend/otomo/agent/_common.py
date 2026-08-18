@@ -34,12 +34,40 @@ CORRECT_FC = (
     "请使用函数调用（tool calls）来调用工具，不要在回复正文里输出 invoke / DSML / tool_calls 等标记。"
     "若信息已足够，请直接给出最终自然语言答案。"
 )
+_DIRECT_RECOMMEND_PATTERNS = (
+    r"(?:给我|帮我|请|想要|来)?推荐(?:几|一|点|些|个|部|本|款|首)",
+    r"(?:今天|今晚|现在|接下来|最近).{0,5}(?:看|玩|听|读)什么",
+    r"(?:我|咱们)?(?:该|要|能)(?:看|玩|听|读)什么",
+    r"有(?:啥|什么).{0,4}(?:好看|好玩|好听|值得看)",
+    r"类似.{1,30}的(?:动画|番|漫画|小说|书|游戏|音乐|作品)",
+    r"换一批|更冷门一点|换个方向",
+)
+_RECOMMEND_SECONDARY_INTENTS = (
+    "在哪看", "哪里看", "观看入口", "下载", "资源", "磁力", "rss", "正版入口",
+    "在哪买", "购买链接", "比较一下", "对比一下", "观看顺序", "补番顺序",
+    "什么时候更新", "哪一集", "识图", "截图出处", "视频链接", "声优是谁",
+    "监督是谁", "制作公司是谁",
+)
 _RUNTIME_STATE_MARKER = "[[OTOMO_RUNTIME_STATE]]"
 _PRESENTATION_STATE_KEY = "presentation"
 _TOOL_PROGRESS_QUEUE: contextvars.ContextVar[asyncio.Queue[ProgressEvent] | None] = contextvars.ContextVar(
     "otomo_tool_progress_queue",
     default=None,
 )
+
+
+def is_direct_recommendation_request(user_input: str) -> bool:
+    """Return true only when the full task is already covered by RecommendTool.
+
+    The dedicated recommender performs recall, constraints, series checks and
+    review verification itself. Pure recommendation requests do not benefit
+    from an extra LLM routing and reflection round. Compound requests keep the
+    normal adaptive path so tasks such as “推荐并告诉我在哪看” are not truncated.
+    """
+    text = re.sub(r"\s+", "", user_input or "").lower()
+    if not text or "推荐系统" in text or any(intent in text for intent in _RECOMMEND_SECONDARY_INTENTS):
+        return False
+    return any(re.search(pattern, text) for pattern in _DIRECT_RECOMMEND_PATTERNS)
 
 
 async def emit_tool_progress(
@@ -1796,6 +1824,7 @@ async def run_tool_round(
     sources: list[Citation],
     seen_urls: set[str],
     state: Any | None = None,
+    terminal_tools: set[str] | None = None,
 ) -> AsyncIterator[Any]:
     """一轮"执行"：反复让模型调工具直到它不再调（含 DSML 文本误写的纠正）。
     ReAct / Plan-Execute / Adaptive 三个 runner 共用。side effect 落到 messages/sources。
@@ -1818,6 +1847,11 @@ async def run_tool_round(
             registry, msg, messages, sources, seen_urls, state, selector.allowed_write_tools
         ):
             yield ev
+        called = {tc.function.name for tc in (msg.tool_calls or [])}
+        if terminal_tools and called & terminal_tools and any(
+            panel.get("name") in terminal_tools for panel in presentation_panels(state)
+        ):
+            return
 
 
 async def stream_answer(

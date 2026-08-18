@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from otomo.agent.contracts import ToolResult
@@ -172,3 +174,72 @@ def test_personalization_seeds_exclude_low_ratings_and_non_consumption():
     seeds = _positive_consumption_items(items)
 
     assert [item["subject"]["id"] for item in seeds] == [1, 2]
+
+
+class ConcurrentRecallClient:
+    def __init__(self) -> None:
+        self.active = 0
+        self.max_active = 0
+
+    async def _network_turn(self) -> None:
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        try:
+            await asyncio.sleep(0.01)
+        finally:
+            self.active -= 1
+
+    async def search_subjects(self, _query, stype, **kwargs):
+        await self._network_turn()
+        tag = kwargs["tags"][0]
+        sid = {"日常": 101, "治愈": 102}[tag]
+        return {"data": [{
+            "id": sid,
+            "name_cn": f"{tag}候选",
+            "type": stype,
+            "tags": [{"name": tag}],
+            "rating": {"score": 8.0},
+        }]}
+
+    async def get_subject_persons(self, subject_id):
+        await self._network_turn()
+        return [{"id": subject_id * 10, "name": f"监督{subject_id}", "relation": "监督"}]
+
+    async def get_person_subjects(self, person_id):
+        await self._network_turn()
+        return [{
+            "id": person_id + 1000,
+            "name_cn": f"图谱候选{person_id}",
+            "type": 2,
+            "tags": [{"name": "动画"}],
+        }]
+
+
+@pytest.mark.asyncio
+async def test_tag_and_graph_recall_parallelize_without_losing_signals():
+    client = ConcurrentRecallClient()
+    tool = RecommendTool(client)
+    candidates: dict[int, dict] = {}
+
+    await tool._tag_recall(
+        candidates,
+        2,
+        ["日常", "治愈"],
+        {"日常": 1.0, "治愈": 0.8},
+        1.0,
+        [],
+        set(),
+        False,
+    )
+
+    assert client.max_active >= 2
+    assert candidates[101]["matched"] == {"日常"}
+    assert candidates[102]["matched"] == {"治愈"}
+
+    client.max_active = 0
+    await tool._graph_recall(candidates, 2, [1, 2, 3], set())
+
+    assert client.max_active >= 2
+    assert candidates[1010]["graph"] == {"同监督·监督1"}
+    assert candidates[1020]["graph"] == {"同监督·监督2"}
+    assert candidates[1030]["graph"] == {"同监督·监督3"}
