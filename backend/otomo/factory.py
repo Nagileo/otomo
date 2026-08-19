@@ -116,7 +116,7 @@ def build_registry(
         registry.register(tool)
     for tool in build_review_tools(client):
         registry.register(tool)
-    for tool in build_season_tools(client):
+    for tool in build_season_tools(client, shared_ltm):
         registry.register(tool)
     for tool in build_source_router_tools(client):
         registry.register(tool)

@@ -205,6 +205,32 @@ def _season_embeds(discord, data: dict) -> list:
         first_cover = first_cover or _cover(it)
     if first_cover:
         e.set_thumbnail(url=first_cover)
+    guide_lines = []
+    for source in (data.get("guide_videos") or [])[:3]:
+        for hit in (source.get("verified_hits") or [])[:1]:
+            url = str(hit.get("url") or "")
+            title = str(hit.get("title") or source.get("up_name") or "已核验导视")
+            author = str(hit.get("author") or source.get("up_name") or "")
+            verified = "正文已核验" if hit.get("content_verified") else "标题与季度已核验"
+            guide_lines.append(
+                f"[{title[:70]}]({url}) · {author} · {verified}"
+                if url.startswith("http") else f"{title[:70]} · {author} · {verified}"
+            )
+    if guide_lines:
+        e.add_field(name="已发布的本季导视", value="\n".join(guide_lines)[:1024], inline=False)
+    else:
+        e.add_field(
+            name="B站导视状态",
+            value="尚未发现已发布且通过核验的本季导视；不会用 UP 主页或搜索入口冒充具体视频。",
+            inline=False,
+        )
+    pending_count = len(data.get("pending_guide_sources") or [])
+    mode_labels = {"preseason": "播前导视", "hot": "当前热播", "guide": "按口味", "auto": "自动"}
+    mode = mode_labels.get(str(data.get("mode") or ""), str(data.get("mode") or "导视"))
+    footer = f"{mode} · 白名单只表示关注来源，不表示该 UP 已发布"
+    if pending_count:
+        footer += f" · {pending_count} 个来源仍待核验"
+    e.set_footer(text=footer[:2048])
     return [e]
 
 
@@ -1639,7 +1665,7 @@ def run() -> None:
         await _slash_answer(interaction, f"《{作品}》在哪能看?给正版渠道")
 
     @tree.command(name="新番", description="查看指定季度的新番导视")
-    @app_commands.describe(年份="四位年份", 月份="季度首月：1/4/7/10", 模式="按口味导视或当前热播")
+    @app_commands.describe(年份="四位年份", 月份="季度首月：1/4/7/10", 模式="自动、播前、按口味或热播")
     @app_commands.choices(
         月份=[
             app_commands.Choice(name="1 月番", value=1),
@@ -1648,6 +1674,8 @@ def run() -> None:
             app_commands.Choice(name="10 月番", value=10),
         ],
         模式=[
+            app_commands.Choice(name="自动判断", value="auto"),
+            app_commands.Choice(name="播前导视", value="preseason"),
             app_commands.Choice(name="按我口味", value="guide"),
             app_commands.Choice(name="当前热播", value="hot"),
         ]
@@ -1658,8 +1686,17 @@ def run() -> None:
         月份: app_commands.Choice[int],
         模式: app_commands.Choice[str],
     ) -> None:
-        intent = "按我的口味推荐" if 模式.value == "guide" else "按当前热度和口碑分诊"
-        await _slash_answer(interaction, f"给我 {int(年份)} 年 {月份.value} 月新番导视，{intent}，附合适的B站导视入口")
+        intents = {
+            "auto": "使用 auto 模式按季度阶段自动判断",
+            "preseason": "使用 preseason 播前模式，不引用未开播热度",
+            "guide": "使用 guide 模式按我的口味推荐",
+            "hot": "使用 hot 模式按当前热度和口碑分诊",
+        }
+        await _slash_answer(
+            interaction,
+            f"给我 {int(年份)} 年 {月份.value} 月新番导视，{intents[模式.value]}。"
+            "只附已经发布并通过核验的B站具体视频，待发布来源只说明状态。",
+        )
 
     @tree.command(name="日历", description="查看今天或本周的放送与个人追番进度")
     @app_commands.describe(范围="今天或本周")

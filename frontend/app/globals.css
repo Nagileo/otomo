@@ -208,6 +208,15 @@ button, a { -webkit-tap-highlight-color: transparent; }
 .auth-gate-copy > .button-primary { gap: 8px; margin-top: 20px; }.auth-gate-copy > small { display: block; margin-top: 9px; color: var(--faint); font-size: 10px; }
 .auth-gate-features { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 16px; }.auth-gate-features span { padding: 6px 9px; color: var(--text-soft); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; font-size: 11px; }
 .workspace-section { margin-top: 28px; padding-top: 24px; border-top: 1px solid var(--line); }
+.season-source-settings { margin-top: 10px; padding: 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-soft); }
+.season-source-settings > summary { cursor: pointer; color: var(--text-soft); font-size: 12px; font-weight: 700; }
+.season-source-settings-body { display: grid; gap: 10px; padding-top: 10px; }
+.season-source-settings-body > p { margin: 0; color: var(--dim); font-size: 11px; line-height: 1.5; }
+.season-source-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 6px; }
+.season-source-options button { display: grid; gap: 3px; padding: 8px; text-align: left; border: 1px solid var(--line); border-radius: 8px; color: var(--dim); background: var(--surface); }
+.season-source-options button.active { border-color: color-mix(in srgb, var(--green) 45%, var(--line)); color: var(--text); background: color-mix(in srgb, var(--green) 5%, var(--surface)); }
+.season-source-options button span { font-size: 11px; font-weight: 700; }.season-source-options button small { font-size: 9px; }
+.season-primary-source { display: flex; align-items: center; gap: 8px; color: var(--dim); font-size: 11px; }.season-primary-source select { min-height: 32px; }
 .workspace-section > .evidence-panel, .library-page > .evidence-panel, .subject-page > .evidence-panel {
   padding: 0; background: transparent; border: 0;
 }
@@ -1340,6 +1349,8 @@ a.card-title:hover { color: var(--accent); }
   .me-entry-grid { grid-template-columns: 1fr; }
   .subscription-presets { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+.pending-guide-sources { margin-top: 10px; padding: 8px 10px; border: 1px dashed var(--line); border-radius: 8px; color: var(--dim); font-size: 10px; }
+.pending-guide-sources > summary { cursor: pointer; }.pending-guide-sources .compact-list { margin-top: 7px; }
 
 /* ---- panels/visual.tsx · Pixiv ---- */
 .pixiv-grid {

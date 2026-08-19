@@ -885,6 +885,10 @@ export function SeasonGuidePanel({
               {hit.play ? ` · 播放 ${hit.play}` : ""}
               {hit.danmaku ? ` · 弹幕 ${hit.danmaku}` : ""}
             </div>
+            <div className="evidence-row tight">
+              <Badge tone={hit.content_verified ? "good" : "dim"}>{hit.content_verified ? `${hit.transcript_source === "asr" ? "ASR" : "字幕"}正文已核验` : "仅元数据核验"}</Badge>
+              {hit.content_verified && hit.content_mentions ? <Badge tone="dim">正文命中 {hit.content_mentions} 处</Badge> : null}
+            </div>
           </>
         ) : (
           <div className="card-meta">{text(video.verification_note || video.match_reason)}</div>
@@ -911,7 +915,7 @@ export function SeasonGuidePanel({
         />
       </div>}
       <div className="evidence-row">
-        <Badge tone={data.mode === "hot" ? "warn" : "dim"}>{data.mode === "hot" ? "热播优先" : "口味导视"}</Badge>
+        <Badge tone={data.mode === "hot" ? "warn" : data.mode === "preseason" ? "good" : "dim"}>{data.mode === "hot" ? "热播优先" : data.mode === "preseason" ? "播前导视" : "口味导视"}</Badge>
         {list<string>(data.profile_tags).slice(0, 8).map((tag) => <Badge key={tag} tone="dim">{tag}</Badge>)}
         {list<string>(data.focus_tags).map((tag) => <Badge key={tag} tone="good">{tag}</Badge>)}
       </div>
@@ -991,12 +995,21 @@ export function SeasonGuidePanel({
       </div>
       {!single && list(data.guide_videos).length > 0 && (
         <>
-          <div className="section-title">季度导视源</div>
+          <div className="section-title">已发布并核验的季度导视</div>
           <div className="guide-route-list global">
             {list(data.guide_videos).slice(0, 6).map(renderGuideRoute)}
           </div>
         </>
       )}
+      {!single && list(data.pending_guide_sources).length > 0 && (
+        <details className="pending-guide-sources">
+          <summary>仍在关注、但尚未进入结果的来源 {list(data.pending_guide_sources).length}</summary>
+          <div className="compact-list">
+            {list(data.pending_guide_sources).map((source, index) => <span key={`${source.up_name}-${index}`}><strong>{text(source.up_name)}</strong> · {source.publication_status === "not_found" ? "尚未发现本季视频" : source.publication_status === "rejected" ? "视频正文不匹配本季" : source.publication_status === "unavailable" ? "本轮无法核验" : "等待核验"}</span>)}
+          </div>
+        </details>
+      )}
+      {!single && !list(data.guide_videos).length && <div className="inline-notice">目前还没有发现已发布且通过核验的本季导视视频。Otomo 不会用 UP 主页或搜索入口冒充具体导视。</div>}
       {!single && list(data.guide_comment_digests).length > 0 && (
         <>
           <div className="section-title">导视评论摘要</div>

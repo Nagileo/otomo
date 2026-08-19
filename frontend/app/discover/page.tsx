@@ -44,8 +44,12 @@ export default function DiscoverPage() {
   const { csrf, authenticated } = useExperience();
   const [year, setYear] = useState(initial.year);
   const [month, setMonth] = useState<1 | 4 | 7 | 10>(initial.month as 1 | 4 | 7 | 10);
-  const [seasonMode, setSeasonMode] = useState<"guide" | "hot">("hot");
+  const [seasonMode, setSeasonMode] = useState<"auto" | "preseason" | "guide" | "hot">("auto");
   const [season, setSeason] = useState<any>(null);
+  const [guideSourceCatalog, setGuideSourceCatalog] = useState<any[]>([]);
+  const [guideSources, setGuideSources] = useState<string[]>([]);
+  const [primaryGuideSource, setPrimaryGuideSource] = useState("");
+  const [guidePreferenceBusy, setGuidePreferenceBusy] = useState(false);
   const [media, setMedia] = useState<MediaType>("anime");
   const [scenario, setScenario] = useState<Scenario>("general");
   const [bookSubtype, setBookSubtype] = useState<BookSubtype>("auto");
@@ -85,7 +89,7 @@ export default function DiscoverPage() {
     setBookSubtype((["auto", "comic", "light_novel", "novel"].includes(savedBookSubtype) ? savedBookSubtype : "auto") as BookSubtype);
     setMusicSubtype((["auto", "ost", "theme_song", "character_song", "artist"].includes(savedMusicSubtype) ? savedMusicSubtype : "auto") as MusicSubtype);
     setGameFocus((["all", "game", "visual_novel", "galgame"].includes(savedGameFocus) ? savedGameFocus : "all") as GameFocus);
-    void loadSeason(initial.year, initial.month as 1 | 4 | 7 | 10, "hot");
+    void initializeSeasonGuide();
   }, []);
 
   useEffect(() => {
@@ -129,13 +133,69 @@ export default function DiscoverPage() {
     return () => window.clearInterval(timer);
   }, [recommendBusy]);
 
-  async function loadSeason(y = year, m = month, mode = seasonMode) {
+  async function initializeSeasonGuide() {
+    try {
+      const payload = await productFetch("/product/season-guide/preferences");
+      const catalog = payload.sources || [];
+      const available = catalog.map((source: any) => String(source.name));
+      const enabled = payload.preferences?.enabled_sources?.length
+        ? payload.preferences.enabled_sources.filter((name: string) => available.includes(name))
+        : available;
+      const primary = enabled.includes(payload.preferences?.primary_source)
+        ? String(payload.preferences.primary_source)
+        : (enabled[0] || "");
+      setGuideSourceCatalog(catalog);
+      setGuideSources(enabled);
+      setPrimaryGuideSource(primary);
+      await loadSeason(initial.year, initial.month as 1 | 4 | 7 | 10, "auto", enabled, primary);
+    } catch {
+      await loadSeason(initial.year, initial.month as 1 | 4 | 7 | 10, "auto");
+    }
+  }
+
+  async function loadSeason(
+    y = year,
+    m = month,
+    mode = seasonMode,
+    sourceOverride = guideSources,
+    primaryOverride = primaryGuideSource,
+  ) {
     setSeasonBusy(true); setError("");
     try {
-      const payload = await productFetch(`/product/season-guide?year=${y}&month=${m}&mode=${mode}&limit=12`);
+      const params = new URLSearchParams({ year: String(y), month: String(m), mode, limit: "12" });
+      if (sourceOverride.length) params.set("guide_sources", sourceOverride.join(","));
+      if (primaryOverride) params.set("primary_source", primaryOverride);
+      if (tags.trim()) params.set("focus_tags", tags.trim().replaceAll("，", ","));
+      const payload = await productFetch(`/product/season-guide?${params.toString()}`);
       setSeason(payload.data);
     } catch (e) { setError(String(e)); }
     finally { setSeasonBusy(false); }
+  }
+
+  async function saveGuidePreferences() {
+    if (!authenticated || !guideSources.length) return;
+    setGuidePreferenceBusy(true); setError("");
+    try {
+      await productFetch("/product/season-guide/preferences", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...(csrf ? { "x-otomo-csrf": csrf } : {}) },
+        body: JSON.stringify({ enabled_sources: guideSources, primary_source: primaryGuideSource }),
+      });
+      await loadSeason();
+    } catch (e) { setError(String(e)); }
+    finally { setGuidePreferenceBusy(false); }
+  }
+
+  function toggleGuideSource(name: string) {
+    setGuideSources((current) => {
+      if (current.includes(name)) {
+        if (current.length === 1) return current;
+        const next = current.filter((item) => item !== name);
+        if (primaryGuideSource === name) setPrimaryGuideSource(next[0] || "");
+        return next;
+      }
+      return [...current, name];
+    });
   }
 
   async function recommend(requestOverride?: Record<string, any>) {
@@ -399,10 +459,11 @@ export default function DiscoverPage() {
             <select aria-label="季度" value={month} onChange={(e) => setMonth(Number(e.target.value) as 1 | 4 | 7 | 10)}>
               <option value={1}>1 月番</option><option value={4}>4 月番</option><option value={7}>7 月番</option><option value={10}>10 月番</option>
             </select>
-            <div className="segmented"><button className={seasonMode === "hot" ? "active" : ""} onClick={() => setSeasonMode("hot")}>当前热播</button><button className={seasonMode === "guide" ? "active" : ""} onClick={() => setSeasonMode("guide")}>按我口味</button></div>
+            <div className="segmented season-mode-switch"><button className={seasonMode === "auto" ? "active" : ""} onClick={() => setSeasonMode("auto")}>自动</button><button className={seasonMode === "preseason" ? "active" : ""} onClick={() => setSeasonMode("preseason")}>播前导视</button><button className={seasonMode === "hot" ? "active" : ""} onClick={() => setSeasonMode("hot")}>当前热播</button><button className={seasonMode === "guide" ? "active" : ""} onClick={() => setSeasonMode("guide")}>按我口味</button></div>
             <button className="button-secondary icon-label" disabled={seasonBusy} onClick={() => void loadSeason()}><RefreshCw size={16} />更新</button>
           </div>
         </div>
+        {guideSourceCatalog.length ? <details className="season-source-settings"><summary>导视来源偏好 · 已启用 {guideSources.length} 个</summary><div className="season-source-settings-body"><p>只会把已经发布并通过季度/标题核验的具体视频放进导视；尚未发视频的 UP 不参与排序。</p><div className="season-source-options">{guideSourceCatalog.map((source) => { const enabled = guideSources.includes(source.name); return <button type="button" className={enabled ? "active" : ""} aria-pressed={enabled} onClick={() => toggleGuideSource(source.name)} key={source.name}><span>{enabled ? "✓" : "○"} {source.name}</span><small>{source.positioning}</small></button>; })}</div><label className="season-primary-source"><span>首选来源</span><select value={primaryGuideSource} onChange={(event) => setPrimaryGuideSource(event.target.value)}>{guideSources.map((name) => <option value={name} key={name}>{name}</option>)}</select></label>{authenticated ? <button className="button-secondary" disabled={guidePreferenceBusy || !guideSources.length} onClick={() => void saveGuidePreferences()}>{guidePreferenceBusy ? "保存中…" : "保存并同步到对话 / Discord"}</button> : <small>连接 Bangumi 后可把这套来源偏好同步到对话和 Discord。</small>}</div></details> : null}
         {seasonBusy && !season ? <div className="surface-loading">正在整理本季条目、口碑与播出资料…</div> : null}
         {season ? <SeasonGuidePanel data={season} onShareSnapshot={authenticated ? (request) => void shareSnapshot(request) : undefined} /> : null}
       </section>

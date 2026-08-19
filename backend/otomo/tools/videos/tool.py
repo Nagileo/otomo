@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 from ...agent.contracts import Citation, Tool, ToolResult
 from ...config import settings
 from .._cache import acached, scached
+from .._concurrency import gather_limited
 from ..review.tool import (
     AspectOpinion,
     AspectSummary,
@@ -113,6 +114,13 @@ class GuideVideoHit(BaseModel):
     pubdate: int | None = None
     match_confidence: float = 0.0
     match_reason: str = ""
+    verification_status: Literal["content_verified", "view_verified", "search_metadata"] = "search_metadata"
+    content_verified: bool = False
+    content_match_confidence: float = 0.0
+    content_match_reason: str = ""
+    transcript_source: Literal["subtitle", "asr", "none"] = "none"
+    content_mentions: int = 0
+    content_required: bool = False
 
 
 class GuideVideoLink(BaseModel):
@@ -129,6 +137,7 @@ class GuideVideoLink(BaseModel):
     verified_hits: list[GuideVideoHit] = Field(default_factory=list)
     verification_query: str = ""
     verification_note: str = ""
+    publication_status: Literal["navigation", "published", "not_found", "unavailable", "rejected"] = "navigation"
 
 
 class BiliVideoMeta(BaseModel):
@@ -466,13 +475,39 @@ def _guide_score(up: dict, intent: str, tags: list[str], verticals: list[Subject
     return score, "；".join(dict.fromkeys(reasons)) or "通用导视入口", confidence
 
 
-def _guide_links(query: str, intent: str, limit: int, tags: list[str] | None = None) -> list[GuideVideoLink]:
+def guide_source_catalog() -> list[dict[str, str]]:
+    return [
+        {
+            "name": str(up["name"]),
+            "positioning": str(up["positioning"]),
+            "up_url": _space(str(up["uid"])),
+        }
+        for up in _GUIDE_UPS
+    ]
+
+
+def _guide_links(
+    query: str,
+    intent: str,
+    limit: int,
+    tags: list[str] | None = None,
+    preferred_sources: list[str] | None = None,
+) -> list[GuideVideoLink]:
     q = query.strip()
     tags = tags or []
+    preference_order = [name.strip() for name in (preferred_sources or []) if name.strip()]
+    preference_rank = {name: index for index, name in enumerate(preference_order)}
     verticals = classify_subject_verticals(tags, title=q)
     ranked: list[tuple[int, int, GuideVideoLink]] = []
     for up in _GUIDE_UPS:
+        if preference_order and up["name"] not in preference_rank:
+            continue
         score, reason, confidence = _guide_score(up, intent, tags, verticals)
+        if up["name"] in preference_rank:
+            preference_bonus = max(1, 8 - preference_rank[up["name"]])
+            score += preference_bonus
+            reason = "；".join(x for x in [f"你的来源偏好 +{preference_bonus}", reason] if x)
+            confidence = "high" if score >= 7 else confidence
         if intent != "all" and score <= 0:
             continue
         keyword_tag = next((t for t in tags if t in up.get("tags", set())), "")
@@ -495,7 +530,10 @@ def _guide_links(query: str, intent: str, limit: int, tags: list[str] | None = N
                 verification_note="尚未验证具体视频命中，仅作为白名单导航入口。",
             ),
         ))
-    ranked.sort(key=lambda x: (-x[0], x[1]))
+    if preference_order:
+        ranked.sort(key=lambda x: (preference_rank.get(x[2].up_name, len(preference_rank)), -x[0], x[1]))
+    else:
+        ranked.sort(key=lambda x: (-x[0], x[1]))
     return [x[2] for x in ranked[:limit]]
 
 
@@ -687,6 +725,16 @@ def _hit_relevance(raw: dict, *, up_name: str, aliases: list[str], tags: list[st
         if published_year < target_year - 1:
             score -= 0.28
             reasons.append(f"发布时间偏旧（{published_year}）")
+    broad_season_query = bool(query_markers["year"] or query_markers["month"]) and any(
+        marker in season_query for marker in ("新番", "导视", "季度", "盘点")
+    )
+    explicit_guide_title = any(
+        marker in title.lower()
+        for marker in ("新番", "导视", "推荐", "盘点", "季度", "春番", "夏番", "秋番", "冬番")
+    ) or bool(re.search(r"\d{1,2}\s*月番", title))
+    if broad_season_query and not explicit_guide_title:
+        score = min(score, 0.49)
+        reasons.append("标题只有月份/圈层信号，未明确表明是新番导视")
     has_content_match = bool(exact_aliases or term_hits or any(query_markers.values()))
     if not has_content_match:
         score = min(score, 0.28)
@@ -705,6 +753,8 @@ async def verify_guide_video_links(
     max_links: int = 2,
     max_hits_per_link: int = 1,
     min_confidence: float = 0.55,
+    verify_content: bool = False,
+    content_verify_limit: int = 3,
 ) -> list[GuideVideoLink]:
     """对路由出的白名单 UP 做真实 B站搜索验证。
 
@@ -714,7 +764,8 @@ async def verify_guide_video_links(
     tags = tags or []
     aliases = [x for x in (title_aliases or []) if x]
     verified_links = [link.model_copy(deep=True) for link in links]
-    for idx, link in enumerate(verified_links[:max_links]):
+
+    async def verify_link(link: GuideVideoLink) -> None:
         vertical_terms = [v.label for v in link.verticals[:2]]
         search_query = " ".join(dict.fromkeys([*(aliases[:1] or [query]), link.up_name, *(vertical_terms or tags[:1])])).strip()
         link.verification_query = search_query
@@ -722,16 +773,19 @@ async def verify_guide_video_links(
             data = await _bili_search_async(search_query)
         except httpx.HTTPStatusError as e:
             if e.response.status_code != 412:
+                link.publication_status = "unavailable"
                 link.verification_note = f"B站搜索验证失败：HTTP {e.response.status_code}"
-                continue
+                return
             try:
                 data = await asyncio.to_thread(_sync_bili_search, search_query)
             except (httpx.HTTPError, httpx.TransportError, ValueError) as fallback_e:
+                link.publication_status = "unavailable"
                 link.verification_note = f"B站搜索验证失败：HTTP 412 / fallback {type(fallback_e).__name__}"
-                continue
+                return
         except (httpx.HTTPError, httpx.TransportError, ValueError) as e:
+            link.publication_status = "unavailable"
             link.verification_note = f"B站搜索验证失败：{type(e).__name__}"
-            continue
+            return
 
         candidates: list[tuple[float, GuideVideoHit]] = []
         for raw in ((data.get("data") or {}).get("result") or []):
@@ -742,7 +796,8 @@ async def verify_guide_video_links(
             if not url:
                 continue
             conf, reason = _hit_relevance(raw, up_name=link.up_name, aliases=aliases, tags=tags, season_query=query)
-            if conf < min_confidence:
+            content_required = conf < min_confidence
+            if content_required and not (verify_content and conf >= max(0.4, min_confidence - 0.1)):
                 continue
             candidates.append((
                 conf,
@@ -757,16 +812,108 @@ async def verify_guide_video_links(
                     pubdate=raw.get("pubdate"),
                     match_confidence=round(conf, 3),
                     match_reason=reason,
+                    content_required=content_required,
                 ),
             ))
         candidates.sort(key=lambda x: -x[0])
         link.verified_hits = [x[1] for x in candidates[:max_hits_per_link]]
         link.verified = bool(link.verified_hits)
+        link.publication_status = "published" if link.verified else "not_found"
         link.verification_note = (
             f"已命中 {len(link.verified_hits)} 个白名单相关视频。"
             if link.verified else
-            "未命中足够相关的具体视频，仅保留 UP/搜索入口。"
+            "尚未发现该 UP 已发布本次查询对应的视频。"
         )
+
+    await gather_limited(
+        (verify_link(link) for link in verified_links[:max_links]),
+        host="bilibili",
+    )
+
+    if verify_content and content_verify_limit > 0:
+        targets = [
+            (link, hit)
+            for link in verified_links[:max_links]
+            for hit in link.verified_hits[:max_hits_per_link]
+        ][:content_verify_limit]
+
+        async def check_content(hit: GuideVideoHit, *, allow_asr: bool) -> BiliTranscriptMatch | None:
+            result = await GetBiliVideoSubtitlesTool().run(BiliVideoSubtitleArgs(
+                aid=hit.aid,
+                bvid=hit.bvid,
+                max_segments=160,
+                allow_asr=allow_asr,
+                sample_across_video=True,
+            ))
+            if not result.ok or result.data is None or not result.data.segments:
+                return None
+            source: Literal["subtitle", "asr"] = (
+                "asr" if result.data.source == "bili_asr" else "subtitle"
+            )
+            return _match_video_transcript(query, hit.title, result.data.segments, source=source)
+
+        public_matches = await asyncio.gather(*(
+            check_content(hit, allow_asr=False) for _link, hit in targets
+        )) if targets else []
+        resolved: dict[str, BiliTranscriptMatch] = {}
+        for (_link, hit), match in zip(targets, public_matches, strict=False):
+            if match is not None:
+                resolved[hit.bvid or str(hit.aid or hit.url)] = match
+        if settings.asr_provider != "off":
+            asr_target = next((
+                (link, hit) for link, hit in targets
+                if (hit.bvid or str(hit.aid or hit.url)) not in resolved
+                and 0.58 <= hit.match_confidence <= 0.82
+            ), None)
+            if asr_target is not None:
+                _link, hit = asr_target
+                match = await check_content(hit, allow_asr=True)
+                if match is not None:
+                    resolved[hit.bvid or str(hit.aid or hit.url)] = match
+
+        processed_links: set[int] = set()
+        for link, _hit in targets:
+            link_key = id(link)
+            if link_key in processed_links:
+                continue
+            processed_links.add(link_key)
+            kept: list[GuideVideoHit] = []
+            rejected = False
+            for hit in link.verified_hits:
+                match = resolved.get(hit.bvid or str(hit.aid or hit.url))
+                if match is None:
+                    if hit.content_required:
+                        rejected = True
+                        continue
+                    hit.verification_status = "view_verified"
+                    hit.content_match_reason = "未获得公开字幕；仅确认视频已发布且元数据匹配"
+                    kept.append(hit)
+                    continue
+                hit.content_verified = match.verified
+                hit.content_match_confidence = match.confidence
+                hit.content_match_reason = match.reason
+                hit.transcript_source = match.source
+                hit.content_mentions = match.mentions
+                hit.verification_status = "content_verified" if match.verified else "view_verified"
+                hit.match_confidence = round(0.45 * hit.match_confidence + 0.55 * match.confidence, 3)
+                hit.match_reason = f"{hit.match_reason}；内容核验：{match.reason}"
+                if match.confidence < 0.52 or (hit.content_required and not match.verified):
+                    rejected = True
+                    continue
+                kept.append(hit)
+            link.verified_hits = kept
+            link.verified = bool(kept)
+            if kept:
+                link.publication_status = "published"
+                content_count = sum(1 for hit in kept if hit.content_verified)
+                link.verification_note = (
+                    f"已发布；其中 {content_count} 个视频通过字幕正文核验。"
+                    if content_count else
+                    "已确认发布，暂未获得可用字幕正文，结论仅依据视频元数据。"
+                )
+            elif rejected:
+                link.publication_status = "rejected"
+                link.verification_note = "发现了边界候选，但标题证据不足，且字幕正文未能通过本季内容核验。"
     return verified_links
 
 

@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import date
 
 import pytest
 
-from otomo.agent._common import summarize
+from otomo.agent._common import panel_data_from_payload, summarize
 from otomo.agent.contracts import AgentState, ToolResult
 from otomo.memory.models import UserMemory
+from otomo.memory import LongTermMemory
+from otomo.security_context import tenant_scope
 from otomo.tools.comments.tool import EpisodeCommentsArgs, GetEpisodeCommentsTool
 from otomo.tools.recommend.tool import RecEvidence, _egs_mapping_confidence, _quality_badges, _review_bonus
 from otomo.tools.review.tool import (
@@ -22,7 +25,15 @@ from otomo.tools.review.tool import (
     _pick_aspects,
     _score_signal,
 )
-from otomo.tools.season.tool import GuideCommentDigest, SeasonGuideBriefResult, _fit_item
+from otomo.tools.season.tool import (
+    GuideCommentDigest,
+    SeasonGuideBriefResult,
+    SeasonGuideBriefArgs,
+    SeasonGuideBriefTool,
+    _effective_mode,
+    _fit_item,
+    _season_phase,
+)
 from otomo.tools.spoiler.tool import assess_spoiler_policy
 from otomo.tools.user_analysis.tool import _build_affinity, _parse_friend_list, _sentiment
 from otomo.tools.videos import tool as videos_tool
@@ -33,12 +44,15 @@ from otomo.tools.videos.tool import (
     BiliVideoDanmakuResult,
     BiliVideoSubtitleResult,
     BiliSubtitleSegment,
+    GuideVideoLink,
     SummarizeBiliVideoContentTool,
     _clean_bili_title,
     _guide_links,
+    _hit_relevance,
     _match_video_transcript,
     _parse_bili_video_ref,
     _summarize_aspect_opinions,
+    verify_guide_video_links,
 )
 
 
@@ -46,6 +60,205 @@ def test_find_guide_video_links_prefers_whitelist():
     links = _guide_links("2026年7月新番导视", "season", 3)
     assert len(links) == 3
     assert all("bilibili.com" in x.url for x in links)
+
+
+def test_guide_source_preferences_filter_and_order_sources():
+    links = _guide_links(
+        "2026年7月 新番导视",
+        "season",
+        8,
+        preferred_sources=["瓶子君152", "名作之壁吧"],
+    )
+    assert [link.up_name for link in links] == ["瓶子君152", "名作之壁吧"]
+    niche = _guide_links(
+        "2026年7月 新番导视",
+        "season",
+        8,
+        preferred_sources=["芳文观星台"],
+    )
+    assert [link.up_name for link in niche] == ["芳文观星台"]
+    primary_first = _guide_links(
+        "2026年7月 新番导视",
+        "season",
+        8,
+        tags=["百合"],
+        preferred_sources=["名作之壁吧", "FlowerMX-花梦"],
+    )
+    assert [link.up_name for link in primary_first] == ["名作之壁吧", "FlowerMX-花梦"]
+
+
+def test_auto_season_mode_uses_preseason_for_future_quarter():
+    phase = _season_phase(2026, 7, today=date(2026, 6, 15))
+    assert phase == "upcoming"
+    assert _effective_mode("auto", phase) == "preseason"
+    assert _effective_mode("hot", phase) == "hot"
+
+
+def test_season_source_preferences_follow_authenticated_surface_identity(tmp_path):
+    ltm = LongTermMemory(tmp_path)
+    with tenant_scope("alice", authenticated=True):
+        memory = ltm.load_user("alice")
+        memory.season_guide_preferences.enabled_sources = ["泛式", "名作之壁吧"]
+        memory.season_guide_preferences.primary_source = "名作之壁吧"
+        ltm.save_user(memory)
+        tool = SeasonGuideBriefTool(object(), ltm)
+        preferences = tool._guide_source_preferences(SeasonGuideBriefArgs(year=2026, month=7, username="mallory"))
+    assert preferences == ["名作之壁吧", "泛式"]
+
+
+def test_season_panel_payload_keeps_publication_and_content_verification_fields():
+    safe = panel_data_from_payload("season_guide_brief", {
+        "season": "2026 夏",
+        "mode": "preseason",
+        "requested_mode": "auto",
+        "phase": "upcoming",
+        "items": [],
+        "guide_videos": [{
+            "up_name": "名作之壁吧",
+            "publication_status": "published",
+            "verified_hits": [{
+                "title": "2026年7月新番导视",
+                "url": "https://www.bilibili.com/video/BVtest",
+                "content_verified": True,
+                "content_match_reason": "字幕确认年份与月份",
+            }],
+        }],
+        "pending_guide_sources": [{
+            "up_name": "泛式",
+            "publication_status": "not_found",
+            "verified_hits": [],
+        }],
+        "guide_source_preferences": ["名作之壁吧", "泛式"],
+    })
+    assert safe is not None
+    assert safe["requested_mode"] == "auto"
+    assert safe["phase"] == "upcoming"
+    assert safe["guide_videos"][0]["verified_hits"][0]["content_verified"] is True
+    assert safe["pending_guide_sources"][0]["publication_status"] == "not_found"
+
+
+def test_unpublished_and_unavailable_guide_sources_are_not_published(monkeypatch):
+    links = [
+        GuideVideoLink(
+            label="名作之壁吧",
+            url="https://search.bilibili.com/all?keyword=test",
+            up_name="名作之壁吧",
+            up_url="https://space.bilibili.com/2859372",
+            positioning="数据向",
+        ),
+        GuideVideoLink(
+            label="泛式",
+            url="https://search.bilibili.com/all?keyword=test",
+            up_name="泛式",
+            up_url="https://space.bilibili.com/63231",
+            positioning="评价向",
+        ),
+    ]
+
+    async def fake_search(query: str):
+        if "名作之壁吧" in query:
+            return {"code": 0, "data": {"result": []}}
+        raise ValueError("B站风控")
+
+    monkeypatch.setattr(videos_tool, "_bili_search_async", fake_search)
+    result = asyncio.run(verify_guide_video_links(
+        "2026年7月 新番导视",
+        links,
+        title_aliases=["2026年7月新番导视"],
+        max_links=2,
+    ))
+    assert [link.publication_status for link in result] == ["not_found", "unavailable"]
+    assert not any(link.verified for link in result)
+
+
+def test_transcript_conflict_rejects_apparently_matching_season_video(monkeypatch):
+    link = GuideVideoLink(
+        label="名作之壁吧",
+        url="https://search.bilibili.com/all?keyword=test",
+        up_name="名作之壁吧",
+        up_url="https://space.bilibili.com/2859372",
+        positioning="数据向",
+    )
+
+    async def fake_search(_query: str):
+        return {"code": 0, "data": {"result": [{
+            "title": "2026年7月新番导视",
+            "author": "名作之壁吧",
+            "arcurl": "https://www.bilibili.com/video/BVtest",
+            "aid": 42,
+            "bvid": "BVtest",
+        }]}}
+
+    async def fake_subtitle_run(_self, _args):
+        return ToolResult(ok=True, data=BiliVideoSubtitleResult(
+            aid=42,
+            bvid="BVtest",
+            count=1,
+            segments=[BiliSubtitleSegment(text="这是2025年1月新番导视，我们来看看冬季作品。")],
+        ))
+
+    monkeypatch.setattr(videos_tool, "_bili_search_async", fake_search)
+    monkeypatch.setattr(videos_tool.GetBiliVideoSubtitlesTool, "run", fake_subtitle_run)
+    result = asyncio.run(verify_guide_video_links(
+        "2026年7月 新番导视",
+        [link],
+        title_aliases=["2026年7月新番导视"],
+        max_links=1,
+        verify_content=True,
+    ))
+    assert result[0].publication_status == "rejected"
+    assert result[0].verified_hits == []
+
+
+def test_month_and_whitelisted_author_do_not_make_a_video_a_season_guide():
+    confidence, reason = _hit_relevance(
+        {
+            "title": "百合月刊 No.67 2026年7月",
+            "author": "FlowerMX-花梦",
+        },
+        up_name="FlowerMX-花梦",
+        aliases=["2026年7月新番导视"],
+        tags=["百合"],
+        season_query="2026年7月 新番导视",
+    )
+    assert confidence < 0.5
+    assert "未明确表明是新番导视" in reason
+
+
+def test_ambiguous_monthly_video_is_rejected_without_transcript(monkeypatch):
+    link = GuideVideoLink(
+        label="FlowerMX-花梦",
+        url="https://search.bilibili.com/all?keyword=test",
+        up_name="FlowerMX-花梦",
+        up_url="https://space.bilibili.com/13181306",
+        positioning="百合向",
+    )
+
+    async def fake_search(_query: str):
+        return {"code": 0, "data": {"result": [{
+            "title": "百合月刊 No.67 2026年7月",
+            "author": "FlowerMX-花梦",
+            "arcurl": "https://www.bilibili.com/video/BVmonthly",
+            "aid": 67,
+            "bvid": "BVmonthly",
+        }]}}
+
+    async def no_subtitle(_self, _args):
+        return ToolResult(ok=False, error="没有公开字幕")
+
+    monkeypatch.setattr(videos_tool, "_bili_search_async", fake_search)
+    monkeypatch.setattr(videos_tool.GetBiliVideoSubtitlesTool, "run", no_subtitle)
+    result = asyncio.run(verify_guide_video_links(
+        "2026年7月 新番导视",
+        [link],
+        title_aliases=["2026年7月新番导视"],
+        tags=["百合"],
+        max_links=1,
+        min_confidence=0.5,
+        verify_content=True,
+    ))
+    assert result[0].publication_status == "rejected"
+    assert result[0].verified_hits == []
 
 
 def test_spoiler_policy_requires_followup_for_ending_question():

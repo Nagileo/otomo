@@ -187,13 +187,20 @@ function MonthlyReportShare({ data }: { data: AnyRecord }) {
 
 function SeasonGuideShare({ data }: { data: AnyRecord }) {
   const items = list(data.items);
-  const guides = list(data.guide_videos);
+  const guides = list(data.guide_videos).filter((video) =>
+    video.publication_status === "published" && list(video.verified_hits).some((hit) => Boolean(hit.url)),
+  );
+  const modeLabels: Record<string, string> = {
+    preseason: "播前导视",
+    hot: "当前热播",
+    guide: "按口味",
+  };
   return (
     <>
       <section className="share-section">
         <h2>{text(data.season, "季度")} 新番导视</h2>
         <div className="share-badges compact">
-          <span>{text(data.mode, "guide")}</span>
+          <span>{modeLabels[text(data.mode, "guide")] || text(data.mode, "guide")}</span>
           {list<string>(data.profile_tags).slice(0, 8).map((tag) => <span key={tag}>{tag}</span>)}
         </div>
         <div className="share-card-grid">
@@ -209,20 +216,26 @@ function SeasonGuideShare({ data }: { data: AnyRecord }) {
       </section>
       {guides.length > 0 && (
         <section className="share-section">
-          <h2>圈层导视源</h2>
+          <h2>已发布并核验的导视</h2>
           <div className="share-list">
             {guides.map((video, i) => {
               const hit = list(video.verified_hits)[0] || {};
-              const href = hit.url || video.url || video.up_url;
+              const href = hit.url;
               return (
                 <a href={safeHref(href)} key={`${video.up_name}-${i}`}>
                   <b>{text(video.up_name)}</b>
-                  <span>{video.verified ? "已命中具体视频" : "仅导航入口"} · {text(video.positioning)}</span>
+                  <span>{hit.content_verified ? "字幕正文已核验" : "标题与季度已核验"} · {text(video.positioning)}</span>
                   <small>{text(hit.title || video.verification_note || video.match_reason, "")}</small>
                 </a>
               );
             })}
           </div>
+        </section>
+      )}
+      {guides.length === 0 && (
+        <section className="share-section">
+          <h2>B站导视状态</h2>
+          <p>目前还没有发现已发布且通过核验的本季导视视频；未发布的 UP 和搜索入口不会作为视频推荐展示。</p>
         </section>
       )}
       <Caveats items={data.caveats || data.notes} />

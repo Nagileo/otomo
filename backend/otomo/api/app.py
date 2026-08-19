@@ -43,6 +43,7 @@ from ..memory.models import (
     FeedbackItem,
     MemoryItem,
     ProgressItem,
+    SeasonGuidePreferences,
     SpoilerDefault,
     UserAspectProfile,
     VisualFeedbackItem,
@@ -98,6 +99,7 @@ from ..tools.product_loop.tool import (
 )
 from ..tools.profile.tool import CollectionDashboardArgs, CollectionDashboardTool
 from ..tools.season.tool import SeasonGuideBriefArgs, SeasonGuideBriefTool
+from ..tools.videos.tool import guide_source_catalog
 from ..tools.user_analysis.tool import CompareUserTasteTool, TasteCompareArgs, _fetch_friends
 from ..workspace import (
     SavedViewCreate,
@@ -237,6 +239,11 @@ class MemoryPreferencesUpdate(BaseModel):
     progress: dict[str, ProgressItem] | None = None
     feedback: list[FeedbackItem] | None = None
     aspect_profiles: dict[str, UserAspectProfile] | None = None
+
+
+class SeasonGuidePreferencesUpdate(BaseModel):
+    enabled_sources: list[str] = Field(default_factory=list, max_length=12)
+    primary_source: str = Field("", max_length=80)
 
 
 class UploadImageRequest(BaseModel):
@@ -1822,10 +1829,12 @@ async def product_season_guide(
     response: Response,
     year: int,
     month: int,
-    mode: Literal["guide", "hot"] = "guide",
+    mode: Literal["auto", "preseason", "guide", "hot"] = "auto",
     limit: int = 12,
     focus_tags: str = "",
     include_video_comments: bool = False,
+    guide_sources: str = "",
+    primary_source: str = "",
 ) -> dict[str, Any]:
     session = _ensure_auth_session(request, response)
     _product_rate_limit(request, session.auth_session_id, "season")
@@ -1842,12 +1851,59 @@ async def product_season_guide(
             username=identity.username if identity.authenticated else None,
             focus_tags=[x.strip() for x in focus_tags.split(",") if x.strip()] or None,
             include_video_comments=include_video_comments,
+            preferred_guide_sources=[x.strip() for x in guide_sources.split(",") if x.strip()] or None,
+            primary_guide_source=primary_source.strip() or None,
         )
         with tenant_scope(identity.username, authenticated=identity.authenticated):
-            result = await SeasonGuideBriefTool(client).run(args)
+            result = await SeasonGuideBriefTool(client, app.state.ltm).run(args)
         return result.model_dump(mode="json", exclude_none=True)
     finally:
         await client.aclose()
+
+
+@app.get("/product/season-guide/preferences")
+async def get_season_guide_preferences(request: Request, response: Response) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    identity = app.state.auth.identity(session.auth_session_id)
+    preference = SeasonGuidePreferences()
+    if identity.authenticated:
+        with tenant_scope(identity.username, authenticated=True):
+            preference = app.state.ltm.load_user(identity.username).season_guide_preferences
+    return {
+        "ok": True,
+        "authenticated": identity.authenticated,
+        "sources": guide_source_catalog(),
+        "preferences": preference.model_dump(mode="json", exclude_none=True),
+    }
+
+
+@app.put("/product/season-guide/preferences")
+async def update_season_guide_preferences(
+    req: SeasonGuidePreferencesUpdate,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    identity = _authenticated_identity(session.auth_session_id)
+    allowed = {item["name"] for item in guide_source_catalog()}
+    enabled = list(dict.fromkeys(name.strip() for name in req.enabled_sources if name.strip()))
+    invalid = [name for name in enabled if name not in allowed]
+    primary = req.primary_source.strip()
+    if invalid or (primary and primary not in allowed):
+        raise HTTPException(status_code=422, detail="包含未知的导视来源")
+    if primary and primary not in enabled:
+        enabled.insert(0, primary)
+    preference = SeasonGuidePreferences(
+        enabled_sources=enabled,
+        primary_source=primary,
+        updated_at=now_iso(),
+    )
+    with tenant_scope(identity.username, authenticated=True):
+        mem = app.state.ltm.load_user(identity.username)
+        mem.season_guide_preferences = preference
+        app.state.ltm.save_user(mem)
+    return {"ok": True, "preferences": preference.model_dump(mode="json", exclude_none=True)}
 
 
 @app.post("/product/recommendations")

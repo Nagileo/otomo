@@ -746,6 +746,21 @@ def _safe_taste_payload(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _safe_season_payload(data: dict[str, Any]) -> dict[str, Any]:
+    def safe_guides(value: Any, *, limit: int) -> list[dict[str, Any]]:
+        guides = []
+        for guide in _trim_dicts(value, limit=limit):
+            copied = dict(guide)
+            hits = []
+            for hit in _trim_dicts(copied.get("verified_hits"), limit=2):
+                hit_copy = dict(hit)
+                hit_copy["match_reason"] = str(hit_copy.get("match_reason") or "")[:220]
+                hit_copy["content_match_reason"] = str(hit_copy.get("content_match_reason") or "")[:220]
+                hits.append(hit_copy)
+            copied["verified_hits"] = hits
+            copied["verification_note"] = str(copied.get("verification_note") or "")[:220]
+            guides.append(copied)
+        return guides
+
     items = []
     for item in _trim_dicts(data.get("items"), limit=20):
         copied = dict(item)
@@ -753,7 +768,7 @@ def _safe_season_payload(data: dict[str, Any]) -> dict[str, Any]:
         copied["match_tags"] = _trim_strings(copied.get("match_tags"), limit=6, text_limit=40)
         copied["evidence"] = _trim_strings(copied.get("evidence"), limit=6, text_limit=160)
         copied["hotness_evidence"] = _trim_strings(copied.get("hotness_evidence"), limit=4, text_limit=120)
-        copied["guide_videos"] = _trim_dicts(copied.get("guide_videos"), limit=3)
+        copied["guide_videos"] = safe_guides(copied.get("guide_videos"), limit=3)
         items.append(copied)
     digests = []
     for item in _trim_dicts(data.get("guide_comment_digests"), limit=3):
@@ -765,12 +780,16 @@ def _safe_season_payload(data: dict[str, Any]) -> dict[str, Any]:
     return {
         "season": data.get("season"),
         "mode": data.get("mode"),
+        "requested_mode": data.get("requested_mode"),
+        "phase": data.get("phase"),
         "count": data.get("count"),
         "personalized": data.get("personalized"),
         "profile_tags": _trim_strings(data.get("profile_tags"), limit=12, text_limit=40),
         "focus_tags": _trim_strings(data.get("focus_tags"), limit=8, text_limit=40),
         "items": items,
-        "guide_videos": _trim_dicts(data.get("guide_videos"), limit=8),
+        "guide_videos": safe_guides(data.get("guide_videos"), limit=8),
+        "pending_guide_sources": safe_guides(data.get("pending_guide_sources"), limit=8),
+        "guide_source_preferences": _trim_strings(data.get("guide_source_preferences"), limit=12, text_limit=80),
         "guide_comment_digests": digests,
         "notes": _trim_strings(data.get("notes"), limit=6, text_limit=220),
     }

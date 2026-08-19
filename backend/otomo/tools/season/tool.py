@@ -15,18 +15,18 @@ from urllib.parse import quote
 from pydantic import BaseModel, ConfigDict, Field
 
 from ...agent.contracts import Citation, Tool, ToolResult
+from ...memory import LongTermMemory
 from ...profile import compute_taste_profile
+from ...security_context import current_principal
 from .._concurrency import gather_limited
 from ..bangumi.client import SUBJECT_TYPE, BangumiClient
 from ..bangumi.models import SubjectBrief
 from ..calendar.tool import BroadcastCalendarArgs, BroadcastCalendarTool
 from ..discovery.tool import GetTrendingSubjectsTool, TrendingArgs
 from ..videos.tool import (
-    BiliGuideSearchArgs,
     BiliVideoCommentsArgs,
     GetBiliVideoCommentsTool,
     GuideVideoLink,
-    SearchBiliGuideVideosTool,
     SubjectVertical,
     _guide_links,
     verify_guide_video_links,
@@ -66,9 +66,9 @@ class YearAnimeArgs(BaseModel):
 class SeasonGuideBriefArgs(BaseModel):
     year: int = Field(..., description="年份，如 2026")
     month: Literal[1, 4, 7, 10] = Field(..., description="季度起始月：1/4/7/10")
-    mode: Literal["guide", "hot"] = Field(
-        "guide",
-        description="guide=按用户口味导视排序；hot=优先看本季热播/讨论热度，再结合口味重排",
+    mode: Literal["auto", "preseason", "guide", "hot"] = Field(
+        "auto",
+        description="auto=按季度阶段选择；preseason=播前导视；guide=按用户口味；hot=热播/讨论优先",
     )
     limit: int = Field(10, ge=1, le=20)
     username: str | None = Field(None, description="Bangumi 用户名；不传则尝试当前账号，失败就做非个性化导视")
@@ -81,7 +81,16 @@ class SeasonGuideBriefArgs(BaseModel):
     comment_video_limit: int = Field(2, ge=1, le=3, description="最多读取几个导视视频的评论")
     comment_limit: int = Field(20, ge=5, le=50, description="每个导视视频最多读取多少条评论")
     verify_guide_videos: bool = Field(True, description="是否对路由出的白名单 UP 做真实 B站视频命中验证")
-    guide_verify_limit: int = Field(2, ge=0, le=4, description="每部番最多验证几个导视源；0 表示只做路由不搜索")
+    guide_verify_limit: int = Field(2, ge=0, le=4, description="整季最多验证几个导视源；0 表示只做路由不搜索")
+    verify_item_videos: bool = Field(
+        False,
+        description="是否逐部搜索具体漫评；默认关闭以避免整季产生大量 B站请求，仅在用户明确要求时开启",
+    )
+    preferred_guide_sources: list[str] | None = Field(
+        None,
+        description="按顺序排列的导视 UP 偏好；传入后只启用这些来源，网页/Discord 可共享长期设置",
+    )
+    primary_guide_source: str | None = Field(None, description="优先导视 UP，会排在已启用来源最前")
 
 
 class GuideLink(BaseModel):
@@ -154,13 +163,17 @@ class GuideCommentDigest(BaseModel):
 
 class SeasonGuideBriefResult(BaseModel):
     season: str
-    mode: Literal["guide", "hot"] = "guide"
+    mode: Literal["preseason", "guide", "hot"] = "guide"
+    requested_mode: Literal["auto", "preseason", "guide", "hot"] = "auto"
+    phase: Literal["upcoming", "airing", "archive"] = "airing"
     count: int
     personalized: bool = False
     profile_tags: list[str] = Field(default_factory=list)
     focus_tags: list[str] = Field(default_factory=list)
     items: list[SeasonGuideItem] = Field(default_factory=list)
     guide_videos: list[GuideVideoLink] = Field(default_factory=list)
+    pending_guide_sources: list[GuideVideoLink] = Field(default_factory=list)
+    guide_source_preferences: list[str] = Field(default_factory=list)
     guide_comment_digests: list[GuideCommentDigest] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 
@@ -174,6 +187,30 @@ class HotSignals(BaseModel):
     hotness: float = 0.0
     level: Literal["none", "warm", "hot", "surge"] = "none"
     evidence: list[str] = Field(default_factory=list)
+
+
+def _season_phase(year: int, month: int, *, today: date | None = None) -> Literal["upcoming", "airing", "archive"]:
+    current = today or date.today()
+    start = date(year, month, 1)
+    end = date(year + 1, 1, 1) if month == 10 else date(year, month + 3, 1)
+    if current < start:
+        return "upcoming"
+    if current >= end:
+        return "archive"
+    return "airing"
+
+
+def _effective_mode(
+    requested: Literal["auto", "preseason", "guide", "hot"],
+    phase: Literal["upcoming", "airing", "archive"],
+) -> Literal["preseason", "guide", "hot"]:
+    if requested != "auto":
+        return requested
+    if phase == "upcoming":
+        return "preseason"
+    if phase == "archive":
+        return "guide"
+    return "hot"
 
 
 def _norm_title(value: str | None) -> str:
@@ -314,12 +351,33 @@ class SeasonGuideBriefTool(Tool):
     args_model = SeasonGuideBriefArgs
     result_model = SeasonGuideBriefResult
 
-    def __init__(self, client: BangumiClient) -> None:
+    def __init__(self, client: BangumiClient, ltm: LongTermMemory | None = None) -> None:
         self.client = client
+        self.ltm = ltm
         self._season_tool = ListSeasonAnimeTool(client)
         self._yuc_tool = ListYucSeasonTool()
-        self._bili_search_tool = SearchBiliGuideVideosTool()
         self._bili_comments_tool = GetBiliVideoCommentsTool()
+
+    def _guide_source_preferences(self, args: SeasonGuideBriefArgs) -> list[str]:
+        enabled = args.preferred_guide_sources
+        primary = (args.primary_guide_source or "").strip()
+        principal = current_principal()
+        username = (
+            principal.username
+            if principal and principal.authenticated
+            else (args.username or "").strip()
+        )
+        if enabled is None and username and self.ltm is not None:
+            try:
+                preference = self.ltm.load_user(username).season_guide_preferences
+                enabled = preference.enabled_sources or None
+                primary = primary or preference.primary_source.strip()
+            except Exception:  # noqa: BLE001 - preferences are optional enrichment
+                enabled = None
+        ordered = list(dict.fromkeys(x.strip() for x in (enabled or []) if x.strip()))
+        if primary:
+            ordered = [primary, *[name for name in ordered if name != primary]]
+        return ordered
 
     async def _hot_signal_maps(self, subjects: list[SubjectBrief]) -> dict[int, HotSignals]:
         signals: dict[int, HotSignals] = {s.id: HotSignals() for s in subjects}
@@ -444,7 +502,7 @@ class SeasonGuideBriefTool(Tool):
     async def _verify_yuc_match(
         self, subject: SubjectBrief, yuc: YucAnime | None, confidence: float, matched_by: str
     ) -> tuple[float, str]:
-        if not yuc:
+        if not yuc or confidence >= 0.8:
             return confidence, matched_by
         for title in (yuc.title_jp, yuc.title_cn):
             if not title:
@@ -459,15 +517,23 @@ class SeasonGuideBriefTool(Tool):
         return confidence, matched_by
 
     async def _collect_guide_comment_digests(
-        self, guide_query: str, wanted: list[str], video_limit: int, comment_limit: int
+        self,
+        guide_query: str,
+        guide_links: list[GuideVideoLink],
+        video_limit: int,
+        comment_limit: int,
     ) -> list[GuideCommentDigest]:
-        search = await self._bili_search_tool.run(
-            BiliGuideSearchArgs(query=guide_query, tags=wanted[:5], whitelist_only=False, limit=max(video_limit, 3))
-        )
-        if not search.ok or not search.data:
-            return []
         digests: list[GuideCommentDigest] = []
-        videos = [video for video in search.data.videos if video.aid][: max(video_limit * 2, video_limit)]
+        videos = []
+        seen: set[str] = set()
+        for link in guide_links:
+            for video in link.verified_hits:
+                key = video.bvid or str(video.aid or video.url)
+                if not video.aid or key in seen:
+                    continue
+                seen.add(key)
+                videos.append(video)
+        videos = videos[:video_limit]
         comment_results = await gather_limited(
             [
                 self._bili_comments_tool.run(BiliVideoCommentsArgs(aid=video.aid, query=guide_query, limit=comment_limit))
@@ -497,6 +563,9 @@ class SeasonGuideBriefTool(Tool):
         return digests
 
     async def run(self, args: SeasonGuideBriefArgs) -> ToolResult[SeasonGuideBriefResult]:
+        phase = _season_phase(args.year, args.month)
+        mode = _effective_mode(args.mode, phase)
+        guide_preferences = self._guide_source_preferences(args)
         season, yuc_res = await asyncio.gather(
             self._season_tool._fetch_season(args.year, args.month, args.limit),
             self._yuc_tool.run(YucSeasonArgs(year=args.year, month=args.month, limit=80)),
@@ -504,7 +573,11 @@ class SeasonGuideBriefTool(Tool):
         yuc_items = yuc_res.data.anime if yuc_res.ok and yuc_res.data else []
         personalized, profile_tags = await self._profile_tags(args.username)
         wanted = list(dict.fromkeys((args.focus_tags or []) + profile_tags))
-        hot_signals = await self._hot_signal_maps(season.anime[: args.limit])
+        hot_signals = (
+            await self._hot_signal_maps(season.anime[: args.limit])
+            if mode != "preseason" else
+            {subject.id: HotSignals() for subject in season.anime[: args.limit]}
+        )
 
         async def build_item(subject: SubjectBrief) -> SeasonGuideItem:
             yuc, match_confidence, matched_by = _match_yuc(subject, yuc_items)
@@ -518,11 +591,22 @@ class SeasonGuideBriefTool(Tool):
                     bangumi_tags = []
             tags = _unique((yuc.tags if yuc else []) + bangumi_tags)
             fit, match_tags, reason, fit_score = _fit_item(tags, subject.score, wanted)
-            item_guides = _guide_links(subject.name_cn or subject.name, "review", 3, tags)
-            if args.verify_guide_videos and args.guide_verify_limit > 0:
-                item_guides = await verify_guide_video_links(
+            item_routes = _guide_links(
+                subject.name_cn or subject.name,
+                "review",
+                3,
+                tags,
+                preferred_sources=guide_preferences or None,
+            )
+            if (
+                args.verify_item_videos
+                and args.verify_guide_videos
+                and args.guide_verify_limit > 0
+                and mode != "preseason"
+            ):
+                item_routes = await verify_guide_video_links(
                     subject.name_cn or subject.name,
-                    item_guides,
+                    item_routes,
                     title_aliases=_unique([
                         subject.name_cn or "",
                         subject.name or "",
@@ -534,11 +618,12 @@ class SeasonGuideBriefTool(Tool):
                     max_hits_per_link=1,
                 )
             vertical_map: dict[str, SubjectVertical] = {}
-            for link in item_guides:
+            for link in item_routes:
                 for vertical in link.verticals:
                     old = vertical_map.get(vertical.name)
                     if old is None or vertical.confidence > old.confidence:
                         vertical_map[vertical.name] = vertical
+            item_guides = [link for link in item_routes if link.publication_status == "published"]
             hot = hot_signals.get(subject.id) or HotSignals()
             return SeasonGuideItem(
                 subject_id=subject.id,
@@ -582,52 +667,83 @@ class SeasonGuideBriefTool(Tool):
         item_results = await gather_limited([build_item(subject) for subject in season.anime[: args.limit]], host="bangumi")
         items = [item for item in item_results if isinstance(item, SeasonGuideItem)]
         dropped = len(item_results) - len(items)
-        if args.mode == "hot":
+        if mode == "hot":
             items.sort(key=lambda x: (-(x.hotness * 0.7 + min(x.fit_score / 8.0, 1.0) * 0.3), -x.hotness, -(x.bangumi_score or 0)))
             await self._enrich_pre_air_hype(items[:12])
+        elif mode == "preseason":
+            await self._enrich_pre_air_hype(items)
+            max_wish = max((item.pre_air_wish or 0 for item in items), default=0)
+
+            def preseason_score(item: SeasonGuideItem) -> float:
+                taste = min(item.fit_score / 8.0, 1.0)
+                hype = math.log1p(item.pre_air_wish or 0) / math.log1p(max_wish) if max_wish else 0.0
+                readiness = sum(bool(value) for value in (item.broadcast, item.studio, item.pv_url)) / 3.0
+                return 0.5 * taste + 0.3 * hype + 0.2 * readiness
+
+            items.sort(key=lambda x: (-preseason_score(x), -_fit_rank(x.fit), -(x.pre_air_wish or 0)))
         else:
             items.sort(key=lambda x: (-_fit_rank(x.fit), -x.fit_score, -x.hotness, -(x.bangumi_score or 0)))
 
         guide_query = f"{args.year}年{args.month}月 新番导视"
-        guide_comment_digests = (
-            await self._collect_guide_comment_digests(
-                guide_query, wanted, args.comment_video_limit, args.comment_limit
-            )
-            if args.include_video_comments
-            else []
+        season_guide_links = _guide_links(
+            guide_query,
+            "season",
+            8,
+            wanted,
+            preferred_sources=guide_preferences or None,
         )
-        season_guide_links = _guide_links(guide_query, "season", 6, wanted)
         if args.verify_guide_videos and args.guide_verify_limit > 0:
             season_guide_links = await verify_guide_video_links(
                 guide_query,
                 season_guide_links,
                 title_aliases=[guide_query, f"{args.year}年{args.month}月新番"],
                 tags=wanted,
-                max_links=min(3, args.guide_verify_limit + 1),
+                max_links=min(3, args.guide_verify_limit),
                 max_hits_per_link=1,
                 min_confidence=0.5,
+                verify_content=True,
+                content_verify_limit=min(3, args.guide_verify_limit),
             )
+        published_guides = [link for link in season_guide_links if link.publication_status == "published"]
+        pending_guides = [link for link in season_guide_links if link.publication_status != "published"]
+        guide_comment_digests = (
+            await self._collect_guide_comment_digests(
+                guide_query,
+                published_guides,
+                args.comment_video_limit,
+                args.comment_limit,
+            )
+            if args.include_video_comments
+            else []
+        )
         result = SeasonGuideBriefResult(
             season=season.season,
-            mode=args.mode,
+            mode=mode,
+            requested_mode=args.mode,
+            phase=phase,
             count=len(items),
             personalized=personalized,
             profile_tags=profile_tags,
             focus_tags=args.focus_tags or [],
             items=items,
-            guide_videos=season_guide_links,
+            guide_videos=published_guides,
+            pending_guide_sources=pending_guides,
+            guide_source_preferences=guide_preferences,
             guide_comment_digests=guide_comment_digests,
             notes=[
                 "Bangumi 提供条目/评分/收藏锚点，yuc 提供放送表/官网/PV/制作阵容。",
                 "本季分诊以 Bangumi 已收录且有播出日期的条目为骨架，yuc 仅补充放送/制作信息；Bangumi 未收录的番不会出现在分诊里，冷门或尚未收录的新番可能遗漏，可对照 yuc.wiki 原表。",
+                "默认只核验整季导视，不逐部搜索漫评；只有明确要求逐部视频时才开启，以兼顾准确率与等待时间。",
                 (
                     "B站导视评论已抽样读取；它们是话语源，不是事实源，且可能包含剧透/玩梗。"
                     if guide_comment_digests else
-                    "B站导视默认仅返回白名单 UP 搜索入口；需要观众期待/担心点时可启用 include_video_comments。"
+                    "季度导视只展示已经发布并通过季度/标题核验的具体视频；未发布、搜索不可用或正文不匹配的 UP 不参与排序。"
                 ),
                 (
                     "hot 模式已融合 Bangumi doing / trending / 分集讨论量；热度是追番参考，不等于质量。"
-                    if args.mode == "hot" else
+                    if mode == "hot" else
+                    "播前模式不使用尚不存在的分集热度，优先口味、播前期待和制作/PV资料完整度。"
+                    if mode == "preseason" else
                     "guide 模式优先口味分诊；热度字段仍会附带给前端作为徽章。"
                 ),
                 *(
@@ -645,5 +761,5 @@ class SeasonGuideBriefTool(Tool):
         return ToolResult(ok=True, data=result, sources=sources)
 
 
-def build_season_tools(client: BangumiClient) -> list[Tool]:
-    return [ListSeasonAnimeTool(client), ListYearAnimeTool(client), SeasonGuideBriefTool(client)]
+def build_season_tools(client: BangumiClient, ltm: LongTermMemory | None = None) -> list[Tool]:
+    return [ListSeasonAnimeTool(client), ListYearAnimeTool(client), SeasonGuideBriefTool(client, ltm)]

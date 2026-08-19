@@ -106,6 +106,56 @@ def test_product_surfaces_enforce_identity_and_inject_current_username(tmp_path,
         assert seen["library_username"] == "alice"
 
 
+def test_season_guide_preferences_are_validated_and_account_scoped(tmp_path, monkeypatch):
+    _configure_stores(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        anonymous = client.get("/product/season-guide/preferences")
+        assert anonymous.status_code == 200
+        assert anonymous.json()["authenticated"] is False
+        assert anonymous.json()["preferences"]["enabled_sources"] == []
+        anonymous_csrf = client.cookies.get(config.settings.csrf_cookie_name)
+        assert anonymous_csrf
+        assert client.put(
+            "/product/season-guide/preferences",
+            headers={"x-otomo-csrf": anonymous_csrf},
+            json={"enabled_sources": ["名作之壁吧"], "primary_source": "名作之壁吧"},
+        ).status_code == 401
+
+        _session_id, csrf = _login(client)
+        assert client.put(
+            "/product/season-guide/preferences",
+            json={"enabled_sources": ["名作之壁吧"], "primary_source": "名作之壁吧"},
+        ).status_code == 403
+        invalid = client.put(
+            "/product/season-guide/preferences",
+            headers={"x-otomo-csrf": csrf},
+            json={"enabled_sources": ["不存在的UP"], "primary_source": ""},
+        )
+        assert invalid.status_code == 422
+        saved = client.put(
+            "/product/season-guide/preferences",
+            headers={"x-otomo-csrf": csrf},
+            json={"enabled_sources": ["泛式", "名作之壁吧"], "primary_source": "名作之壁吧"},
+        )
+        assert saved.status_code == 200
+        assert saved.json()["preferences"]["enabled_sources"] == ["泛式", "名作之壁吧"]
+        assert client.get("/product/season-guide/preferences").json()["preferences"]["primary_source"] == "名作之壁吧"
+
+        client.cookies.clear()
+        bob_auth = client.get("/auth/session").json()
+        bob_session = client.cookies.get(config.settings.session_cookie_name)
+        assert bob_session
+        app.state.auth.save_token(BangumiToken(
+            auth_session_id=bob_session,
+            access_token="token-bob",
+            username="bob",
+        ))
+        bob_preferences = client.get("/product/season-guide/preferences").json()["preferences"]
+        assert bob_auth["csrf_token"]
+        assert bob_preferences["enabled_sources"] == []
+        assert bob_preferences["primary_source"] == ""
+
+
 def test_subject_surface_is_public_and_forwards_spoiler_and_release_flags(tmp_path, monkeypatch):
     _configure_stores(tmp_path, monkeypatch)
     seen: dict[str, object] = {}

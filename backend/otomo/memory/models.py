@@ -157,6 +157,14 @@ class UserAspectProfile(BaseModel):
     updated_at: str = ""
 
 
+class SeasonGuidePreferences(BaseModel):
+    """User-owned editorial source choices shared by Web, chat and Discord."""
+
+    enabled_sources: list[str] = Field(default_factory=list)
+    primary_source: str = ""
+    updated_at: str = ""
+
+
 class UserMemory(BaseModel):
     _store_revision: int = PrivateAttr(default=0)
     _store_baseline: dict[str, Any] = PrivateAttr(default_factory=dict)
@@ -169,6 +177,7 @@ class UserMemory(BaseModel):
     affinity_cache: dict[str, dict] = Field(default_factory=dict)
     profile_snapshot: dict = Field(default_factory=dict)
     aspect_profiles: dict[str, UserAspectProfile] = Field(default_factory=dict)
+    season_guide_preferences: SeasonGuidePreferences = Field(default_factory=SeasonGuidePreferences)
     pending_write_actions: list[PendingWriteAction] = Field(default_factory=list)
     decision_log: list[DecisionLogItem] = Field(default_factory=list)
     watch_plan: list[WatchPlanItem] = Field(default_factory=list)
@@ -187,6 +196,7 @@ class MemorySummary(BaseModel):
     recent_feedback: list[FeedbackItem] = Field(default_factory=list)
     profile_snapshot: dict = Field(default_factory=dict)
     aspect_profiles: dict[str, UserAspectProfile] = Field(default_factory=dict)
+    season_guide_preferences: SeasonGuidePreferences = Field(default_factory=SeasonGuidePreferences)
     pending_write_actions: list[PendingWriteAction] = Field(default_factory=list)
     recent_decisions: list[DecisionLogItem] = Field(default_factory=list)
     watch_plan: list[WatchPlanItem] = Field(default_factory=list)
@@ -209,6 +219,7 @@ def memory_summary(mem: UserMemory, feedback_limit: int = 8) -> MemorySummary:
         recent_feedback=recent_feedback,
         profile_snapshot=mem.profile_snapshot,
         aspect_profiles=dict(list(mem.aspect_profiles.items())[:8]),
+        season_guide_preferences=mem.season_guide_preferences,
         pending_write_actions=pending,
         recent_decisions=mem.decision_log[-10:],
         watch_plan=mem.watch_plan[-20:],
