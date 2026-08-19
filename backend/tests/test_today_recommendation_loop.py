@@ -24,7 +24,7 @@ from otomo.tools.calendar.tool import (
     BroadcastCalendarItem,
     BroadcastCalendarResult,
 )
-from otomo.tools.recommend.tool import _mmr_rerank
+from otomo.tools.recommend.tool import _mmr_rerank, _ranking_experiment
 
 
 def test_today_preferences_are_separate_and_reversible(tmp_path):
@@ -248,6 +248,49 @@ def test_online_evaluation_tracks_rank_support_performance_and_repeat(tmp_path):
     assert report["strategy_versions"] == {"acgn-media-v2": 2}
 
 
+def test_recommendation_diagnostics_and_experiment_segments_are_inspectable(tmp_path):
+    store = RecommendationEventStore(str(tmp_path / "events.sqlite3"))
+    request = {
+        "username": "alice",
+        "_experiment": {
+            "id": "recommendation-ranking-v1",
+            "variant": "personalized-evidence-v1",
+            "bucket": 7,
+        },
+        "_performance": {"total_ms": 900},
+        "_diagnostics": {
+            "candidate_count": 80,
+            "final_output_ids": [1],
+            "elimination_counts": {"episode_limit": 2},
+        },
+    }
+    set_id = store.create_set("alice", "anime", "tonight", request, [{
+        "id": 1,
+        "name": "A",
+        "score": 2.1,
+        "score_breakdown": {"affinity": 1.0, "quality": 1.1},
+        "claims": [{"kind": "fit", "text": "适合", "support": ["标签"]}],
+    }])
+    store.record("alice", RecommendationFeedbackRequest(
+        recommendation_set_id=set_id, subject_id=1, event="impression",
+    ))
+    store.record("alice", RecommendationFeedbackRequest(
+        recommendation_set_id=set_id, subject_id=1, event="more",
+    ))
+
+    batches = store.recent_batches()
+    detail = store.diagnostic_detail(set_id)
+    report = store.evaluation_report("alice", 30)["current"]
+
+    assert batches[0]["candidate_count"] == 80
+    assert batches[0]["accepted_items"] == 1
+    assert detail and detail["request"].get("username") is None
+    assert detail["items"][0]["score_breakdown"]["quality"] == 1.1
+    assert detail["items"][0]["latest_decision"]["event"] == "more"
+    assert report["experiments"][0]["variant"] == "personalized-evidence-v1"
+    assert report["experiments"][0]["acceptance_at_3"] == 1.0
+
+
 def test_cf_registry_reports_stale_and_missing_models(tmp_path):
     built = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
     (tmp_path / "i2i_anime.json").write_text(json.dumps({
@@ -286,6 +329,23 @@ def test_mmr_promotes_a_distinct_candidate():
     ]
     ranked = _mmr_rerank(candidates, lambda _sid, item: item["rank_score"], 0.35)
     assert [sid for sid, _item in ranked[:2]] == [1, 3]
+
+
+def test_ranking_experiment_assignment_is_stable_and_anonymous_stays_control(monkeypatch):
+    from otomo.config import settings
+
+    monkeypatch.setattr(settings, "recommendation_experiment_enabled", True)
+    monkeypatch.setattr(settings, "recommendation_experiment_salt", "stable-test-salt")
+    monkeypatch.setattr(settings, "recommendation_experiment_treatment_percent", 35)
+
+    first = _ranking_experiment("alice", "anime")
+    second = _ranking_experiment("alice", "anime")
+    anonymous = _ranking_experiment(None, "anime")
+
+    assert first == second
+    assert 0 <= first["bucket"] < 100
+    assert anonymous["variant"] == "control"
+    assert anonymous["enabled"] is False
 
 
 def test_today_cockpit_is_registered_as_the_shared_chat_entry():

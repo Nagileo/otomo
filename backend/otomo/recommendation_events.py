@@ -142,6 +142,126 @@ class RecommendationEventStore:
             "created_at": row["created_at"],
         }
 
+    @staticmethod
+    def _safe_json(value: str) -> dict[str, Any]:
+        try:
+            payload = json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def recent_batches(
+        self, limit: int = 30, *, username: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Compact batch index for owner history or the admin quality console."""
+        bounded_limit = min(max(int(limit), 1), 100)
+        owner_sql = "WHERE s.username=?" if username else ""
+        params: list[Any] = [username] if username else []
+        params.append(bounded_limit)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""SELECT s.id,s.username,s.subject_type,s.scenario,s.request_json,s.created_at,
+                            COUNT(DISTINCT i.subject_id) item_count,
+                            COUNT(DISTINCT CASE WHEN e.event='impression' THEN e.subject_id END) visible_items,
+                            COUNT(DISTINCT CASE WHEN e.event IN ('wishlist','started','more','watched')
+                              THEN e.subject_id END) accepted_items,
+                            COUNT(DISTINCT CASE WHEN e.event IN ('dismiss','less')
+                              THEN e.subject_id END) dismissed_items
+                     FROM recommendation_sets s
+                     LEFT JOIN recommendation_items i ON i.set_id=s.id
+                     LEFT JOIN recommendation_events e ON e.set_id=s.id
+                     {owner_sql}
+                     GROUP BY s.id ORDER BY s.created_at DESC LIMIT ?""",
+                params,
+            ).fetchall()
+            result: list[dict[str, Any]] = []
+            for row in rows:
+                preview_rows = conn.execute(
+                    "SELECT payload_json FROM recommendation_items WHERE set_id=? ORDER BY position LIMIT 4",
+                    (row["id"],),
+                ).fetchall()
+                request = self._safe_json(str(row["request_json"]))
+                performance = request.get("_performance") or {}
+                experiment = request.get("_experiment") or {}
+                diagnostics = request.get("_diagnostics") or {}
+                result.append({
+                    "id": str(row["id"]),
+                    "username": str(row["username"]),
+                    "subject_type": str(row["subject_type"]),
+                    "scenario": str(row["scenario"]),
+                    "created_at": str(row["created_at"]),
+                    "item_count": int(row["item_count"] or 0),
+                    "visible_items": int(row["visible_items"] or 0),
+                    "accepted_items": int(row["accepted_items"] or 0),
+                    "dismissed_items": int(row["dismissed_items"] or 0),
+                    "duration_ms": float(performance.get("total_ms") or 0),
+                    "strategy_version": str(
+                        (request.get("_strategy_metadata") or {}).get("version") or "legacy"
+                    ),
+                    "experiment": experiment,
+                    "candidate_count": int(diagnostics.get("candidate_count") or 0),
+                    "preview": [
+                        {
+                            "id": payload.get("id"),
+                            "name": payload.get("name") or "未知条目",
+                            "score": payload.get("score"),
+                        }
+                        for payload in (
+                            self._safe_json(str(preview["payload_json"])) for preview in preview_rows
+                        )
+                    ],
+                })
+        return result
+
+    def diagnostic_detail(
+        self, set_id: str, *, username: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Return one compact diagnostic batch; username constrains owner access when set."""
+        owner_sql = " AND username=?" if username else ""
+        params: list[Any] = [set_id]
+        if username:
+            params.append(username)
+        with self._connect() as conn:
+            row = conn.execute(
+                f"SELECT * FROM recommendation_sets WHERE id=?{owner_sql}", params,
+            ).fetchone()
+            if not row:
+                return None
+            items = conn.execute(
+                "SELECT subject_id,position,payload_json FROM recommendation_items "
+                "WHERE set_id=? ORDER BY position",
+                (set_id,),
+            ).fetchall()
+            events = conn.execute(
+                """SELECT id,subject_id,event,reason,aspect,note,created_at
+                   FROM recommendation_events WHERE set_id=? ORDER BY id""",
+                (set_id,),
+            ).fetchall()
+        request = self._safe_json(str(row["request_json"]))
+        request.pop("username", None)
+        event_payload = [dict(event) for event in events]
+        preference_events = {"wishlist", "started", "dismiss", "more", "less", "watched", "undo"}
+        latest: dict[int, dict[str, Any]] = {}
+        for event in event_payload:
+            if event["event"] in preference_events:
+                latest[int(event["subject_id"])] = event
+        payload_items: list[dict[str, Any]] = []
+        for item in items:
+            payload = self._safe_json(str(item["payload_json"]))
+            payload["position"] = int(item["position"])
+            payload["latest_decision"] = latest.get(int(item["subject_id"]))
+            payload_items.append(payload)
+        return {
+            "id": str(row["id"]),
+            "username": str(row["username"]),
+            "subject_type": str(row["subject_type"]),
+            "scenario": str(row["scenario"]),
+            "created_at": str(row["created_at"]),
+            "request": request,
+            "items": payload_items,
+            "events": event_payload,
+        }
+
     def item_payload(self, set_id: str, username: str, subject_id: int) -> dict[str, Any] | None:
         with self._connect() as conn:
             row = conn.execute(
@@ -436,6 +556,13 @@ class RecommendationEventStore:
                 "positions": {},
                 "impressions": set(),
                 "latest": {},
+                "duration_ms": 0.0,
+                "experiment_id": "legacy",
+                "experiment_variant": "control",
+                "total_cards": 0,
+                "supported_cards": 0,
+                "checked_claims": 0,
+                "supported_claims": 0,
             })
             subject_id = int(row["subject_id"])
             batch["positions"][subject_id] = int(row["position"])
@@ -453,6 +580,10 @@ class RecommendationEventStore:
             checked_claims += len(claims)
             supported_claims += sum(1 for claim in claims if claim.get("support"))
             supported_cards += int(card_supported)
+            batch["total_cards"] += 1
+            batch["supported_cards"] += int(card_supported)
+            batch["checked_claims"] += len(claims)
+            batch["supported_claims"] += sum(1 for claim in claims if claim.get("support"))
 
         for batch in batches.values():
             try:
@@ -462,11 +593,15 @@ class RecommendationEventStore:
             perf = request.get("_performance") or {}
             if float(perf.get("total_ms") or 0) > 0:
                 durations.append(float(perf["total_ms"]))
+                batch["duration_ms"] = float(perf["total_ms"])
             cache = perf.get("evidence_cache") or {}
             cache_hits += int(cache.get("hits") or 0)
             cache_misses += int(cache.get("misses") or 0)
             strategy = request.get("_strategy_metadata") or {}
             strategies[str(strategy.get("version") or "legacy")] += 1
+            experiment = request.get("_experiment") or {}
+            batch["experiment_id"] = str(experiment.get("id") or "legacy")
+            batch["experiment_variant"] = str(experiment.get("variant") or "control")
 
         preference_events = {"wishlist", "started", "dismiss", "more", "less", "watched", "undo"}
         for event in events:
@@ -523,6 +658,72 @@ class RecommendationEventStore:
         sorted_durations = sorted(durations)
         p95_index = max(0, math.ceil(len(sorted_durations) * 0.95) - 1)
         cache_total = cache_hits + cache_misses
+
+        def experiment_summary(group: list[dict[str, Any]]) -> dict[str, Any]:
+            group_visible_items = 0
+            group_accepted_items = 0
+            group_hits_at_3 = 0
+            group_rr: list[float] = []
+            group_ndcg: list[float] = []
+            group_durations = sorted(
+                float(batch["duration_ms"]) for batch in group if batch["duration_ms"] > 0
+            )
+            group_supported_claims = 0
+            group_checked_claims = 0
+            for batch in group:
+                accepted_positions = sorted(
+                    batch["positions"][subject_id]
+                    for subject_id, event in batch["latest"].items()
+                    if event in positive
+                    and subject_id in batch["positions"]
+                    and subject_id in batch["impressions"]
+                )
+                accepted_subjects = {
+                    subject_id for subject_id, event in batch["latest"].items()
+                    if event in positive and subject_id in batch["impressions"]
+                }
+                group_visible_items += len(batch["impressions"])
+                group_accepted_items += len(accepted_subjects)
+                group_hits_at_3 += int(any(position <= 3 for position in accepted_positions))
+                group_rr.append(1 / accepted_positions[0] if accepted_positions else 0.0)
+                if accepted_positions:
+                    dcg = sum(1 / math.log2(position + 1) for position in accepted_positions)
+                    ideal = sum(
+                        1 / math.log2(position + 1)
+                        for position in range(1, len(accepted_positions) + 1)
+                    )
+                    group_ndcg.append(dcg / ideal if ideal else 0.0)
+                else:
+                    group_ndcg.append(0.0)
+                group_checked_claims += int(batch["checked_claims"])
+                group_supported_claims += int(batch["supported_claims"])
+            group_size = len(group)
+            group_p95 = max(0, math.ceil(len(group_durations) * 0.95) - 1)
+            return {
+                "visible_sets": group_size,
+                "accepted_sets": sum(1 for value in group_rr if value > 0),
+                "acceptance_at_3": group_hits_at_3 / group_size if group_size else 0.0,
+                "mrr": sum(group_rr) / group_size if group_size else 0.0,
+                "ndcg": sum(group_ndcg) / group_size if group_size else 0.0,
+                "visible_items": group_visible_items,
+                "accepted_items": group_accepted_items,
+                "item_acceptance_rate": (
+                    group_accepted_items / group_visible_items if group_visible_items else 0.0
+                ),
+                "claim_support_coverage": (
+                    group_supported_claims / group_checked_claims if group_checked_claims else 0.0
+                ),
+                "average_ms": (
+                    sum(group_durations) / len(group_durations) if group_durations else 0.0
+                ),
+                "p95_ms": group_durations[group_p95] if group_durations else 0.0,
+            }
+
+        experiment_groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for batch in visible:
+            experiment_groups.setdefault(
+                (batch["experiment_id"], batch["experiment_variant"]), [],
+            ).append(batch)
         return {
             "sets": len(batches),
             "visible_sets": denominator,
@@ -558,6 +759,14 @@ class RecommendationEventStore:
                 "cache_hit_rate": cache_hits / cache_total if cache_total else 0.0,
             },
             "strategy_versions": dict(strategies),
+            "experiments": [
+                {
+                    "id": experiment_id,
+                    "variant": variant,
+                    **experiment_summary(group),
+                }
+                for (experiment_id, variant), group in sorted(experiment_groups.items())
+            ],
             "segments": [
                 {
                     **segment,

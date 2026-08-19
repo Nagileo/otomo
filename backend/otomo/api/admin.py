@@ -116,6 +116,24 @@ async def admin_overview(request: Request, days: int = 30) -> dict[str, Any]:
     }
 
 
+@router.get("/recommendations/batches")
+async def recommendation_batches(request: Request, limit: int = 30) -> dict[str, Any]:
+    _admin(request)
+    return {
+        "ok": True,
+        "batches": request.app.state.recommendation_event_store.recent_batches(limit),
+    }
+
+
+@router.get("/recommendations/batches/{set_id}")
+async def recommendation_batch_detail(set_id: str, request: Request) -> dict[str, Any]:
+    _admin(request)
+    batch = request.app.state.recommendation_event_store.diagnostic_detail(set_id)
+    if batch is None:
+        raise HTTPException(status_code=404, detail="推荐批次不存在或已过期")
+    return {"ok": True, "batch": batch}
+
+
 @router.post("/comments/{comment_id}/moderate")
 async def moderate_comment(
     comment_id: str, payload: CommentModerationRequest, request: Request,

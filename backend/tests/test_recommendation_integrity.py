@@ -75,6 +75,8 @@ async def test_series_entry_rebuilds_title_score_tags_and_evidence():
     assert item.external_mappings == []
     assert item.series_origin == "治愈续作"
     assert item.why_recalled == ["系列入口：由《治愈续作》回溯"]
+    assert item.score_breakdown
+    assert sum(item.score_breakdown.values()) == pytest.approx(item.score, abs=0.01)
     assert any(claim.kind == "provenance" for claim in item.claims)
     assert not any("8.8" in str(claim.model_dump()) for claim in item.claims)
 

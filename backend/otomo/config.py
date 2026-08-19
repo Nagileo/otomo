@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     recommendation_event_store_path: str = "cache/recommendation_events.sqlite3"
     recommendation_artifact_cache_path: str = "cache/recommendation_artifacts.sqlite3"
     recommendation_review_cache_ttl: float = 60 * 60 * 24 * 7
+    # 推荐排序实验按“用户 + 媒介”稳定分桶；关闭时所有请求都走 control。
+    recommendation_experiment_enabled: bool = True
+    recommendation_experiment_salt: str = "otomo-ranking-v1"
+    recommendation_experiment_treatment_percent: int = 20
     workspace_store_path: str = "cache/workspace.sqlite3"
     community_store_path: str = "cache/community.sqlite3"
     community_admin_usernames: str = ""

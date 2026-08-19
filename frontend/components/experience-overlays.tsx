@@ -181,7 +181,10 @@ function PlusIcon() { return <span aria-hidden="true">+</span>; }
 
 export function TaskCenter() {
   const exp = useExperience();
+  const router = useRouter();
   const [clock, setClock] = useState(() => Date.now());
+  const [retrying, setRetrying] = useState("");
+  const [retryError, setRetryError] = useState<{ id: string; text: string } | null>(null);
   useEffect(() => {
     const timer = window.setTimeout(() => setClock(Date.now()), 1_500);
     return () => window.clearTimeout(timer);
@@ -191,8 +194,21 @@ export function TaskCenter() {
     if (task.status !== "running") return true;
     return clock - new Date(task.startedAt).getTime() >= 1_400;
   }).slice(0, 3);
+  async function retry(task: (typeof exp.tasks)[number]) {
+    if (!task.retryable || !task.kind || !task.runId) return;
+    setRetrying(task.id); setRetryError(null);
+    try {
+      const payload = await productFetch(`/tasks/${task.kind}/${encodeURIComponent(task.runId)}/retry`);
+      const key = task.kind === "chat" ? "otomo:retry:chat" : "otomo:retry:recommendation";
+      window.sessionStorage.setItem(key, JSON.stringify(payload.request || {}));
+      exp.dismissTask(task.id);
+      router.push(String(payload.href || task.href));
+    } catch (cause) {
+      setRetryError({ id: task.id, text: cause instanceof Error ? cause.message : String(cause) });
+    } finally { setRetrying(""); }
+  }
   if (!active.length) return null;
-  return <aside className="task-center" aria-label="任务提示">{active.map((task) => <div className={task.status} key={task.id}>{task.status === "running" ? <LoaderCircle className="spin" size={15} /> : task.status === "interrupted" ? <RefreshCw size={15} /> : <X size={15} />}<button onClick={() => window.dispatchEvent(new CustomEvent("otomo:navigate", { detail: { href: task.href } }))}><strong>{task.label}</strong><small>{task.status === "running" ? (task.server ? "服务器仍在后台处理，可离开页面" : "正在处理…") : task.status === "interrupted" ? (task.error || "任务已中断，点击返回查看") : task.error || "执行失败，请稍后重试"}</small></button><button className="icon-plain task-dismiss" onClick={() => exp.dismissTask(task.id)} title="关闭这条提示" aria-label={`关闭“${task.label}”提示`}><X size={14} /></button></div>)}</aside>;
+  return <aside className="task-center" aria-label="任务提示">{active.map((task) => <div className={`${task.status}${task.retryable ? " retryable" : ""}`} key={task.id}>{task.status === "running" ? <LoaderCircle className="spin" size={15} /> : task.status === "interrupted" ? <RefreshCw size={15} /> : <X size={15} />}<button onClick={() => window.dispatchEvent(new CustomEvent("otomo:navigate", { detail: { href: task.href } }))}><strong>{task.label}</strong><small>{retryError?.id === task.id ? retryError.text : task.status === "running" ? (task.server ? "服务器仍在后台处理，可离开页面" : "正在处理…") : task.retryable ? "任务没有完成，可以从原请求重新开始" : task.status === "interrupted" ? (task.error || "任务已中断，点击返回查看") : task.error || "执行失败，请稍后重试"}</small></button>{task.retryable ? <button className="task-retry" disabled={Boolean(retrying)} onClick={() => void retry(task)}>{retrying === task.id ? <LoaderCircle className="spin" size={13} /> : <RefreshCw size={13} />}重试</button> : null}<button className="icon-plain task-dismiss" onClick={() => exp.dismissTask(task.id)} title="关闭这条提示" aria-label={`关闭“${task.label}”提示`}><X size={14} /></button></div>)}</aside>;
 }
 
 export function ExperienceOverlays() {

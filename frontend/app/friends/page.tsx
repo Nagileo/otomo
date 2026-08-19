@@ -49,19 +49,21 @@ export default function FriendsPage() {
   const [importCandidates, setImportCandidates] = useState<FriendCandidate[] | null>(null);
   const [importSearch, setImportSearch] = useState("");
   const [selectedImports, setSelectedImports] = useState<Set<string>>(new Set());
+  const [selectedOnly, setSelectedOnly] = useState(false);
 
   useEffect(() => {
     if (exp.authReady && exp.authenticated) void loadFriends();
   }, [exp.authReady, exp.authenticated]);
 
   useEffect(() => {
-    if (!importOpen) return;
+    if (!importOpen && !detail) return;
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape" && busy !== "import") closeImportPicker();
+      if (event.key === "Escape" && detail) setDetail(null);
     };
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [importOpen, busy]);
+  }, [importOpen, detail, busy]);
 
   async function loadFriends() {
     setError("");
@@ -86,7 +88,7 @@ export default function FriendsPage() {
   }
 
   async function openImportPicker() {
-    setImportOpen(true); setImportCandidates(null); setSelectedImports(new Set()); setImportSearch("");
+    setImportOpen(true); setImportCandidates(null); setSelectedImports(new Set()); setImportSearch(""); setSelectedOnly(false);
     setBusy("import-preview"); setError(""); setImportError(""); setNotice("");
     try {
       const payload = await productFetch("/workspace/friends/import", {
@@ -100,7 +102,7 @@ export default function FriendsPage() {
   function closeImportPicker() {
     if (busy === "import") return;
     setImportOpen(false); setImportCandidates(null); setSelectedImports(new Set());
-    setImportSearch(""); setImportError("");
+    setImportSearch(""); setImportError(""); setSelectedOnly(false);
   }
 
   async function importSelectedFriends() {
@@ -179,10 +181,13 @@ export default function FriendsPage() {
   }
 
   const importQuery = importSearch.trim().toLowerCase();
-  const visibleCandidates = (importCandidates || []).filter((friend) => !importQuery
+  const visibleCandidates = (importCandidates || []).filter((friend) => (
+    !selectedOnly || selectedImports.has(friend.username)
+  ) && (!importQuery
     || friend.username.toLowerCase().includes(importQuery)
-    || (friend.nickname || "").toLowerCase().includes(importQuery));
+    || (friend.nickname || "").toLowerCase().includes(importQuery)));
   const selectableVisible = visibleCandidates.filter((friend) => !friend.saved);
+  const availableCount = (importCandidates || []).filter((friend) => !friend.saved).length;
 
   return (
     <main className="page-frame friends-page">
@@ -209,8 +214,6 @@ export default function FriendsPage() {
           {friends.length ? <div className="friend-chips">{friends.map((friend) => <article key={friend.username}>{friend.avatar_url ? <img className="friend-avatar" src={friend.avatar_url} alt="" /> : <span className="friend-avatar">{(friend.nickname || friend.username).slice(0, 1).toUpperCase()}</span>}<span><strong>{friend.nickname || `@${friend.username}`}</strong>{friend.nickname ? <small>@{friend.username}</small> : <small>Bangumi 用户</small>}</span><button className="icon-plain" onClick={() => void loadFriendDetail(friend.username)} title="查看公开追番">{busy === `detail:${friend.username}` ? <LoaderCircle className="spin" size={14} /> : <Eye size={14} />}</button><a className="icon-plain" href={`https://bgm.tv/user/${friend.username}`} target="_blank" rel="noreferrer" title="打开 Bangumi"><ExternalLink size={14} /></a><button className="icon-plain" onClick={() => void removeFriend(friend.username)} title="移出名单"><Trash2 size={14} /></button></article>)}</div> : <div className="friend-empty"><Users size={24} /><strong>还没有关注好友</strong><span>添加用户名，或从 Bangumi 好友候选中勾选你真正关心的人。</span></div>}
         </section>
 
-        {detail ? <FriendDetailPanel data={detail} /> : null}
-
         {friends.length ? <section className="workspace-section">
           <div className="section-heading"><div><span className="section-kicker">PULSE</span><h2>好友都在看什么</h2></div><div className="filter-row"><nav className="media-switch">{media.map(([value, label]) => <button key={value} className={subjectType === value ? "active" : ""} onClick={() => { setSubjectType(value); setData(null); setDetail(null); }}>{label}</button>)}</nav><button className="button-primary" onClick={() => void analyze()} disabled={Boolean(busy)}>{busy === "analyze" ? <LoaderCircle className="spin" size={16} /> : <HeartHandshake size={16} />}生成好友圈视图</button></div></div>
           {!data ? <div className="feature-empty compact"><HeartHandshake size={22} /><strong>名单已经准备好</strong><span>生成后会读取好友的公开收藏，聚合在追、想看、圈内高分和同步率。</span></div> : <FriendsDashboard data={data} />}
@@ -227,9 +230,10 @@ export default function FriendsPage() {
               {importCandidates ? <>
                 <div className="friend-import-toolbar">
                   <label><Search size={15} /><input autoFocus value={importSearch} onChange={(event) => setImportSearch(event.target.value)} placeholder="搜索昵称或用户名" /></label>
-                  <span>已选 <strong>{selectedImports.size}</strong> 位</span>
-                  <button className="button-secondary compact" disabled={!selectableVisible.length || Boolean(busy)} onClick={() => setSelectedImports((current) => new Set([...current, ...selectableVisible.map((friend) => friend.username)]))}>选择当前结果</button>
-                  <button className="button-secondary compact" disabled={!selectedImports.size || Boolean(busy)} onClick={() => setSelectedImports(new Set())}>清空选择</button>
+                  <span>可选 {availableCount} · 已选 <strong>{selectedImports.size}</strong></span>
+                  <button className={`button-secondary compact${selectedOnly ? " active" : ""}`} disabled={(!selectedImports.size && !selectedOnly) || Boolean(busy)} onClick={() => setSelectedOnly((value) => !value)}>{selectedOnly ? "查看全部" : "只看已选"}</button>
+                  <button className="button-secondary compact" disabled={!selectableVisible.length || Boolean(busy)} onClick={() => { const visibleNames = selectableVisible.map((friend) => friend.username); const allSelected = visibleNames.every((name) => selectedImports.has(name)); setSelectedImports((current) => { const next = new Set(current); for (const name of visibleNames) { if (allSelected) next.delete(name); else next.add(name); } return next; }); }}>{selectableVisible.length && selectableVisible.every((friend) => selectedImports.has(friend.username)) ? "取消当前结果" : "选择当前结果"}</button>
+                  <button className="button-secondary compact" disabled={!selectedImports.size || Boolean(busy)} onClick={() => { setSelectedImports(new Set()); setSelectedOnly(false); }}>清空选择</button>
                 </div>
                 {visibleCandidates.length ? <div className="friend-candidate-grid">
                   {visibleCandidates.map((friend) => {
@@ -247,6 +251,7 @@ export default function FriendsPage() {
             </div>
           </section>
         </div> : null}
+        {detail ? <div className="global-overlay friend-detail-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setDetail(null); }}><section className="global-modal wide friend-detail-modal" role="dialog" aria-modal="true" aria-labelledby="friend-detail-title"><header className="global-modal-head"><div><strong id="friend-detail-title">{detail.friend.nickname || `@${detail.friend.username}`} 的公开收藏</strong><span>@{detail.friend.username} · {detail.total_public} 项公开记录</span></div><button className="icon-plain" onClick={() => setDetail(null)} title="关闭好友详情"><X size={18} /></button></header><FriendDetailPanel data={detail} onRemove={(name) => void removeFriend(name)} /></section></div> : null}
       </> : null}
     </main>
   );
@@ -259,12 +264,12 @@ function readableError(action: string, error: unknown) {
   return detail ? `${action}失败：${detail}` : `${action}失败，请稍后重试。`;
 }
 
-function FriendDetailPanel({ data }: { data: FriendDetail }) {
+function FriendDetailPanel({ data, onRemove }: { data: FriendDetail; onRemove: (name: string) => void }) {
   const rows: [string, FriendCollectionItem[]][] = [
     ["正在追", data.watching], ["想看", data.wishlist], ["最近更新", data.recent],
   ];
-  return <section className="friend-detail workspace-section">
-    <div className="section-heading"><div><span className="section-kicker">PUBLIC COLLECTION</span><h2>{data.friend.nickname || `@${data.friend.username}`} 的公开收藏</h2><p>@{data.friend.username} · {data.total_public} 项公开记录</p></div><a className="button-secondary icon-label" href={`https://bgm.tv/user/${data.friend.username}`} target="_blank" rel="noreferrer"><ExternalLink size={15} />Bangumi 主页</a></div>
+  return <section className="friend-detail">
+    <div className="friend-detail-actions"><span>以下只读取该好友在 Bangumi 公开展示的收藏。</span><div><a className="button-secondary icon-label" href={`https://bgm.tv/user/${data.friend.username}`} target="_blank" rel="noreferrer"><ExternalLink size={15} />Bangumi 主页</a><button className="button-secondary danger" onClick={() => onRemove(data.friend.username)}><Trash2 size={15} />移出关注名单</button></div></div>
     <div className="friend-detail-grid">{rows.map(([title, items]) => <section key={title}><header><h3>{title}</h3><span>{items.length}</span></header>{items.length ? <div>{items.slice(0, title === "最近更新" ? 12 : 20).map((item) => <Link className="friend-detail-item" href={`/subject/${item.subject_id}`} key={`${title}-${item.subject_id}`}>{item.image ? <img src={item.image} alt="" /> : <span className="friend-cover" />}<span><strong>{item.name}</strong><small>{item.eps ? `进度 ${item.ep_status || 0}/${item.eps}` : item.ep_status ? `进度 ${item.ep_status}` : "未记录进度"}{item.rate ? ` · ${item.rate} 分` : ""}</small></span></Link>)}</div> : <div className="friend-board-empty">没有公开记录</div>}</section>)}</div>
   </section>;
 }

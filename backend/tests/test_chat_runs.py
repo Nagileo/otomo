@@ -91,3 +91,41 @@ def test_chat_run_restart_recovers_events_and_marks_running_as_interrupted(tmp_p
         assert [item.event for item in events if item is not None] == ["answer_delta", "interrupted"]
 
     asyncio.run(scenario())
+
+
+def test_retry_payload_is_owner_scoped_and_never_leaks_from_recent_rows(tmp_path):
+    async def scenario():
+        path = str(tmp_path / "runs.sqlite3")
+        hub = ChatRunHub(path)
+
+        async def worker(_run):
+            raise RuntimeError("temporary failure")
+
+        run = await hub.start(
+            "r-retry",
+            "user:alice",
+            "s1",
+            "device-a",
+            worker,
+            request_payload={"message": "private question", "runner": "adaptive"},
+        )
+        assert run.task is not None
+        await run.task
+        assert run.status == "failed"
+        rows = await hub.recent("user:alice")
+        assert rows[0]["retryable"] is True
+        assert "request_json" not in rows[0]
+        assert "private question" not in str(rows[0])
+        assert await hub.retry_payload("user:bob", run.id) is None
+        assert await hub.retry_payload("user:alice", run.id) == {
+            "message": "private question",
+            "runner": "adaptive",
+        }
+
+        restored = ChatRunHub(path)
+        assert await restored.retry_payload("user:alice", run.id) == {
+            "message": "private question",
+            "runner": "adaptive",
+        }
+
+    asyncio.run(scenario())

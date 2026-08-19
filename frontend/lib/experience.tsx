@@ -24,6 +24,7 @@ export type CompareItem = { id: number; name: string; image?: string; type?: str
 export type TaskRecord = {
   id: string; label: string; href: string; status: "running" | "success" | "error" | "interrupted";
   startedAt: string; updatedAt: string; error?: string; server?: boolean;
+  retryable?: boolean; kind?: "chat" | "recommendation"; runId?: string;
 };
 
 const DEFAULT_APPEARANCE: Appearance = {
@@ -225,6 +226,9 @@ export function ExperienceProvider({ children }: { children: ReactNode }) {
             label: String(row.label || "后台任务"), href: String(row.href || "/"),
             status, startedAt, updatedAt, server: true,
             error: String(row.error || (rawStatus === "cancelled" ? "任务已取消" : "")),
+            retryable: Boolean(row.retryable),
+            kind: row.kind === "recommendation" ? "recommendation" : "chat",
+            runId: String(row.id || ""),
           };
           return keepRecentTask(task, now) ? [task] : [];
         });

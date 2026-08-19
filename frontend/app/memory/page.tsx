@@ -1,7 +1,8 @@
 "use client";
 
 import {
-  Brain, Download, LoaderCircle, Plus, RotateCcw, Save, ShieldCheck, Trash2,
+  AlertTriangle, Brain, Download, ExternalLink, LoaderCircle, Plus, RotateCcw,
+  Save, ShieldCheck, Trash2,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
@@ -20,6 +21,7 @@ type MemoryData = {
   feedback: Row[];
   aspect_profiles: Record<string, Row>;
   counts: { explicit: number; derived: number; profile: number; progress: number };
+  conflicts: { like: string; dislike: string; message: string }[];
   updated_at: string;
 };
 
@@ -128,7 +130,7 @@ export default function MemoryPage() {
         <header><div><h2>{title}</h2><p>这些内容会直接参与推荐排序与回答措辞。</p></div><button className="button-quiet danger" onClick={() => void clear(kind, `清空${title}`)} disabled={!rows.length || saving}><Trash2 size={15} />清空</button></header>
         <div className="memory-add"><input value={draft} maxLength={120} onChange={(event) => setDraft(event.target.value)} placeholder={`添加一条${title}`} /><button className="button-secondary" disabled={!draft.trim() || saving} onClick={() => { const item = { value: draft.trim(), source: "explicit_user", confidence: 1, ts: new Date().toISOString() }; void save({ [kind]: [...rows, item] }, `${title}已添加`); setDraft(""); }}><Plus size={15} />添加</button></div>
         <div className="memory-list">
-          {rows.map((item, index) => <div className="memory-row" key={`${item.value}-${index}`}><div><input aria-label={`${title}内容`} value={item.value} onChange={(event) => setData({ ...memory, [kind]: rows.map((row, i) => i === index ? { ...row, value: event.target.value, source: "explicit_user", confidence: 1 } : row) })} /><small>{sourceLabel(item.source)} · 置信度 {Math.round((item.confidence || 0) * 100)}%</small></div><button className="icon-plain" title="删除" onClick={() => void save({ [kind]: rows.filter((_, i) => i !== index) })}><Trash2 size={15} /></button></div>)}
+          {rows.map((item, index) => <div className="memory-row" key={`${item.value}-${index}`}><div><input aria-label={`${title}内容`} value={item.value} onChange={(event) => setData({ ...memory, [kind]: rows.map((row, i) => i === index ? { ...row, value: event.target.value, source: "explicit_user", confidence: 1 } : row) })} /><small>{item.provenance?.label || sourceLabel(item.source)} · {item.freshness || "时间未知"} · 置信度 {Math.round((item.confidence || 0) * 100)}%{item.stale ? " · 建议确认是否仍适用" : ""}</small><details className="memory-provenance"><summary>来源与影响</summary><p>{item.provenance?.detail || "来源信息不完整"}</p><span>{item.provenance?.impact}</span>{item.provenance?.href ? <a href={item.provenance.href} target={item.provenance.href.startsWith("http") ? "_blank" : undefined} rel="noreferrer">查看来源<ExternalLink size={12} /></a> : null}</details></div><button className="icon-plain" title="删除" onClick={() => void save({ [kind]: rows.filter((_, i) => i !== index) })}><Trash2 size={15} /></button></div>)}
           {!rows.length ? <div className="feature-empty">还没有这类记忆。你可以在这里添加，也可以在对话中直接告诉 Otomo。</div> : null}
         </div>
         {rows.length ? <button className="button-secondary memory-save" disabled={saving} onClick={() => void save({ [kind]: rows })}><Save size={15} />保存编辑</button> : null}
@@ -146,6 +148,7 @@ export default function MemoryPage() {
         <div className="memory-actions"><button className="button-secondary" onClick={() => void exportMemory()}><Download size={15} />导出 JSON</button><button className="button-secondary" onClick={() => void load()}><RotateCcw size={15} />重新读取</button></div>
       </div>
       {notice ? <div className="inline-notice memory-notice">{notice}</div> : null}
+      {data.conflicts?.length ? <section className="memory-conflicts"><AlertTriangle size={18} /><div><strong>发现 {data.conflicts.length} 组互相冲突的偏好</strong>{data.conflicts.map((item, index) => <p key={`${item.like}-${item.dislike}-${index}`}>喜欢“{item.like}” / 不喜欢“{item.dislike}” · {item.message}</p>)}</div></section> : null}
       <div className="memory-grid">
         {preferenceSection("likes", "喜欢", newLike, setNewLike)}
         {preferenceSection("dislikes", "不喜欢", newDislike, setNewDislike)}
@@ -154,7 +157,7 @@ export default function MemoryPage() {
         <header><div><h2>防剧透与观看进度</h2><p>默认防剧透级别是长期偏好；每次对话仍可以临时覆盖。</p></div></header>
         <label className="memory-spoiler"><span>默认防剧透</span><select value={data.spoiler_default} onChange={(event) => void save({ spoiler_default: event.target.value as MemoryData["spoiler_default"] })}><option value="none">不剧透</option><option value="mild">轻微剧透</option><option value="full">允许完整剧情</option></select></label>
         <div className="memory-progress-grid">
-          {Object.entries(data.progress).map(([name, item]) => <label className="memory-progress" key={name}><span><strong>{name}</strong><small>{sourceLabel(item.source)}</small></span><input type="number" min={0} value={item.episode || 0} onChange={(event) => setData({ ...data, progress: { ...data.progress, [name]: { ...item, episode: Number(event.target.value), source: "explicit_user", confidence: 1 } } })} /><button className="icon-plain" title="删除进度" onClick={(event) => { event.preventDefault(); const progress = { ...data.progress }; delete progress[name]; void save({ progress }); }}><Trash2 size={15} /></button></label>)}
+          {Object.entries(data.progress).map(([name, item]) => <label className="memory-progress" key={name}><span><strong>{name}</strong><small title={item.provenance?.impact}>{item.provenance?.label || sourceLabel(item.source)} · {item.freshness || "时间未知"}</small></span><input type="number" min={0} value={item.episode || 0} onChange={(event) => setData({ ...data, progress: { ...data.progress, [name]: { ...item, episode: Number(event.target.value), source: "explicit_user", confidence: 1 } } })} /><button className="icon-plain" title="删除进度" onClick={(event) => { event.preventDefault(); const progress = { ...data.progress }; delete progress[name]; void save({ progress }); }}><Trash2 size={15} /></button></label>)}
           {!Object.keys(data.progress).length ? <div className="feature-empty">暂无由对话记住的观看进度。Bangumi 收藏仍会在需要时实时读取。</div> : null}
         </div>
         {Object.keys(data.progress).length ? <button className="button-secondary memory-save" onClick={() => void save({ progress: data.progress })}><Save size={15} />保存进度</button> : null}
@@ -162,8 +165,8 @@ export default function MemoryPage() {
       <section className="memory-section derived">
         <header><div><h2>系统推导与反馈</h2><p>这部分不是你直接说出的事实，而是从“更多/更少/不感兴趣”等反馈提炼出的弱信号。</p></div><button className="button-quiet danger" disabled={saving || (!aspects.length && !data.feedback.length)} onClick={() => void clear("derived", "清除所有推导记忆")}><Trash2 size={15} />清除推导</button></header>
         <div className="memory-derived-note"><ShieldCheck size={18} /><span>推导信号置信度较低，不会覆盖你明确写下的偏好。发现不准时可以整批清除。</span></div>
-        <div className="memory-aspects">{aspects.flatMap(([media, profile]) => [...(profile.likes || []), ...(profile.dislikes || [])].map((item: Row, index: number) => <span key={`${media}-${item.aspect}-${index}`} className={item.polarity === "dislike" ? "negative" : "positive"}>{item.label || item.aspect}<small>{media} · {Math.round((item.confidence || 0) * 100)}%</small></span>))}</div>
-        <details className="memory-feedback"><summary>查看 {data.feedback.length} 条推荐反馈</summary><div>{data.feedback.slice().reverse().map((item, index) => <p key={`${item.subject_id}-${index}`}><strong>{item.name || `条目 ${item.subject_id || ""}`}</strong><span>{item.signal} · {item.scope} · {sourceLabel(item.source)}</span>{item.note ? <small>{item.note}</small> : null}</p>)}</div></details>
+        <div className="memory-aspects">{aspects.flatMap(([media, profile]) => [...(profile.likes || []), ...(profile.dislikes || [])].map((item: Row, index: number) => <span title={profile.provenance?.detail} key={`${media}-${item.aspect}-${index}`} className={item.polarity === "dislike" ? "negative" : "positive"}>{item.label || item.aspect}<small>{media} · {Math.round((item.confidence || 0) * 100)}% · 评价维度画像</small></span>))}</div>
+        <details className="memory-feedback"><summary>查看 {data.feedback.length} 条推荐反馈</summary><div>{data.feedback.slice().reverse().map((item, index) => <p key={`${item.subject_id}-${index}`}><strong>{item.name || `条目 ${item.subject_id || ""}`}</strong><span>{item.signal} · {item.scope} · {item.provenance?.label || sourceLabel(item.source)}</span><small>{item.provenance?.detail || item.note}</small>{item.provenance?.href ? <a href={item.provenance.href}>回到对应条目<ExternalLink size={12} /></a> : null}</p>)}</div></details>
       </section>
       <section className="memory-danger-zone"><Brain size={20} /><div><strong>重置个性化记忆</strong><span>清除偏好、进度、反馈、画像缓存和推导结果；不会删除收藏、订阅、清单或通知。</span></div><button className="button-secondary danger" disabled={saving} onClick={() => void clear("all", "重置个性化记忆")}><Trash2 size={15} />全部重置</button></section>
     </main>

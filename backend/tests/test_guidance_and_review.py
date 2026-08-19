@@ -36,6 +36,7 @@ from otomo.tools.videos.tool import (
     SummarizeBiliVideoContentTool,
     _clean_bili_title,
     _guide_links,
+    _match_video_transcript,
     _parse_bili_video_ref,
     _summarize_aspect_opinions,
 )
@@ -356,8 +357,24 @@ async def test_bili_balanced_search_accepts_verified_non_whitelist(monkeypatch):
         return {"data": {"aid": aid, "bvid": bvid, "title": title,
                          "owner": {"name": author}, "stat": {"view": 1000}}}
 
+    async def fake_subtitles(_self, args):
+        return ToolResult(
+            ok=True,
+            data=BiliVideoSubtitleResult(
+                aid=args.aid,
+                bvid=args.bvid,
+                count=3,
+                segments=[
+                    BiliSubtitleSegment(text="今天完整聊聊孤独摇滚"),
+                    BiliSubtitleSegment(text="孤独摇滚的角色塑造很扎实"),
+                    BiliSubtitleSegment(text="最后再说它的演出表现"),
+                ],
+            ),
+        )
+
     monkeypatch.setattr(videos, "_bili_search_async", fake_search)
     monkeypatch.setattr(videos, "_sync_bili_view", fake_view)
+    monkeypatch.setattr(videos.GetBiliVideoSubtitlesTool, "run", fake_subtitles)
     result = await videos.SearchBiliGuideVideosTool().run(
         videos.BiliGuideSearchArgs(query="孤独摇滚", limit=5),
     )
@@ -365,7 +382,42 @@ async def test_bili_balanced_search_accepts_verified_non_whitelist(monkeypatch):
     assert result.ok and result.data
     assert [item.author for item in result.data.videos] == ["新锐漫评"]
     assert result.data.videos[0].verified is True
+    assert result.data.videos[0].content_verified is True
     assert any(item.author == "泛式" for item in result.data.rejected)
+
+
+def test_bili_transcript_match_rejects_title_bait_and_passing_mentions():
+    title_bait = _match_video_transcript(
+        "孤独摇滚",
+        "孤独摇滚 深度解析",
+        [BiliSubtitleSegment(text="今天我们只聊另一部动画")],
+        source="subtitle",
+    )
+    passing = _match_video_transcript(
+        "孤独摇滚",
+        "十部乐队动画盘点",
+        [
+            BiliSubtitleSegment(text="第一部是轻音少女"),
+            BiliSubtitleSegment(text="孤独摇滚也值得一提"),
+            BiliSubtitleSegment(text="接下来聊 BanG Dream"),
+        ],
+        source="subtitle",
+    )
+    focused = _match_video_transcript(
+        "孤独摇滚",
+        "孤独摇滚 深度解析",
+        [
+            BiliSubtitleSegment(text="今天聊孤独摇滚"),
+            BiliSubtitleSegment(text="孤独摇滚的社恐表达"),
+            BiliSubtitleSegment(text="孤独摇滚的演出设计"),
+        ],
+        source="subtitle",
+    )
+
+    assert title_bait.confidence < 0.52
+    assert passing.confidence < 0.52
+    assert focused.verified is True
+    assert focused.mentions == 3
 
 
 def test_asr_worker_only_accepts_bilibili_video_urls():

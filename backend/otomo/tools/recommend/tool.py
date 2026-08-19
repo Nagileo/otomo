@@ -14,6 +14,8 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
+import hashlib
 import re
 import time
 from pathlib import Path
@@ -23,6 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ...agent._common import emit_tool_progress
 from ...agent.contracts import Citation, Tool, ToolResult
+from ...config import settings
 from ...memory import LongTermMemory
 from ...memory.models import UserAspectProfile
 from ...recommendation_cache import RecommendationArtifactCache
@@ -116,6 +119,28 @@ _MEDIA_POLICIES: dict[str, dict[str, Any]] = {
         "summary": "三次元作品以题材、主创和社区口碑为主，协同模型只作弱信号。",
     },
 }
+
+_RANKING_EXPERIMENT_ID = "recommendation-ranking-v1"
+_RANKING_TREATMENT = "personalized-evidence-v1"
+
+
+def _ranking_experiment(username: str | None, subject_type: str) -> dict[str, Any]:
+    """Return a deterministic experiment assignment without storing identifiers externally."""
+    identity = username or "anonymous"
+    digest = hashlib.sha256(
+        f"{settings.recommendation_experiment_salt}:{identity}:{subject_type}".encode("utf-8")
+    ).digest()
+    bucket = int.from_bytes(digest[:4], "big") % 100
+    treatment_percent = min(
+        max(int(settings.recommendation_experiment_treatment_percent), 0), 100,
+    )
+    enabled = bool(settings.recommendation_experiment_enabled and username)
+    return {
+        "id": _RANKING_EXPERIMENT_ID,
+        "variant": _RANKING_TREATMENT if enabled and bucket < treatment_percent else "control",
+        "bucket": bucket,
+        "enabled": enabled,
+    }
 
 _MOOD_TAG_MAP: dict[str, list[str]] = {
     "不费脑": ["日常", "治愈", "轻松"], "轻松": ["日常", "治愈", "搞笑"],
@@ -545,6 +570,7 @@ class RecItem(BaseModel):
     id: int
     name: str
     score: float
+    score_breakdown: dict[str, float] = Field(default_factory=dict)
     reasons: list[str]
     why_recalled: list[str] = Field(default_factory=list)
     recall_signals: list[str] = Field(default_factory=list)
@@ -1007,7 +1033,6 @@ class RecommendTool(Tool):
             phase_started = now
 
         stype = SUBJECT_TYPE[args.subject_type]
-        media_policy = _MEDIA_POLICIES[args.subject_type]
         await emit_tool_progress(tool=self.name, summary="解析推荐目标与用户身份", current=1, total=6)
         if args.username:
             username = args.username
@@ -1020,6 +1045,22 @@ class RecommendTool(Tool):
                 # 用会话标签(tags/prefer_tags/scenario)+冷启动标签召回+质量重排。
                 username = ""
 
+        experiment = _ranking_experiment(username, args.subject_type)
+        media_policy = dict(_MEDIA_POLICIES[args.subject_type])
+        effective_diversity_strength = args.diversity_strength
+        if experiment["variant"] == _RANKING_TREATMENT:
+            # 保守实验：提高可解释的个性化/外部证据，稍降纯热度；硬约束完全不变。
+            for key, multiplier in {
+                "affinity": 1.08,
+                "cf": 1.08,
+                "external": 1.06,
+                "semantic": 1.08,
+                "quality": 0.90,
+            }.items():
+                media_policy[key] = round(float(media_policy[key]) * multiplier, 4)
+            media_policy["evidence_extra"] = min(int(media_policy["evidence_extra"]) + 2, 8)
+            effective_diversity_strength = max(effective_diversity_strength, 0.26)
+            media_policy["summary"] += " 本实验组略强化个性化证据并降低纯热度依赖。"
 
         scenario = args.scenario
         effective_cross_media = args.cross_media or scenario == "cross_media"
@@ -1493,28 +1534,36 @@ class RecommendTool(Tool):
             }
 
         finish_phase("candidate_prepare_ms")
-        def score(sid: int, c: dict) -> float:
-            if args.niche:  # 挖冷门：协同偏热门，权重压低
-                return (0.5 * media_policy["affinity"] * affinity(c)
-                        + 0.5 * media_policy["graph"] * graph_bonus(c)
-                        + 0.4 * media_policy["cf"] * cf_bonus(c)
-                        + media_policy["external"] * external_bonus(c)
-                        + explicit_tag_adjust(c) + scenario_tag_adjust(c) + feedback_tag_adjust(c)
-                        + memory_penalty(c) + temporary_penalty(c)
-                        + feedback_avoidance_penalty(c) + profile_avoidance_penalty(c)
-                        + aspect_bonus(c) + media_subtype_penalty(c) + semantic_bonus(c, sid)
-                        + 2.0 * media_policy["quality"] * _quality_niche(c["rating"]))
-            return (
-                media_policy["affinity"] * affinity(c)
-                + media_policy["graph"] * graph_bonus(c)
-                + media_policy["cf"] * cf_bonus(c)
-                + media_policy["external"] * external_bonus(c)
-                + explicit_tag_adjust(c) + scenario_tag_adjust(c) + feedback_tag_adjust(c)
-                + memory_penalty(c) + temporary_penalty(c)
-                + feedback_avoidance_penalty(c) + profile_avoidance_penalty(c)
-                + aspect_bonus(c) + media_subtype_penalty(c) + semantic_bonus(c, sid)
-                + media_policy["quality"] * self.w.quality_popular * _quality_popular(c["rating"])
+        def score_components(sid: int, c: dict) -> dict[str, float]:
+            """Named, already-weighted contributions used by production ranking and diagnostics."""
+            niche_affinity = 0.5 if args.niche else 1.0
+            niche_graph = 0.5 if args.niche else 1.0
+            niche_cf = 0.4 if args.niche else 1.0
+            quality = (
+                2.0 * media_policy["quality"] * _quality_niche(c["rating"])
+                if args.niche
+                else media_policy["quality"] * self.w.quality_popular * _quality_popular(c["rating"])
             )
+            return {
+                "affinity": niche_affinity * media_policy["affinity"] * affinity(c),
+                "graph": niche_graph * media_policy["graph"] * graph_bonus(c),
+                "cf": niche_cf * media_policy["cf"] * cf_bonus(c),
+                "external": media_policy["external"] * external_bonus(c),
+                "explicit_request": explicit_tag_adjust(c),
+                "scenario": scenario_tag_adjust(c),
+                "feedback": feedback_tag_adjust(c),
+                "memory_penalty": memory_penalty(c),
+                "temporary_penalty": temporary_penalty(c),
+                "feedback_penalty": feedback_avoidance_penalty(c),
+                "profile_penalty": profile_avoidance_penalty(c),
+                "aspect_profile": aspect_bonus(c),
+                "media_subtype": media_subtype_penalty(c),
+                "semantic": semantic_bonus(c, sid),
+                "quality": quality,
+            }
+
+        def score(sid: int, c: dict) -> float:
+            return sum(score_components(sid, c).values())
 
         def cf_reason(c: dict) -> list[str]:
             if not c["cf_from"]:
@@ -1528,7 +1577,7 @@ class RecommendTool(Tool):
         ranked = _mmr_rerank(
             ranked,
             score,
-            args.diversity_strength,
+            effective_diversity_strength,
             pool_size=max(args.limit * 8, 60),
         )
         out: list[RecItem] = []
@@ -1575,6 +1624,21 @@ class RecommendTool(Tool):
             if c.get("external"):
                 signals.append("外部来源召回：" + "、".join(sorted(c["external"])[:2]))
             return signals[:5]
+
+        pre_evidence_top = [
+            {
+                "id": sid,
+                "name": str(candidate.get("name") or "待补全名称"),
+                "score": round(score(sid, candidate), 3),
+                "score_breakdown": {
+                    key: round(value, 4)
+                    for key, value in score_components(sid, candidate).items()
+                    if abs(value) >= 0.0001
+                },
+                "recall_signals": recall_signals(candidate),
+            }
+            for sid, candidate in ranked[:12]
+        ]
 
         def item_heat(c: dict) -> dict:
             return {
@@ -1630,11 +1694,16 @@ class RecommendTool(Tool):
             candidate["series_origin"] = str(origin.get("name") or "")
             return candidate
 
+        elimination_counts: Counter[str] = Counter()
+        processed_ranked = 0
         for sid, c in ranked:
+            processed_ranked += 1
             if not c["name"]:
+                elimination_counts["missing_metadata"] += 1
                 continue  # 协同召回候选未被 enrich 补到名，跳过
             eps = c.get("eps")
             if effective_max_episodes is not None and isinstance(eps, int) and eps > effective_max_episodes:
+                elimination_counts["episode_limit"] += 1
                 continue
             effective_candidate = c
             series_origin: str | None = None
@@ -1646,6 +1715,7 @@ class RecommendTool(Tool):
                 siblings = context["siblings"]
                 franchise_key = f"root:{context['root_id']}"
                 if effective_series_policy == "discover" and context["seen_predecessor"]:
+                    elimination_counts["seen_series"] += 1
                     continue
                 replace_with_entry = bool(entry) and (
                     effective_series_policy == "entry_only"
@@ -1655,6 +1725,7 @@ class RecommendTool(Tool):
                     r_id, r_name, r_img, r_rating = entry
                     replacement = entry_candidate(context, c)
                     if replacement is None:
+                        elimination_counts["series_entry_missing"] += 1
                         continue
                     effective_candidate = replacement
                     series_origin = str(c["name"])
@@ -1665,6 +1736,7 @@ class RecommendTool(Tool):
                     extra.append("同 IP 还有：" + "、".join(f"《{s}》" for s in siblings))
             sk = franchise_key or _series_key(r_name)
             if r_id in seen_ids or sk in seen_series:  # 入口去重（多个续集回溯到同一入口）
+                elimination_counts["duplicate_or_same_series"] += 1
                 continue
             effective_eps = effective_candidate.get("eps")
             if (
@@ -1672,6 +1744,7 @@ class RecommendTool(Tool):
                 and isinstance(effective_eps, int)
                 and effective_eps > effective_max_episodes
             ):
+                elimination_counts["entry_episode_limit"] += 1
                 continue
             seen_ids.add(r_id)
             seen_series.add(sk)
@@ -1718,8 +1791,14 @@ class RecommendTool(Tool):
             subtype_notes = media_notes(effective_candidate)
             reasons.extend(n for n in subtype_notes if n not in reasons)
             constraint_warnings.extend(note for note in subtype_notes if "未完全命中" in note)
+            base_components = score_components(r_id, effective_candidate)
             out.append(RecItem(
-                id=r_id, name=r_name, score=round(score(r_id, effective_candidate), 3),
+                id=r_id, name=r_name, score=round(sum(base_components.values()), 3),
+                score_breakdown={
+                    key: round(value, 4)
+                    for key, value in base_components.items()
+                    if abs(value) >= 0.0001
+                },
                 reasons=reasons,
                 why_recalled=signals,
                 recall_signals=signals,
@@ -1752,7 +1831,11 @@ class RecommendTool(Tool):
             if len(out) >= pool_limit:
                 break
 
+        if processed_ranked < len(ranked):
+            elimination_counts["finalist_pool_cutoff"] += len(ranked) - processed_ranked
+
         finish_phase("finalist_build_ms")
+        pre_evidence_scores = {item.id: item.score for item in out}
         evidence_candidate_count = len(out)
         evidence_cache = {"hits": 0, "misses": 0, "writes": 0}
         if args.enrich_evidence:
@@ -1771,6 +1854,7 @@ class RecommendTool(Tool):
         # 可见解释。随后按“最终条目”的最终分数和标签统一重排。
         for item in out:
             refresh_item_explanation(item, scenario)
+        all_finalists = list(out)
         reranked_items = _mmr_rerank(
             [
                 (
@@ -1785,11 +1869,31 @@ class RecommendTool(Tool):
                 for item in sorted(out, key=lambda candidate: -candidate.score)
             ],
             lambda _sid, payload: payload["item"].score,
-            args.diversity_strength,
+            effective_diversity_strength,
             pool_size=len(out),
         )
         out = [payload["item"] for _sid, payload in reranked_items[: args.limit]]
         finish_phase("final_rerank_ms")
+        final_ids = {item.id for item in out}
+        finalist_diagnostics = [
+            {
+                "id": item.id,
+                "name": item.name,
+                "before_evidence_score": pre_evidence_scores.get(item.id),
+                "final_score": item.score,
+                "selected": item.id in final_ids,
+                "score_breakdown": item.score_breakdown,
+                "recall_signals": item.recall_signals,
+                "claim_support": {
+                    "checked": len([claim for claim in item.claims if claim.kind != "provenance"]),
+                    "supported": len([
+                        claim for claim in item.claims
+                        if claim.kind != "provenance" and claim.support
+                    ]),
+                },
+            }
+            for item in all_finalists
+        ]
 
         elapsed_ms = round((time.monotonic() - run_started) * 1000)
         await emit_tool_progress(
@@ -1856,6 +1960,7 @@ class RecommendTool(Tool):
                 key: value for key, value in media_policy.items()
                 if key not in {"summary", "evidence_extra"}
             },
+            "experiment": experiment,
         }
         claims = [claim for item in out for claim in item.claims if claim.kind != "provenance"]
         supported_claims = [claim for claim in claims if claim.support]
@@ -1883,7 +1988,16 @@ class RecommendTool(Tool):
                         "semantic": semantic_model_status(),
                     },
                     "_strategy_metadata": media_strategy,
+                    "_experiment": experiment,
                     "_performance": performance,
+                    "_diagnostics": {
+                        "candidate_count": len(cand),
+                        "enriched_count": len(prelim),
+                        "top_pre_evidence": pre_evidence_top,
+                        "finalist_pool": finalist_diagnostics,
+                        "final_output_ids": [item.id for item in out],
+                        "elimination_counts": dict(elimination_counts),
+                    },
                 },
                 [item.model_dump(mode="json", exclude_none=True) for item in out],
             )
@@ -1918,7 +2032,7 @@ class RecommendTool(Tool):
                 },
                 diversity={
                     "method": "MMR",
-                    "strength": args.diversity_strength,
+                    "strength": effective_diversity_strength,
                     "intra_list_diversity": _intra_list_diversity(out),
                     "series_policy": effective_series_policy,
                 },
@@ -2085,6 +2199,7 @@ class RecommendTool(Tool):
                 for group in res.data.source_groups:
                     item.source_routes.append(f"{group.group}：{group.consensus}")
                 item.source_routes.extend(res.data.source_routing_notes[:2])
+            evidence_aspect_adjustment = 0.0
             if aspect_profile and res.data.aspect_summary:
                 like_aspects = {p.aspect: p for p in aspect_profile.likes}
                 dislike_aspects = {p.aspect: p for p in aspect_profile.dislikes}
@@ -2094,16 +2209,23 @@ class RecommendTool(Tool):
                         text = f"评价证据支持你的好球区：{pref.label}"
                         if text not in item.aspect_matches:
                             item.aspect_matches.append(text)
-                        item.score = round(item.score + 0.16 * pref.weight * pref.confidence, 3)
+                        adjustment = 0.16 * pref.weight * pref.confidence
+                        evidence_aspect_adjustment += adjustment
+                        item.score = round(item.score + adjustment, 3)
                     if summary.aspect in dislike_aspects and summary.dominant_sentiment in {"negative", "mixed"}:
                         pref = dislike_aspects[summary.aspect]
                         text = f"评价证据触及你的雷区：{pref.label}"
                         if text not in item.aspect_warnings:
                             item.aspect_warnings.append(text)
-                        item.score = round(item.score - 0.2 * pref.weight * pref.confidence, 3)
+                        adjustment = -0.2 * pref.weight * pref.confidence
+                        evidence_aspect_adjustment += adjustment
+                        item.score = round(item.score + adjustment, 3)
+            if abs(evidence_aspect_adjustment) >= 0.0001:
+                item.score_breakdown["evidence_aspect"] = round(evidence_aspect_adjustment, 4)
             bonus = _review_bonus(item.evidence)
             if bonus:
                 item.score = round(item.score + bonus, 3)
+                item.score_breakdown["evidence_quality"] = round(bonus, 4)
             item.quality_badges = _quality_badges(item.evidence)
             item.reasons.extend(item.quality_badges)
             for text in item.aspect_matches[:3]:

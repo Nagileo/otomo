@@ -31,6 +31,7 @@ const scenarioOptions: Record<MediaType, [Scenario, string][]> = {
 const mediaLabel: Record<string, string> = { anime: "动画", book: "书籍", game: "游戏", music: "音乐", real: "三次元" };
 const scenarioLabel: Record<string, string> = { general: "随便看看", tonight: "今晚", season: "当季", backlog: "清理收藏", gal_intro: "Galgame 入门", cross_media: "跨媒体" };
 const ACTIVE_RECOMMENDATION_RUN = "otomo:discover:active-run";
+const RETRY_RECOMMENDATION_REQUEST = "otomo:retry:recommendation";
 
 function currentSeason() {
   const now = new Date();
@@ -106,6 +107,15 @@ export default function DiscoverPage() {
         window.sessionStorage.removeItem(ACTIVE_RECOMMENDATION_RUN);
       }
     }
+    if (!saved) {
+      const retry = window.sessionStorage.getItem(RETRY_RECOMMENDATION_REQUEST);
+      if (retry) {
+        // Delete before starting so React StrictMode or a refresh cannot submit twice.
+        window.sessionStorage.removeItem(RETRY_RECOMMENDATION_REQUEST);
+        try { void recommend(JSON.parse(retry)); }
+        catch { setError("未能读取上次推荐条件，请重新选择后生成。"); }
+      }
+    }
     return () => recommendationSource.current?.close();
   }, []);
 
@@ -128,23 +138,35 @@ export default function DiscoverPage() {
     finally { setSeasonBusy(false); }
   }
 
-  async function recommend() {
+  async function recommend(requestOverride?: Record<string, any>) {
     setRecommendBusy(true); setError("");
     setRecommendProgress([]);
     try {
       const focusTags = gameFocus === "visual_novel" ? ["视觉小说"] : gameFocus === "galgame" ? ["galgame"] : [];
       const focusAvoidTags = gameFocus === "game" ? ["galgame", "视觉小说"] : [];
+      const requestPayload = requestOverride || {
+        subject_type: media, scenario, limit: 8, niche, explore,
+        tags: [...tags.split(/[，,]/).map((x) => x.trim()).filter(Boolean), ...focusTags],
+        avoid_tags: [...avoidTags.split(/[，,]/).map((x) => x.trim()).filter(Boolean), ...focusAvoidTags],
+        max_episodes: maxEpisodes > 0 ? maxEpisodes : undefined,
+        book_subtype: media === "book" ? bookSubtype : undefined,
+        music_subtype: media === "music" ? musicSubtype : undefined,
+      };
+      if (requestOverride) {
+        const nextMedia = String(requestOverride.subject_type || "anime") as MediaType;
+        setMedia(nextMedia);
+        setScenario(String(requestOverride.scenario || "general") as Scenario);
+        setNiche(Boolean(requestOverride.niche)); setExplore(Boolean(requestOverride.explore));
+        setTags((requestOverride.tags || []).join("，"));
+        setAvoidTags((requestOverride.avoid_tags || []).join("，"));
+        setMaxEpisodes(Number(requestOverride.max_episodes || 0));
+        setBookSubtype(String(requestOverride.book_subtype || "auto") as BookSubtype);
+        setMusicSubtype(String(requestOverride.music_subtype || "auto") as MusicSubtype);
+      }
       const payload = await productFetch("/recommendations/runs", {
         method: "POST",
         headers: { "Content-Type": "application/json", ...(csrf ? { "x-otomo-csrf": csrf } : {}) },
-        body: JSON.stringify({
-          subject_type: media, scenario, limit: 8, niche, explore,
-          tags: [...tags.split(/[，,]/).map((x) => x.trim()).filter(Boolean), ...focusTags],
-          avoid_tags: [...avoidTags.split(/[，,]/).map((x) => x.trim()).filter(Boolean), ...focusAvoidTags],
-          max_episodes: maxEpisodes > 0 ? maxEpisodes : undefined,
-          book_subtype: media === "book" ? bookSubtype : undefined,
-          music_subtype: media === "music" ? musicSubtype : undefined,
-        }),
+        body: JSON.stringify(requestPayload),
       });
       const runId = String(payload.run?.id || "");
       if (!runId) throw new Error("推荐任务没有返回运行编号");

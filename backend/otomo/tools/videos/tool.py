@@ -76,6 +76,8 @@ class BiliVideoSubtitleArgs(BaseModel):
     aid: int | None = Field(None, description="B站 av/aid；aid 或 bvid 至少传一个")
     bvid: str | None = Field(None, description="B站 BV 号；aid 或 bvid 至少传一个")
     max_segments: int = Field(60, ge=10, le=160, description="最多返回多少条字幕片段")
+    allow_asr: bool = Field(True, description="公开字幕不存在时是否允许使用已配置的 ASR 兜底")
+    sample_across_video: bool = Field(False, description="长字幕是否从全片均匀抽样；内容匹配核验时启用")
 
 
 class BiliVideoDanmakuArgs(BaseModel):
@@ -143,7 +145,12 @@ class BiliVideoMeta(BaseModel):
     match_confidence: float = 0.0
     match_reason: str = ""
     verified: bool = False
-    verification_status: Literal["view_verified", "search_metadata"] = "search_metadata"
+    verification_status: Literal["content_verified", "view_verified", "search_metadata"] = "search_metadata"
+    content_verified: bool = False
+    content_match_confidence: float = 0.0
+    content_match_reason: str = ""
+    transcript_source: Literal["subtitle", "asr", "none"] = "none"
+    content_mentions: int = 0
 
 
 class BiliRejectedCandidate(BaseModel):
@@ -177,6 +184,14 @@ class BiliSubtitleSegment(BaseModel):
     start: float | None = None
     end: float | None = None
     text: str
+
+
+class BiliTranscriptMatch(BaseModel):
+    verified: bool = False
+    confidence: float = 0.0
+    reason: str = ""
+    source: Literal["subtitle", "asr", "none"] = "none"
+    mentions: int = 0
 
 
 class BiliVideoSubtitleResult(BaseModel):
@@ -511,6 +526,109 @@ def _content_terms(value: str) -> list[str]:
         term for term in re.split(r"[\s,，。:：/|·\-]+", cleaned)
         if len(_norm_video_text(term)) >= 2
     ][:8]
+
+
+def _match_video_transcript(
+    query: str,
+    title: str,
+    segments: list[BiliSubtitleSegment],
+    *,
+    source: Literal["subtitle", "asr"],
+) -> BiliTranscriptMatch:
+    """Conservatively decide whether the transcript actually covers the requested work."""
+    text_rows = [segment.text.strip() for segment in segments if segment.text.strip()]
+    if not text_rows:
+        return BiliTranscriptMatch(reason="未读到可核验的字幕正文")
+    full_text = " ".join(text_rows)
+    full_key = _norm_video_text(full_text)
+    title_key = _norm_video_text(title)
+    terms = list(dict.fromkeys(_content_terms(query)))
+    term_keys = [
+        _norm_video_text(term) for term in terms
+        if len(_norm_video_text(term)) >= 2
+    ]
+    # Longer title tokens carry more identity than generic words such as “动画”或“推荐”。
+    identity_terms = sorted(term_keys, key=len, reverse=True)[:3]
+    row_keys = [_norm_video_text(row) for row in text_rows]
+    mentions = sum(
+        1 for row in row_keys
+        if any(term in row for term in identity_terms)
+    ) if identity_terms else 0
+    matched_terms = [term for term in identity_terms if term in full_key]
+    query_markers = _season_markers(query)
+    transcript_markers = _season_markers(full_text)
+    reasons: list[str] = []
+
+    for key, label in (("year", "年份"), ("month", "月份"), ("numbered", "季度/续作编号"), ("edition", "版本")):
+        expected = query_markers[key]
+        actual = transcript_markers[key]
+        if expected and actual and expected != actual:
+            return BiliTranscriptMatch(
+                confidence=0.12,
+                reason=f"字幕中的{label}是 {actual}，与目标 {expected} 冲突",
+                source=source,
+                mentions=mentions,
+            )
+        if expected and actual == expected:
+            reasons.append(f"字幕确认{label} {expected}")
+
+    is_broad_guide = not identity_terms and any(
+        marker in query for marker in ("新番", "导视", "季度", "盘点")
+    )
+    if is_broad_guide:
+        guide_hits = [
+            marker for marker in ("新番", "导视", "动画", "作品", "推荐")
+            if marker in full_text
+        ]
+        marker_hits = sum(
+            1 for key in ("year", "month")
+            if query_markers[key] and transcript_markers[key] == query_markers[key]
+        )
+        confidence = min(0.92, 0.58 + 0.08 * len(guide_hits) + 0.1 * marker_hits)
+        return BiliTranscriptMatch(
+            verified=confidence >= 0.62,
+            confidence=round(confidence, 3),
+            reason="；".join(reasons + (["字幕正文持续讨论新番/作品"] if guide_hits else ["字幕缺少导视正文信号"])),
+            source=source,
+            mentions=len(guide_hits),
+        )
+
+    if not matched_terms:
+        return BiliTranscriptMatch(
+            confidence=0.18,
+            reason="标题看似相关，但抽取到的字幕正文没有提及目标作品",
+            source=source,
+            mentions=0,
+        )
+
+    compilation = any(word in title for word in ("合集", "盘点", "十部", "十大", "汇总", "导视"))
+    if compilation and mentions <= 1:
+        return BiliTranscriptMatch(
+            confidence=0.46,
+            reason="字幕只顺带提到目标作品，视频主体更像合集/盘点",
+            source=source,
+            mentions=mentions,
+        )
+
+    coverage = mentions / max(len(text_rows), 1)
+    confidence = 0.72 + min(0.16, mentions * 0.04) + min(0.08, coverage * 0.8)
+    if any(term in title_key for term in matched_terms):
+        confidence += 0.04
+    missing_markers = [
+        label for key, label in (("numbered", "季度/续作编号"), ("edition", "版本"))
+        if query_markers[key] and not transcript_markers[key]
+    ]
+    if missing_markers:
+        confidence = min(confidence, 0.64)
+        reasons.append("字幕未确认" + "、".join(missing_markers))
+    reasons.insert(0, f"字幕正文命中目标作品 {mentions} 个片段")
+    return BiliTranscriptMatch(
+        verified=confidence >= 0.62,
+        confidence=round(min(confidence, 0.96), 3),
+        reason="；".join(reasons),
+        source=source,
+        mentions=mentions,
+    )
 
 
 def _hit_relevance(raw: dict, *, up_name: str, aliases: list[str], tags: list[str], season_query: str = "") -> tuple[float, str]:
@@ -1145,6 +1263,62 @@ class SearchBiliGuideVideosTool(Tool):
         verified_rows = await asyncio.gather(*(
             verify(candidate) for candidate in candidates[: min(max(args.limit * 2, 8), 16)]
         ))
+        content_matches: dict[str, BiliTranscriptMatch] = {}
+
+        def candidate_key(row: tuple[tuple[float, str, dict, bool], dict | None]) -> str:
+            raw = row[0][2]
+            return str(raw.get("bvid") or raw.get("aid") or raw.get("id") or "")
+
+        async def transcript_check(
+            row: tuple[tuple[float, str, dict, bool], dict | None],
+            *,
+            allow_asr: bool,
+        ) -> BiliTranscriptMatch | None:
+            (confidence, _reason, raw, _matched), detail = row
+            if confidence < 0.58 or not detail:
+                return None
+            result = await GetBiliVideoSubtitlesTool().run(BiliVideoSubtitleArgs(
+                aid=raw.get("aid") or raw.get("id"),
+                bvid=raw.get("bvid"),
+                max_segments=160,
+                allow_asr=allow_asr,
+                sample_across_video=True,
+            ))
+            if not result.ok or result.data is None or not result.data.segments:
+                return None
+            source: Literal["subtitle", "asr"] = (
+                "asr" if result.data.source == "bili_asr" else "subtitle"
+            )
+            return _match_video_transcript(
+                base_query,
+                _clean_bili_title(raw.get("title") or ""),
+                result.data.segments,
+                source=source,
+            )
+
+        # Public subtitle lookup is cheap enough for a tiny finalist pool. ASR remains an
+        # optional, single-candidate fallback only near the acceptance threshold.
+        content_rows = [
+            row for row in verified_rows
+            if row[1] is not None and row[0][0] >= 0.58
+        ][:3]
+        if content_rows:
+            public_checks = await asyncio.gather(*(
+                transcript_check(row, allow_asr=False) for row in content_rows
+            ))
+            for row, match in zip(content_rows, public_checks, strict=False):
+                if match is not None:
+                    content_matches[candidate_key(row)] = match
+            if settings.asr_provider != "off":
+                asr_row = next((
+                    row for row in content_rows
+                    if candidate_key(row) not in content_matches and 0.58 <= row[0][0] <= 0.78
+                ), None)
+                if asr_row is not None:
+                    asr_match = await transcript_check(asr_row, allow_asr=True)
+                    if asr_match is not None:
+                        content_matches[candidate_key(asr_row)] = asr_match
+
         videos: list[BiliVideoMeta] = []
         rejected: list[BiliRejectedCandidate] = []
         for (confidence, reason, raw, matched), detail in verified_rows:
@@ -1156,6 +1330,18 @@ class SearchBiliGuideVideosTool(Tool):
                     match_confidence=round(confidence, 3), reason=reason,
                 ))
                 continue
+            match = content_matches.get(str(raw.get("bvid") or raw.get("aid") or raw.get("id") or ""))
+            if match is not None and match.confidence < 0.52:
+                rejected.append(BiliRejectedCandidate(
+                    title=title,
+                    author=author,
+                    match_confidence=match.confidence,
+                    reason=match.reason,
+                ))
+                continue
+            if match is not None:
+                confidence = 0.45 * confidence + 0.55 * match.confidence
+                reason = f"{reason}；内容核验：{match.reason}"
             url = raw.get("arcurl") or f"https://www.bilibili.com/video/{raw.get('bvid') or ('av' + str(raw.get('aid') or raw.get('id')))}"
             videos.append(BiliVideoMeta(
                 title=title, url=str(url).replace("http://", "https://"),
@@ -1164,7 +1350,15 @@ class SearchBiliGuideVideosTool(Tool):
                 danmaku=raw.get("video_review"), pubdate=raw.get("pubdate"),
                 matched_whitelist=matched, match_confidence=round(confidence, 3),
                 match_reason=reason, verified=bool(detail),
-                verification_status="view_verified" if detail else "search_metadata",
+                verification_status=(
+                    "content_verified" if match is not None and match.verified
+                    else "view_verified" if detail else "search_metadata"
+                ),
+                content_verified=bool(match and match.verified),
+                content_match_confidence=match.confidence if match else 0.0,
+                content_match_reason=match.reason if match else "未获得公开字幕；保留元数据校验结论",
+                transcript_source=match.source if match else "none",
+                content_mentions=match.mentions if match else 0,
             ))
         videos.sort(key=lambda video: (-video.match_confidence, not video.verified, -(video.pubdate or 0)))
         videos = videos[: args.limit]
@@ -1172,6 +1366,12 @@ class SearchBiliGuideVideosTool(Tool):
             warnings.append("没有候选通过标题/季度一致性阈值；仅返回 B站搜索导航，避免给出错误直链。")
         elif any(not video.verified for video in videos):
             warnings.append("部分候选仅通过搜索元数据校验；打开后仍建议核对标题与发布时间。")
+        if content_matches:
+            warnings.append(
+                f"已对 {len(content_matches)} 个边界候选读取字幕正文；标题党、合集顺带提及或版本冲突会被拒绝。"
+            )
+        elif content_rows:
+            warnings.append("候选未暴露公开字幕；本轮未为此批量启动 ASR，结果仍明确标为元数据校验。")
         return ToolResult(
             ok=True,
             data=BiliGuideSearchResult(
@@ -1257,6 +1457,11 @@ class GetBiliVideoSubtitlesTool(Tool):
         video_id = args.bvid or (f"av{args.aid}" if args.aid else "")
         source_url = f"https://www.bilibili.com/video/{video_id}" if video_id else "https://www.bilibili.com/"
         if not subtitles:
+            if not args.allow_asr:
+                return ToolResult(
+                    ok=False,
+                    error="该视频未暴露公开字幕；本次轻量核验未启动 ASR。",
+                )
             asr_segments, asr_caveats, asr_error = await _maybe_asr_segments(source_url, args.max_segments)
             if not asr_segments:
                 return ToolResult(
@@ -1286,8 +1491,17 @@ class GetBiliVideoSubtitlesTool(Tool):
             payload = await asyncio.to_thread(_sync_subtitle_json, url)
         except (httpx.HTTPError, httpx.TransportError, ValueError) as e:
             return ToolResult(ok=False, error=f"B站字幕正文读取失败：{type(e).__name__}")
+        body = payload.get("body") or []
+        if args.sample_across_video and len(body) > args.max_segments:
+            indexes = sorted({
+                round(index * (len(body) - 1) / max(args.max_segments - 1, 1))
+                for index in range(args.max_segments)
+            })
+            selected_body = [body[index] for index in indexes]
+        else:
+            selected_body = body[: args.max_segments]
         segments = []
-        for raw in (payload.get("body") or [])[: args.max_segments]:
+        for raw in selected_body:
             text_value = str(raw.get("content") or "").strip()
             if text_value:
                 segments.append(

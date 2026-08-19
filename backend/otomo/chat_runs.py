@@ -33,6 +33,7 @@ class RunStore:
                     started_at REAL NOT NULL, status TEXT NOT NULL,
                     finished_at REAL NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '',
                     cancel_reason TEXT NOT NULL DEFAULT '', sequence INTEGER NOT NULL DEFAULT 0,
+                    request_json TEXT NOT NULL DEFAULT '{}',
                     PRIMARY KEY(namespace, id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_background_runs_owner
@@ -46,6 +47,14 @@ class RunStore:
                 );
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(background_runs)").fetchall()
+            }
+            if "request_json" not in columns:
+                conn.execute(
+                    "ALTER TABLE background_runs ADD COLUMN request_json TEXT NOT NULL DEFAULT '{}'"
+                )
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=10)
@@ -88,11 +97,12 @@ class RunStore:
             conn.execute(
                 """INSERT OR REPLACE INTO background_runs
                    (namespace,id,owner,session_id,device_id,started_at,status,finished_at,
-                    error,cancel_reason,sequence) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                    error,cancel_reason,sequence,request_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     namespace, run.id, run.owner, run.session_id, run.device_id,
                     run.started_at, run.status, run.finished_at, run.error,
                     run.cancel_reason, run.sequence,
+                    json.dumps(run.request_payload, ensure_ascii=False),
                 ),
             )
             conn.execute(
@@ -148,6 +158,7 @@ class RunStore:
             started_at=float(row["started_at"]), status=str(row["status"]),
             finished_at=float(row["finished_at"]), error=str(row["error"]),
             cancel_reason=str(row["cancel_reason"]), sequence=int(row["sequence"]),
+            request_payload=json.loads(str(row["request_json"] or "{}")),
         )
         run.events.extend(
             ChatRunEvent(int(event["sequence"]), str(event["event"]), str(event["data"]))
@@ -165,7 +176,33 @@ class RunStore:
         params.append(max(1, min(int(limit), 200)))
         with self._connect() as conn:
             rows = conn.execute(query, params).fetchall()
-        return [dict(row) for row in rows]
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            payload = dict(row)
+            request_json = str(payload.pop("request_json", "") or "")
+            payload["retryable"] = bool(
+                request_json not in {"", "{}"}
+                and payload.get("status") in {"interrupted", "failed", "cancelled"}
+            )
+            result.append(payload)
+        return result
+
+    def retry_payload(
+        self, namespace: str, owner: str, run_id: str,
+    ) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT status,request_json FROM background_runs
+                   WHERE namespace=? AND owner=? AND id=?""",
+                (namespace, owner, run_id),
+            ).fetchone()
+        if row is None or str(row["status"]) not in {"interrupted", "failed", "cancelled"}:
+            return None
+        try:
+            payload = json.loads(str(row["request_json"] or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        return payload if isinstance(payload, dict) and payload else None
 
     def cleanup(self, namespace: str, cutoff: float) -> None:
         with self._connect() as conn:
@@ -195,6 +232,7 @@ class ChatRun:
     error: str = ""
     cancel_reason: str = ""
     sequence: int = 0
+    request_payload: dict[str, Any] = field(default_factory=dict)
     events: deque[ChatRunEvent] = field(default_factory=lambda: deque(maxlen=1200))
     condition: asyncio.Condition = field(default_factory=asyncio.Condition)
     task: asyncio.Task[None] | None = None
@@ -280,6 +318,7 @@ class ChatRunHub:
         session_id: str,
         device_id: str,
         worker: RunWorker,
+        request_payload: dict[str, Any] | None = None,
     ) -> ChatRun:
         key = (owner, session_id)
         async with self._guard:
@@ -287,7 +326,13 @@ class ChatRunHub:
             current = self._runs.get(current_id or "")
             if current is not None and not current.terminal:
                 raise RuntimeError("session already has an active chat run")
-            run = self._attach(ChatRun(run_id, owner, session_id, device_id))
+            run = self._attach(ChatRun(
+                run_id,
+                owner,
+                session_id,
+                device_id,
+                request_payload=dict(request_payload or {}),
+            ))
             self._runs[run.id] = run
             self._active_sessions[key] = run.id
             self.store.create(self.namespace, run)
@@ -358,6 +403,10 @@ class ChatRunHub:
     async def recent(self, owner: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
         async with self._guard:
             return self.store.recent(self.namespace, owner, limit)
+
+    async def retry_payload(self, owner: str, run_id: str) -> dict[str, Any] | None:
+        async with self._guard:
+            return self.store.retry_payload(self.namespace, owner, run_id)
 
     async def shutdown(self) -> None:
         async with self._guard:

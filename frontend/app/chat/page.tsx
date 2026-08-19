@@ -526,6 +526,20 @@ export default function Home() {
         else setAuthNotice({ tone: "warn", text: "请先绑定同一个 Bangumi 账号，再接续这段 Discord 对话。" });
         return;
       }
+      const retryRaw = window.sessionStorage.getItem("otomo:retry:chat");
+      if (retryRaw) {
+        // Consume once before any request to avoid StrictMode/refresh double submission.
+        window.sessionStorage.removeItem("otomo:retry:chat");
+        try {
+          const retry = JSON.parse(retryRaw) as Record<string, any>;
+          if (retry.session_id) await loadSession(String(retry.session_id), true);
+          else await restoreLastSession(rows);
+          await send(String(retry.message || ""), retry.spoiler_mode, retry);
+        } catch {
+          setUploadNotice({ tone: "bad", text: "未能读取上次问题，请重新发送。" });
+        }
+        return;
+      }
       await restoreLastSession(rows);
     })();
   }, []);
@@ -819,7 +833,11 @@ export default function Home() {
     }
   }
 
-  async function send(override?: string, spoilerMode?: string) {
+  async function send(
+    override?: string,
+    spoilerMode?: string,
+    retryRequest?: Record<string, any>,
+  ) {
     let q = (override ?? input).trim();
     const shouldUseImage = pendingImages.length > 0 && !override;
     if (!q && shouldUseImage) {
@@ -847,6 +865,7 @@ export default function Home() {
     const controller = new AbortController();
     abortRef.current = controller;
     let userMessageAdded = false;
+    const isRetry = Boolean(retryRequest?.retry_of_run_id);
     if (!sessionId.current) {
       sessionId.current = crypto.randomUUID();  // 客户端 lazy 生成，避免 SSR mismatch
       setActiveSessionId(sessionId.current);
@@ -866,8 +885,10 @@ export default function Home() {
     try {
       const attachments = shouldUseImage ? await uploadPendingImages(controller.signal) : [];
       if (shouldUseImage) clearPendingImages();
-      setMessages((m) => [...m, { role: "user", content: q, attachments }]);
-      userMessageAdded = true;
+      if (!isRetry) {
+        setMessages((m) => [...m, { role: "user", content: q, attachments }]);
+        userMessageAdded = true;
+      }
       const res = await fetch(`${BACKEND}/chat`, {
         method: "POST",
         credentials: "include",
@@ -877,6 +898,9 @@ export default function Home() {
           session_id: sessionId.current,
           device_id: deviceIdRef.current,
           attachments,
+          ...(retryRequest?.runner ? { runner: retryRequest.runner } : {}),
+          ...(retryRequest?.progress_episode != null ? { progress_episode: retryRequest.progress_episode } : {}),
+          ...(retryRequest?.retry_of_run_id ? { retry_of_run_id: retryRequest.retry_of_run_id } : {}),
           ...(spoilerMode ? { spoiler_mode: spoilerMode } : {}),
         }),
         signal: controller.signal,
@@ -900,7 +924,7 @@ export default function Home() {
     } catch (e) {
       const aborted = e instanceof DOMException && e.name === "AbortError";
       if (aborted && !receivedFinalRef.current) {
-        if (!userMessageAdded) {
+        if (!userMessageAdded && !isRetry) {
           setMessages((m) => [...m, { role: "user", content: q }]);
         }
         answerRef.current = "本轮生成已由用户停止。";

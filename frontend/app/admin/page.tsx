@@ -3,6 +3,7 @@
 import {
   Activity, BarChart3, Check, Database, Eye, EyeOff, Flag, Gauge,
   HardDrive, LoaderCircle, RefreshCw, RotateCcw, ShieldCheck, Trash2,
+  ChevronRight, X,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
@@ -21,24 +22,57 @@ function bytes(value: number) {
   return `${(value / (1024 ** index)).toFixed(index > 1 ? 1 : 0)} ${units[index]}`;
 }
 
+const scoreLabels: Record<string, string> = {
+  affinity: "口味贴合", graph: "主创关联", cf: "相似用户", external: "外部证据",
+  explicit_request: "本轮要求", scenario: "场景", feedback: "近期反馈",
+  memory_penalty: "长期避雷", temporary_penalty: "本轮避雷",
+  feedback_penalty: "近期负反馈", profile_penalty: "画像雷区",
+  aspect_profile: "好球区", media_subtype: "媒介分型", semantic: "语义相似",
+  quality: "社区口碑", evidence_aspect: "评价好球区", evidence_quality: "多源评价",
+};
+
 export default function AdminPage() {
   const exp = useExperience();
   const [data, setData] = useState<AnyRow | null>(null);
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState("");
   const [days, setDays] = useState(30);
+  const [batchDetail, setBatchDetail] = useState<AnyRow | null>(null);
+  const [batchBusy, setBatchBusy] = useState("");
 
   async function load(nextDays = days) {
     setBusy(true); setError("");
     try {
-      const payload = await productFetch(`/admin/overview?days=${nextDays}`);
-      setData(payload);
+      const [payload, batchPayload] = await Promise.all([
+        productFetch(`/admin/overview?days=${nextDays}`),
+        productFetch("/admin/recommendations/batches?limit=30"),
+      ]);
+      setData({
+        ...payload,
+        recommendations: { ...payload.recommendations, batches: batchPayload.batches || [] },
+      });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally { setBusy(false); }
   }
 
   useEffect(() => { void exp.refreshAuthSession().then(() => load()); }, []);
+  useEffect(() => {
+    if (!batchDetail) return;
+    const close = (event: KeyboardEvent) => { if (event.key === "Escape") setBatchDetail(null); };
+    window.addEventListener("keydown", close);
+    return () => window.removeEventListener("keydown", close);
+  }, [batchDetail]);
+
+  async function openBatch(setId: string) {
+    setBatchBusy(setId);
+    try {
+      const payload = await productFetch(`/admin/recommendations/batches/${encodeURIComponent(setId)}`);
+      setBatchDetail(payload.batch);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally { setBatchBusy(""); }
+  }
 
   async function moderate(commentId: string, action: "hide" | "restore" | "delete") {
     const note = action === "delete" ? "管理员删除" : window.prompt("可选：填写治理备注", "") ?? "";
@@ -67,6 +101,11 @@ export default function AdminPage() {
     ...(data?.tasks?.chat || []).map((row: AnyRow) => ({ ...row, kind: "对话" })),
     ...(data?.tasks?.recommendation || []).map((row: AnyRow) => ({ ...row, kind: "推荐" })),
   ].sort((a, b) => Number(b.started_at || 0) - Number(a.started_at || 0)), [data]);
+  const diagnosticTrace = batchDetail?.request?._diagnostics;
+  const hasDiagnosticTrace = Boolean(
+    diagnosticTrace
+    && (diagnosticTrace.candidate_count !== undefined || diagnosticTrace.finalist_pool?.length),
+  );
 
   if (busy && !data) return <main className="page-frame"><div className="surface-loading"><LoaderCircle className="spin" size={17} /> 正在汇总运行状态…</div></main>;
   if (error && !data) return <main className="page-frame admin-page"><PageHeader eyebrow="管理后台" title="无法进入管理后台" description={error} /><div className="surface-error"><span>请确认当前 Bangumi 用户位于 COMMUNITY_ADMIN_USERNAMES 配置中。</span><button className="button-secondary" onClick={() => void load()}>重试</button></div></main>;
@@ -94,7 +133,14 @@ export default function AdminPage() {
           <div><strong>{data.recommendations.artifact_cache.entries}</strong><span>持久证据缓存</span></div>
         </div>
         <div className="admin-table"><div className="admin-table-head"><span>媒介 / 场景</span><span>曝光批次</span><span>采纳批次</span><span>采纳率</span></div>{(evaluation.segments || []).map((row: AnyRow) => <div key={`${row.subject_type}-${row.scenario}`}><strong>{row.subject_type} / {row.scenario}</strong><span>{row.visible_sets}</span><span>{row.accepted_sets}</span><span>{pct(row.acceptance_rate)}</span></div>)}</div>
+        {(evaluation.experiments || []).length ? <div className="admin-experiments"><strong>稳定策略实验</strong><div>{evaluation.experiments.map((row: AnyRow) => <article key={`${row.id}-${row.variant}`}><span>{row.variant === "control" ? "基准组" : "个性化证据组"}</span><b>{pct(row.acceptance_at_3)}</b><small>Acceptance@3 · {row.visible_sets} 个可见批次</small><small>MRR {Number(row.mrr || 0).toFixed(2)} · P95 {duration(row.p95_ms)}</small></article>)}</div><p>同一用户与媒介会稳定停留在同一组；样本不足时只展示数据，不自动宣称实验组更好。</p></div> : null}
         <details className="admin-models"><summary>查看协同模型状态</summary>{(data.recommendations.models || []).map((model: AnyRow) => <p key={model.subject_type}><strong>{model.subject_type}</strong><span>{model.available ? (model.stale ? "可用但过期" : "可用") : "未发布"}</span><small>{model.version || model.warnings?.join("；") || "无版本"}</small></p>)}</details>
+      </section>
+
+      <section className="admin-section">
+        <header><div><span className="section-kicker">推荐批次诊断</span><h2>从召回到证据重排逐层查看</h2></div><span>仅管理员可查看；不包含私人聊天内容。</span></header>
+        <div className="admin-batch-list">{(data.recommendations.batches || []).map((batch: AnyRow) => <button key={batch.id} onClick={() => void openBatch(batch.id)} disabled={batchBusy === batch.id}><span className="admin-batch-main"><strong>@{batch.username} · {batch.subject_type} / {batch.scenario}</strong><small>{new Date(batch.created_at).toLocaleString("zh-CN")} · {batch.candidate_count || "?"} 个候选 → {batch.item_count} 张卡片</small><em>{(batch.preview || []).map((item: AnyRow) => item.name).join("、") || "暂无卡片"}</em></span><span className="admin-batch-result"><b>{batch.accepted_items ? `采纳 ${batch.accepted_items}` : batch.dismissed_items ? `减少 ${batch.dismissed_items}` : "暂无决策"}</b><small>{batch.experiment?.variant === "personalized-evidence-v1" ? "个性化证据组" : "基准组"} · {duration(batch.duration_ms)}</small></span>{batchBusy === batch.id ? <LoaderCircle className="spin" size={16} /> : <ChevronRight size={16} />}</button>)}</div>
+        {!(data.recommendations.batches || []).length ? <div className="feature-empty"><BarChart3 size={24} /><strong>还没有推荐批次</strong><span>线上产生推荐后，这里会显示每一层的选择依据。</span></div> : null}
       </section>
 
       <section className="admin-section moderation-section">
@@ -107,6 +153,7 @@ export default function AdminPage() {
         <section className="admin-section"><header><div><span className="section-kicker">后台任务</span><h2>最近运行</h2></div></header><div className="admin-task-list">{allTasks.slice(0, 20).map((task: AnyRow) => <p key={`${task.namespace}-${task.id}`}><span><strong>{task.kind}</strong><small>{task.id.slice(0, 10)} · {new Date(task.started_at * 1000).toLocaleString("zh-CN")}</small></span><b className={`task-status ${task.status}`}>{task.status}</b></p>)}</div></section>
         <section className="admin-section"><header><div><span className="section-kicker">系统与存储</span><h2>轻量诊断</h2></div><span>v{data.system.version}{data.system.commit ? ` · ${data.system.commit.slice(0, 8)}` : ""}</span></header><div className="admin-system"><p><Activity size={15} /><span>运行时间</span><strong>{Math.floor(data.system.uptime_seconds / 3600)} 小时</strong></p><p><Database size={15} /><span>记忆用户</span><strong>{data.system.memory_users}</strong></p><p><HardDrive size={15} /><span>磁盘可用</span><strong>{bytes(data.system.disk.free)}</strong></p></div><div className="admin-storage">{Object.entries(data.system.storage || {}).map(([name, item]: [string, any]) => <p key={name}><span>{name}</span><strong>{bytes(item.bytes)}</strong></p>)}</div></section>
       </div>
+      {batchDetail ? <div className="global-overlay admin-diagnostic-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) setBatchDetail(null); }}><section className="global-modal wide admin-diagnostic-modal" role="dialog" aria-modal="true" aria-labelledby="diagnostic-title"><header className="global-modal-head"><div><strong id="diagnostic-title">推荐诊断 · @{batchDetail.username}</strong><span>{batchDetail.subject_type} / {batchDetail.scenario} · {new Date(batchDetail.created_at).toLocaleString("zh-CN")}</span></div><button className="icon-button" aria-label="关闭诊断" onClick={() => setBatchDetail(null)}><X size={17} /></button></header><div className="admin-diagnostic-body"><section className="diagnostic-summary"><article><span>实验组</span><strong>{batchDetail.request?._experiment?.variant === "personalized-evidence-v1" ? "个性化证据组" : "基准组"}</strong></article><article><span>总耗时</span><strong>{duration(batchDetail.request?._performance?.total_ms)}</strong></article><article><span>召回候选</span><strong>{diagnosticTrace?.candidate_count ?? "未记录"}</strong></article><article><span>证据候选</span><strong>{batchDetail.request?._performance?.evidence_candidates ?? "未记录"}</strong></article></section>{!hasDiagnosticTrace ? <div className="inline-notice">这是升级前生成的推荐批次，只保留了最终卡片；新的批次会完整记录召回、淘汰与证据重排过程。</div> : null}{hasDiagnosticTrace ? <><details open><summary>阶段耗时与淘汰原因</summary><div className="diagnostic-pairs">{Object.entries(batchDetail.request?._performance?.phases_ms || {}).map(([key, value]) => <p key={key}><span>{key.replaceAll("_ms", "")}</span><b>{duration(Number(value))}</b></p>)}{Object.entries(diagnosticTrace?.elimination_counts || {}).map(([key, value]) => <p key={key}><span>淘汰 · {key}</span><b>{String(value)}</b></p>)}</div></details><details open><summary>证据重排前后的候选</summary><div className="diagnostic-finalists">{(diagnosticTrace?.finalist_pool || []).map((item: AnyRow) => <article className={item.selected ? "selected" : ""} key={item.id}><header><span><strong>{item.name}</strong><small>#{item.id} · {item.selected ? "进入最终结果" : "未进入最终结果"}</small></span><b>{Number(item.before_evidence_score || 0).toFixed(2)} → {Number(item.final_score || 0).toFixed(2)}</b></header><div className="score-breakdown">{Object.entries(item.score_breakdown || {}).sort((a, b) => Math.abs(Number(b[1])) - Math.abs(Number(a[1]))).map(([key, value]) => <span className={Number(value) < 0 ? "negative" : ""} key={key}>{scoreLabels[key] || key} {Number(value) > 0 ? "+" : ""}{Number(value).toFixed(2)}</span>)}</div><p>{(item.recall_signals || []).join("；") || "仅由综合排序进入候选池"}</p><small>解释支撑 {item.claim_support?.supported || 0}/{item.claim_support?.checked || 0}</small></article>)}</div></details></> : null}<details><summary>最终卡片与用户动作</summary><div className="diagnostic-items">{(batchDetail.items || []).map((item: AnyRow) => <article key={item.id}><img src={item.image || "/placeholder.svg"} alt="" /><span><strong>{item.position}. {item.name}</strong><small>{(item.why_recalled || []).join("；")}</small><em>{item.latest_decision?.event ? `用户动作：${item.latest_decision.event}` : "尚无明确动作"}</em></span><b>{Number(item.score || 0).toFixed(2)}</b></article>)}</div></details></div></section></div> : null}
     </main>
   );
 }

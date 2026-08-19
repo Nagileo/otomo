@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 import json
 import logging
 import time
@@ -224,6 +225,7 @@ class ChatRequest(BaseModel):
     progress_episode: int | None = None
     attachments: list[dict[str, Any]] = Field(default_factory=list)
     device_id: str = Field("", max_length=96)
+    retry_of_run_id: str = Field("", max_length=96)
 
 
 class MemoryPreferencesUpdate(BaseModel):
@@ -453,6 +455,111 @@ def _manageable_memory(mem: Any) -> dict[str, Any]:
         len(profile.get("likes", [])) + len(profile.get("dislikes", []))
         for profile in aspects.values()
     )
+
+    def annotate(item: dict[str, Any], category: str) -> dict[str, Any]:
+        source = str(item.get("source") or "")
+        note = str(item.get("note") or "")
+        subject_id = int(item.get("subject_id") or 0)
+        name = str(item.get("name") or item.get("value") or "")
+        provenance = {
+            "kind": source or "legacy",
+            "label": "历史记忆",
+            "detail": "较早版本留下的记忆，来源信息不完整。",
+            "impact": "会作为弱信号影响回答与推荐。",
+            "href": "",
+        }
+        if note.startswith("recommendation_card:"):
+            channel = note.split(":", 2)[1] if ":" in note else "web"
+            provenance.update({
+                "kind": "recommendation_feedback",
+                "label": "推荐卡片反馈",
+                "detail": f"你在{'网页' if channel == 'web' else 'Discord'}端对《{name or '该条目'}》做过反馈。",
+                "impact": "影响同一条目及相近题材的后续排序。",
+                "href": f"/subject/{subject_id}" if subject_id else "",
+            })
+        elif source == "explicit_user":
+            provenance.update({
+                "label": "你明确告诉 Otomo",
+                "detail": "来自记忆管理页、对话中的明确表达或确认操作。",
+                "impact": "明确偏好优先级较高，但仍不会覆盖你本轮的新要求。",
+            })
+        elif source == "bangumi_profile":
+            provenance.update({
+                "label": "Bangumi 收藏画像",
+                "detail": "根据你的公开收藏、状态和评分统计得到。",
+                "impact": "作为画像信号参与候选召回与排序。",
+                "href": f"https://bgm.tv/user/{mem.username}",
+            })
+        elif source == "derived_from_feedback":
+            provenance.update({
+                "label": "根据使用反馈推导",
+                "detail": "由多次更多、减少、喜欢或不感兴趣反馈归纳。",
+                "impact": "只作为低于明确要求的弱排序信号。",
+            })
+        if category == "progress":
+            provenance["impact"] = "用于控制剧透边界和判断观看进度。"
+        ts = str(item.get("ts") or "")
+        age_days: int | None = None
+        if ts:
+            try:
+                parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                age_days = max(0, (datetime.now(timezone.utc) - parsed).days)
+            except ValueError:
+                age_days = None
+        if age_days is None:
+            freshness = "时间未知"
+        elif age_days == 0:
+            freshness = "今天更新"
+        elif age_days <= 7:
+            freshness = f"{age_days} 天前更新"
+        elif age_days <= 90:
+            freshness = f"{max(1, age_days // 7)} 周前更新"
+        else:
+            freshness = f"{max(1, age_days // 30)} 个月前更新"
+        item["provenance"] = provenance
+        item["freshness"] = freshness
+        item["age_days"] = age_days
+        item["stale"] = bool(age_days is not None and age_days > 180 and source != "explicit_user")
+        return item
+
+    likes = [annotate(item, "likes") for item in likes]
+    dislikes = [annotate(item, "dislikes") for item in dislikes]
+    feedback = [annotate(item, "feedback") for item in feedback]
+    progress = {key: annotate(item, "progress") for key, item in progress.items()}
+    for media, profile in aspects.items():
+        provenance = {
+            "kind": "aspect_profile",
+            "label": "评价维度画像",
+            "detail": f"根据 {media} 收藏、评分与反馈抽取的好球区和雷区。",
+            "impact": "只在候选的评价证据命中同一维度时参与重排。",
+            "href": "",
+        }
+        profile["provenance"] = provenance
+
+    def normalized(value: Any) -> str:
+        return "".join(char.lower() for char in str(value or "") if char.isalnum())
+
+    conflicts: list[dict[str, str]] = []
+    for liked in likes:
+        liked_key = normalized(liked.get("value"))
+        if not liked_key:
+            continue
+        for disliked in dislikes:
+            disliked_key = normalized(disliked.get("value"))
+            if disliked_key and (
+                liked_key == disliked_key
+                or (min(len(liked_key), len(disliked_key)) >= 2 and (
+                    liked_key in disliked_key or disliked_key in liked_key
+                ))
+            ):
+                conflicts.append({
+                    "like": str(liked.get("value") or ""),
+                    "dislike": str(disliked.get("value") or ""),
+                    "message": "同一或相近偏好同时出现在喜欢与不喜欢中，建议保留更准确的一条。",
+                })
+                break
     return {
         "username": mem.username,
         "likes": likes,
@@ -462,6 +569,7 @@ def _manageable_memory(mem: Any) -> dict[str, Any]:
         "feedback": feedback,
         "aspect_profiles": aspects,
         "updated_at": mem.updated_at,
+        "conflicts": conflicts[:8],
         "counts": {
             "explicit": sources.count("explicit_user"),
             "derived": sources.count("derived_from_feedback") + derived_aspects,
@@ -1332,6 +1440,16 @@ async def chat(req: ChatRequest, request: Request):
     runner = _runner_from_registry(req.runner, registry)
     chat_session_id = req.session_id or uuid.uuid4().hex
     session_owner = _session_owner(session.auth_session_id)
+    retry_source = None
+    if req.retry_of_run_id:
+        candidate = await app.state.chat_runs.get(session_owner, req.retry_of_run_id)
+        if (
+            candidate is not None
+            and candidate.terminal
+            and candidate.session_id == chat_session_id
+            and str(candidate.request_payload.get("message") or "") == req.message
+        ):
+            retry_source = candidate
     try:
         app.state.session_store.ensure_session(chat_session_id, session_owner)
     except PermissionError as e:
@@ -1434,13 +1552,14 @@ async def chat(req: ChatRequest, request: Request):
                         app.state.ltm,
                         username=identity.username if authenticated else None,
                     )
-                app.state.session_store.append_message(
-                    chat_session_id,
-                    session_owner,
-                    role="user",
-                    content=req.message,
-                    attachments=stored_attachments,
-                )
+                if retry_source is None:
+                    app.state.session_store.append_message(
+                        chat_session_id,
+                        session_owner,
+                        role="user",
+                        content=req.message,
+                        attachments=stored_attachments,
+                    )
                 await app.state.session_realtime.notify(
                     session_owner,
                     "session_changed",
@@ -1564,6 +1683,13 @@ async def chat(req: ChatRequest, request: Request):
             chat_session_id,
             req.device_id or "web-unknown",
             execute_run,
+            request_payload={
+                "message": req.message,
+                "runner": req.runner,
+                "session_id": chat_session_id,
+                **({"spoiler_mode": req.spoiler_mode} if req.spoiler_mode else {}),
+                **({"progress_episode": req.progress_episode} if req.progress_episode is not None else {}),
+            },
         )
     except RuntimeError as exc:
         await app.state.session_realtime.release(activity)
@@ -1820,6 +1946,11 @@ async def start_recommendation_run(
     try:
         run = await app.state.recommendation_runs.start(
             run_id, owner, "discover", "web", execute_run,
+            request_payload={
+                key: value
+                for key, value in req.model_dump(mode="json", exclude_none=True).items()
+                if key != "username"
+            },
         )
     except RuntimeError as exc:
         active = await app.state.recommendation_runs.active_for_session(owner, "discover")
@@ -2599,3 +2730,27 @@ async def background_tasks(
     ]
     rows.sort(key=lambda row: float(row.get("started_at") or 0), reverse=True)
     return {"ok": True, "data": rows[:bounded]}
+
+
+@app.get("/tasks/{kind}/{run_id}/retry")
+async def background_task_retry(
+    kind: Literal["chat", "recommendation"],
+    run_id: str,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    owner = _session_owner(session.auth_session_id)
+    hub = app.state.chat_runs if kind == "chat" else app.state.recommendation_runs
+    payload = await hub.retry_payload(owner, run_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="任务不可重试、仍在运行或已超过保留时间")
+    # Chat prompts are returned only to their owner here; /tasks and /admin never expose them.
+    if kind == "chat":
+        payload = {**payload, "retry_of_run_id": run_id}
+    return {
+        "ok": True,
+        "kind": kind,
+        "href": "/chat" if kind == "chat" else "/discover",
+        "request": payload,
+    }
