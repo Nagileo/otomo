@@ -108,10 +108,17 @@ class GuideVideoHit(BaseModel):
     url: str
     aid: int | None = None
     bvid: str | None = None
+    mid: int | None = None
     author: str
+    thumbnail_url: str | None = None
     play: int | None = None
     danmaku: int | None = None
     pubdate: int | None = None
+    content_type: Literal["preseason_guide", "airing_review", "season_recap", "general"] = "general"
+    content_type_reason: str = ""
+    discovery_source: Literal["preferred", "whitelist", "discovered"] = "whitelist"
+    matched_whitelist: bool = True
+    trust_tier: Literal["preferred", "known", "content_verified", "metadata_verified"] = "known"
     match_confidence: float = 0.0
     match_reason: str = ""
     verification_status: Literal["content_verified", "view_verified", "search_metadata"] = "search_metadata"
@@ -132,6 +139,9 @@ class GuideVideoLink(BaseModel):
     match_reason: str = ""
     confidence: Literal["high", "medium", "low"] = "medium"
     route_score: int = 0
+    discovery_source: Literal["preferred", "whitelist", "discovered"] = "whitelist"
+    matched_whitelist: bool = True
+    trust_tier: Literal["preferred", "known", "content_verified", "metadata_verified"] = "known"
     verticals: list[SubjectVertical] = Field(default_factory=list)
     verified: bool = False
     verified_hits: list[GuideVideoHit] = Field(default_factory=list)
@@ -147,9 +157,12 @@ class BiliVideoMeta(BaseModel):
     bvid: str | None = None
     author: str
     mid: int | None = None
+    thumbnail_url: str | None = None
     play: int | None = None
     danmaku: int | None = None
     pubdate: int | None = None
+    content_type: Literal["preseason_guide", "airing_review", "season_recap", "general"] = "general"
+    content_type_reason: str = ""
     matched_whitelist: bool = False
     match_confidence: float = 0.0
     match_reason: str = ""
@@ -269,6 +282,14 @@ def _clean_bili_title(value: str) -> str:
     value = re.sub(r"</?em[^>]*>", "", value)
     value = re.sub(r"<[^>]+>", "", value)
     return html.unescape(value).strip()
+
+
+def _clean_bili_image(value: str | None) -> str | None:
+    if not value:
+        return None
+    if value.startswith("//"):
+        return "https:" + value
+    return value.replace("http://", "https://")
 
 
 def _bili(keyword: str) -> str:
@@ -553,6 +574,40 @@ def _season_markers(value: str) -> dict[str, str]:
     }
 
 
+def classify_season_video(
+    title: str,
+    pubdate: int | None,
+    season_query: str,
+) -> tuple[Literal["preseason_guide", "airing_review", "season_recap", "general"], str]:
+    """Classify a seasonal video by editorial intent, not merely by month tokens."""
+    clean = _clean_bili_title(title).lower()
+    if any(word in clean for word in ("完结", "季末", "季度总结", "季度复盘", "回顾", "年终", "年度总结")):
+        return "season_recap", "标题表明它是季度回顾或完结复盘"
+    if any(word in clean for word in ("看完", "开播", "首集", "第一集", "初印象", "追番", "中期", "热播", "观望")):
+        return "airing_review", "标题表明它是开播后的追番观察或漫评"
+    if any(word in clean for word in ("导视", "前瞻", "前导", "新番推荐", "新番介绍", "季度新番", "preview")):
+        return "preseason_guide", "标题明确表明它是播前导视或季度前瞻"
+
+    markers = _season_markers(season_query)
+    if pubdate and markers["year"] and markers["month"] and "新番" in clean:
+        target = datetime(int(markers["year"]), int(markers["month"]), 1, tzinfo=timezone.utc)
+        published = datetime.fromtimestamp(int(pubdate), timezone.utc)
+        if published < target:
+            return "preseason_guide", "发布时间早于季度开播，且标题明确讨论新番"
+        if published < _season_end(target):
+            return "airing_review", "发布时间位于季度播出期，且标题明确讨论新番"
+    return "general", "标题未能明确区分播前导视、热播漫评或季度复盘"
+
+
+def _season_end(start: datetime) -> datetime:
+    month = start.month + 3
+    year = start.year
+    if month > 12:
+        month -= 12
+        year += 1
+    return datetime(year, month, 1, tzinfo=start.tzinfo)
+
+
 def _content_terms(value: str) -> list[str]:
     cleaned = re.sub(
         r"(20\d{2}\s*年?|[0-9]{1,2}\s*月|新番导视|新番推荐|导视|漫评|评价|杂谈|推荐|解析|盘点|视频)",
@@ -799,6 +854,9 @@ async def verify_guide_video_links(
             content_required = conf < min_confidence
             if content_required and not (verify_content and conf >= max(0.4, min_confidence - 0.1)):
                 continue
+            content_type, content_type_reason = classify_season_video(
+                raw.get("title") or "", raw.get("pubdate"), query,
+            )
             candidates.append((
                 conf,
                 GuideVideoHit(
@@ -806,22 +864,71 @@ async def verify_guide_video_links(
                     url=url.replace("http://", "https://"),
                     aid=raw.get("aid") or raw.get("id"),
                     bvid=raw.get("bvid"),
+                    mid=raw.get("mid"),
                     author=author,
+                    thumbnail_url=_clean_bili_image(raw.get("pic")),
                     play=raw.get("play"),
                     danmaku=raw.get("video_review"),
                     pubdate=raw.get("pubdate"),
+                    content_type=content_type,
+                    content_type_reason=content_type_reason,
                     match_confidence=round(conf, 3),
                     match_reason=reason,
                     content_required=content_required,
                 ),
             ))
         candidates.sort(key=lambda x: -x[0])
-        link.verified_hits = [x[1] for x in candidates[:max_hits_per_link]]
+
+        async def verify_view(row: tuple[float, GuideVideoHit]) -> tuple[float, GuideVideoHit] | None:
+            _score, hit = row
+            try:
+                payload = await asyncio.to_thread(_sync_bili_view, hit.aid, hit.bvid)
+            except (httpx.HTTPError, httpx.TransportError, ValueError):
+                return None
+            detail = payload.get("data") or {}
+            if not detail:
+                return None
+            author = str((detail.get("owner") or {}).get("name") or hit.author)
+            if author != link.up_name:
+                return None
+            raw = {
+                "title": detail.get("title") or hit.title,
+                "author": author,
+                "pubdate": detail.get("pubdate") or hit.pubdate,
+            }
+            score, reason = _hit_relevance(
+                raw, up_name=link.up_name, aliases=aliases, tags=tags, season_query=query,
+            )
+            if score < min_confidence and not (verify_content and score >= max(0.4, min_confidence - 0.1)):
+                return None
+            hit.title = _clean_bili_title(str(raw["title"]))
+            hit.author = author
+            hit.aid = detail.get("aid") or hit.aid
+            hit.bvid = detail.get("bvid") or hit.bvid
+            hit.mid = (detail.get("owner") or {}).get("mid") or hit.mid
+            hit.thumbnail_url = _clean_bili_image(detail.get("pic")) or hit.thumbnail_url
+            hit.pubdate = raw["pubdate"]
+            hit.play = (detail.get("stat") or {}).get("view") or hit.play
+            hit.danmaku = (detail.get("stat") or {}).get("danmaku") or hit.danmaku
+            hit.match_confidence = round(score, 3)
+            hit.match_reason = reason
+            hit.content_required = score < min_confidence
+            hit.verification_status = "view_verified"
+            hit.content_type, hit.content_type_reason = classify_season_video(hit.title, hit.pubdate, query)
+            return score, hit
+
+        finalist_rows = candidates[: max(3, max_hits_per_link * 2)]
+        verified_views = await asyncio.gather(*(verify_view(row) for row in finalist_rows)) if finalist_rows else []
+        view_candidates = [row for row in verified_views if row is not None]
+        view_candidates.sort(key=lambda x: (-x[0], -(x[1].pubdate or 0)))
+        link.verified_hits = [x[1] for x in view_candidates[:max_hits_per_link]]
         link.verified = bool(link.verified_hits)
-        link.publication_status = "published" if link.verified else "not_found"
+        link.publication_status = "published" if link.verified else ("unavailable" if candidates else "not_found")
         link.verification_note = (
-            f"已命中 {len(link.verified_hits)} 个白名单相关视频。"
+            f"已通过视频详情核验 {len(link.verified_hits)} 个白名单相关视频。"
             if link.verified else
+            "发现搜索候选，但视频详情本轮不可核验。"
+            if candidates else
             "尚未发现该 UP 已发布本次查询对应的视频。"
         )
 
@@ -1391,8 +1498,10 @@ class SearchBiliGuideVideosTool(Tool):
                     **raw,
                     "title": detail.get("title") or raw.get("title"),
                     "author": (detail.get("owner") or {}).get("name") or raw.get("author"),
+                    "mid": (detail.get("owner") or {}).get("mid") or raw.get("mid"),
                     "aid": detail.get("aid") or raw.get("aid") or raw.get("id"),
                     "bvid": detail.get("bvid") or raw.get("bvid"),
+                    "pic": detail.get("pic") or raw.get("pic"),
                     "pubdate": detail.get("pubdate") or raw.get("pubdate"),
                     "play": (detail.get("stat") or {}).get("view") or raw.get("play"),
                     "video_review": (detail.get("stat") or {}).get("danmaku") or raw.get("video_review"),
@@ -1490,11 +1599,14 @@ class SearchBiliGuideVideosTool(Tool):
                 confidence = 0.45 * confidence + 0.55 * match.confidence
                 reason = f"{reason}；内容核验：{match.reason}"
             url = raw.get("arcurl") or f"https://www.bilibili.com/video/{raw.get('bvid') or ('av' + str(raw.get('aid') or raw.get('id')))}"
+            content_type, content_type_reason = classify_season_video(title, raw.get("pubdate"), base_query)
             videos.append(BiliVideoMeta(
                 title=title, url=str(url).replace("http://", "https://"),
                 aid=raw.get("aid") or raw.get("id"), bvid=raw.get("bvid"),
-                author=author, mid=raw.get("mid"), play=raw.get("play"),
+                author=author, mid=raw.get("mid"), thumbnail_url=_clean_bili_image(raw.get("pic")),
+                play=raw.get("play"),
                 danmaku=raw.get("video_review"), pubdate=raw.get("pubdate"),
+                content_type=content_type, content_type_reason=content_type_reason,
                 matched_whitelist=matched, match_confidence=round(confidence, 3),
                 match_reason=reason, verified=bool(detail),
                 verification_status=(

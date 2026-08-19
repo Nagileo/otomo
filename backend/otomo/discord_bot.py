@@ -205,20 +205,53 @@ def _season_embeds(discord, data: dict) -> list:
         first_cover = first_cover or _cover(it)
     if first_cover:
         e.set_thumbnail(url=first_cover)
-    guide_lines = []
+    video_cards = []
+    source_labels = {"preferred": "你的来源", "whitelist": "可信来源", "discovered": "全站发现"}
+    kind_labels = {
+        "preseason_guide": "播前导视",
+        "airing_review": "热播漫评",
+        "season_recap": "季度复盘",
+        "general": "季度视频",
+    }
     for source in (data.get("guide_videos") or [])[:3]:
         for hit in (source.get("verified_hits") or [])[:1]:
             url = str(hit.get("url") or "")
             title = str(hit.get("title") or source.get("up_name") or "已核验导视")
             author = str(hit.get("author") or source.get("up_name") or "")
-            verified = "正文已核验" if hit.get("content_verified") else "标题与季度已核验"
-            guide_lines.append(
-                f"[{title[:70]}]({url}) · {author} · {verified}"
-                if url.startswith("http") else f"{title[:70]} · {author} · {verified}"
+            discovery_source = str(hit.get("discovery_source") or source.get("discovery_source") or "whitelist")
+            content_type = str(hit.get("content_type") or "general")
+            verified = "字幕/ASR 正文已核验" if hit.get("content_verified") else "标题、季度、发布时间与视频详情已核验"
+            card = discord.Embed(
+                title=title[:256],
+                url=url if url.startswith("http") else None,
+                description=(
+                    f"**{author or '未知 UP'}**\n"
+                    f"{source_labels.get(discovery_source, '可信来源')} · {kind_labels.get(content_type, '季度视频')}\n"
+                    f"{verified}"
+                )[:1000],
+                color=0xFB7299,
             )
-    if guide_lines:
-        e.add_field(name="已发布的本季导视", value="\n".join(guide_lines)[:1024], inline=False)
-    else:
+            stats = []
+            if hit.get("play"):
+                stats.append(f"播放 {hit['play']}")
+            if hit.get("danmaku"):
+                stats.append(f"弹幕 {hit['danmaku']}")
+            if hit.get("match_confidence") is not None:
+                stats.append(f"匹配 {float(hit.get('match_confidence') or 0):.0%}")
+            if stats:
+                card.add_field(name="公开数据", value=" · ".join(stats)[:1024], inline=False)
+            proof = str(hit.get("content_type_reason") or hit.get("content_match_reason") or hit.get("match_reason") or "")
+            if proof:
+                card.add_field(name="为什么进入结果", value=proof[:1024], inline=False)
+            thumbnail = str(hit.get("thumbnail_url") or "")
+            if thumbnail.startswith("http"):
+                card.set_thumbnail(url=thumbnail)
+            footer = "白名单是来源偏好，不代表视频天然正确"
+            if discovery_source == "discovered":
+                footer = "全站发现采用更严格准入；不会自动加入你的来源偏好"
+            card.set_footer(text=footer)
+            video_cards.append(card)
+    if not video_cards:
         e.add_field(
             name="B站导视状态",
             value="尚未发现已发布且通过核验的本季导视；不会用 UP 主页或搜索入口冒充具体视频。",
@@ -231,7 +264,7 @@ def _season_embeds(discord, data: dict) -> list:
     if pending_count:
         footer += f" · {pending_count} 个来源仍待核验"
     e.set_footer(text=footer[:2048])
-    return [e]
+    return [e, *video_cards]
 
 
 def _movers_embeds(discord, data: dict) -> list:

@@ -790,6 +790,7 @@ def _safe_season_payload(data: dict[str, Any]) -> dict[str, Any]:
         "guide_videos": safe_guides(data.get("guide_videos"), limit=8),
         "pending_guide_sources": safe_guides(data.get("pending_guide_sources"), limit=8),
         "guide_source_preferences": _trim_strings(data.get("guide_source_preferences"), limit=12, text_limit=80),
+        "guide_discovery_warnings": _trim_strings(data.get("guide_discovery_warnings"), limit=6, text_limit=180),
         "guide_comment_digests": digests,
         "notes": _trim_strings(data.get("notes"), limit=6, text_limit=220),
     }

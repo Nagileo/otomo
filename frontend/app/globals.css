@@ -730,6 +730,33 @@ html[data-theme="light"] .today-cover { background: var(--placeholder); }
   display: grid;
   gap: 8px;
 }
+.share-video-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+.share-video-card {
+  position: relative;
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  min-width: 0;
+  overflow: hidden;
+  padding: 0 0 11px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-card);
+  color: var(--text);
+  text-decoration: none;
+}
+.share-video-card:hover { border-color: var(--accent); }
+.share-video-card > img, .share-video-placeholder { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; background: linear-gradient(135deg, #fb7299, #6d66d8); }
+.share-video-placeholder { display: grid; place-items: center; color: #fff; font-size: 24px; font-weight: 800; letter-spacing: .12em; }
+.share-video-card > b, .share-video-card > span:not(.share-video-tags) { margin: 0 11px; }
+.share-video-card > b { line-height: 1.45; }
+.share-video-card > span:not(.share-video-tags) { color: var(--dim); font-size: 12px; }
+.share-video-tags { display: flex; flex-wrap: wrap; gap: 5px; margin: 2px 11px 0; }
+.share-video-tags i { padding: 3px 6px; border: 1px solid var(--border); border-radius: 999px; color: var(--dim); font-size: 10px; font-style: normal; }
 .share-subsection {
   margin-top: 14px;
 }
@@ -1264,6 +1291,78 @@ a.card-title:hover { color: var(--accent); }
 .guide-hit-title {
   font-size: 12px; line-height: 1.4; color: var(--text-soft);
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.section-copy { margin: -1px 0 9px; color: var(--dim); font-size: 11px; line-height: 1.55; }
+.bili-video-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(238px, 1fr));
+  gap: 10px;
+  margin-top: 8px;
+}
+.bili-video-grid.compact { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.bili-video-card {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-contrast);
+}
+.bili-video-card.preferred { border-color: rgba(158, 206, 106, .42); }
+.bili-video-card.discovered { border-color: rgba(224, 175, 104, .34); }
+.bili-video-cover {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  color: #fff;
+  text-decoration: none;
+  background: linear-gradient(135deg, #fb7299 0%, #6d66d8 100%);
+}
+.bili-video-cover img { width: 100%; height: 100%; object-fit: cover; transition: transform .18s ease; }
+.bili-video-card:hover .bili-video-cover img { transform: scale(1.025); }
+.bili-video-cover > span { display: grid; gap: 3px; justify-items: center; }
+.bili-video-cover > span b { font-size: 22px; letter-spacing: .12em; }
+.bili-video-cover > span small { opacity: .82; }
+.bili-video-cover > i {
+  position: absolute;
+  right: 7px;
+  bottom: 7px;
+  padding: 3px 6px;
+  border-radius: 5px;
+  background: rgba(12, 14, 22, .76);
+  color: #fff;
+  font-size: 10px;
+  font-style: normal;
+  backdrop-filter: blur(6px);
+}
+.bili-video-body { display: grid; gap: 7px; padding: 10px; }
+.bili-video-title {
+  min-height: 2.8em;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 750;
+  line-height: 1.4;
+  text-decoration: none;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.bili-video-title:hover, .bili-video-byline a:hover { color: var(--accent); }
+.bili-video-byline, .bili-video-stats { display: flex; flex-wrap: wrap; gap: 5px 9px; color: var(--dim); font-size: 10.5px; }
+.bili-video-byline { justify-content: space-between; }
+.bili-video-byline a { color: var(--text-soft); text-decoration: none; }
+.bili-video-proof { border-top: 1px solid var(--line); padding-top: 6px; }
+.bili-video-proof summary { cursor: pointer; color: var(--dim); font-size: 10.5px; }
+.bili-video-proof p { margin: 5px 0 0; color: var(--dim); font-size: 10.5px; line-height: 1.5; }
+@media (max-width: 620px) {
+  .bili-video-grid, .bili-video-grid.compact { grid-template-columns: 1fr; }
+  .bili-video-card { display: grid; grid-template-columns: 122px minmax(0, 1fr); }
+  .bili-video-cover { height: 100%; min-height: 128px; aspect-ratio: auto; }
+  .bili-video-title { min-height: auto; }
+  .bili-video-body { align-content: start; }
 }
 .subject-hero {
   display: grid;

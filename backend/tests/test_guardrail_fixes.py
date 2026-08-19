@@ -1055,6 +1055,33 @@ def test_discord_embed_builders():
         },
     )
     assert len(memory) == 1 and any(field[0] == "喜欢" for field in memory[0].fields)
+    season = build_embeds(
+        FD,
+        "season_guide_brief",
+        {
+            "items": [{"subject_id": 9, "title": "测试新番", "bangumi_score": 7.8}],
+            "guide_videos": [{
+                "up_name": "新锐UP",
+                "up_url": "https://space.bilibili.com/123",
+                "discovery_source": "discovered",
+                "verified_hits": [{
+                    "title": "2026年7月新番导视",
+                    "url": "https://www.bilibili.com/video/BVtest",
+                    "author": "新锐UP",
+                    "thumbnail_url": "https://i0.hdslb.com/test.jpg",
+                    "content_type": "preseason_guide",
+                    "discovery_source": "discovered",
+                    "verification_status": "view_verified",
+                    "match_confidence": 0.94,
+                }],
+            }],
+        },
+    )
+    assert len(season) == 2
+    assert season[1].kw["title"] == "2026年7月新番导视"
+    assert season[1].kw["url"].endswith("BVtest")
+    assert season[1].thumb == "https://i0.hdslb.com/test.jpg"
+    assert "全站发现" in season[1].kw["description"]
     # 未知工具 / 空 data → 走文本
     assert build_embeds(FD, "unknown_tool", {"x": 1}) == []
     assert build_embeds(FD, "recommend_subjects", None) == []

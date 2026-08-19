@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import math
-from datetime import date
+import re
+from datetime import date, datetime, timedelta, timezone
 from typing import Literal
 from urllib.parse import quote
 
@@ -24,9 +25,13 @@ from ..bangumi.models import SubjectBrief
 from ..calendar.tool import BroadcastCalendarArgs, BroadcastCalendarTool
 from ..discovery.tool import GetTrendingSubjectsTool, TrendingArgs
 from ..videos.tool import (
+    BiliGuideSearchArgs,
+    BiliVideoMeta,
     BiliVideoCommentsArgs,
     GetBiliVideoCommentsTool,
+    GuideVideoHit,
     GuideVideoLink,
+    SearchBiliGuideVideosTool,
     SubjectVertical,
     _guide_links,
     verify_guide_video_links,
@@ -76,12 +81,14 @@ class SeasonGuideBriefArgs(BaseModel):
     enrich_tags: bool = Field(True, description="是否补 Bangumi 详情标签；默认开，能提升分诊质量")
     include_video_comments: bool = Field(
         False,
-        description="是否抽样读取白名单 B站导视视频评论；用于观众期待/担心点，不作为事实源",
+        description="是否抽样读取最终通过核验的 B站季度视频评论；用于观众期待/担心点，不作为事实源",
     )
     comment_video_limit: int = Field(2, ge=1, le=3, description="最多读取几个导视视频的评论")
     comment_limit: int = Field(20, ge=5, le=50, description="每个导视视频最多读取多少条评论")
     verify_guide_videos: bool = Field(True, description="是否对路由出的白名单 UP 做真实 B站视频命中验证")
     guide_verify_limit: int = Field(2, ge=0, le=4, description="整季最多验证几个导视源；0 表示只做路由不搜索")
+    discover_beyond_whitelist: bool = Field(True, description="是否用严格门槛补充发现非白名单导视视频")
+    guide_result_limit: int = Field(4, ge=1, le=6, description="整季最多展示多少个已核验 B站视频")
     verify_item_videos: bool = Field(
         False,
         description="是否逐部搜索具体漫评；默认关闭以避免整季产生大量 B站请求，仅在用户明确要求时开启",
@@ -174,6 +181,7 @@ class SeasonGuideBriefResult(BaseModel):
     guide_videos: list[GuideVideoLink] = Field(default_factory=list)
     pending_guide_sources: list[GuideVideoLink] = Field(default_factory=list)
     guide_source_preferences: list[str] = Field(default_factory=list)
+    guide_discovery_warnings: list[str] = Field(default_factory=list)
     guide_comment_digests: list[GuideCommentDigest] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 
@@ -344,7 +352,7 @@ class ListYearAnimeTool(Tool):
 class SeasonGuideBriefTool(Tool):
     name = "season_guide_brief"
     description = (
-        "聚合某季新番导视：Bangumi 条目/评分 + yuc 放送表/制作阵容 + B站白名单导视入口 + 用户标签分诊。"
+        "聚合某季新番导视：Bangumi 条目/评分 + yuc 放送表/制作阵容 + B站偏好来源与全站补充发现 + 用户标签分诊。"
         "用于『这季怎么追 / 新番导视 / 按我口味看 7 月番』。"
         "默认只返回导视入口；include_video_comments=true 时会抽样读取少量公开视频评论，作为话语源摘要。"
     )
@@ -357,6 +365,7 @@ class SeasonGuideBriefTool(Tool):
         self._season_tool = ListSeasonAnimeTool(client)
         self._yuc_tool = ListYucSeasonTool()
         self._bili_comments_tool = GetBiliVideoCommentsTool()
+        self._bili_search_tool = SearchBiliGuideVideosTool()
 
     def _guide_source_preferences(self, args: SeasonGuideBriefArgs) -> list[str]:
         enabled = args.preferred_guide_sources
@@ -562,17 +571,269 @@ class SeasonGuideBriefTool(Tool):
                 break
         return digests
 
+    @staticmethod
+    def _guide_video_key(hit: GuideVideoHit) -> str:
+        return str(hit.bvid or hit.aid or hit.url)
+
+    @staticmethod
+    def _content_type_allowed(content_type: str, mode: str) -> bool:
+        if mode == "preseason":
+            return content_type == "preseason_guide"
+        if mode == "hot":
+            return content_type in {"preseason_guide", "airing_review"}
+        return content_type in {"preseason_guide", "airing_review", "season_recap"}
+
+    @staticmethod
+    def _publication_window_ok(
+        pubdate: int | None,
+        content_type: str,
+        year: int,
+        month: int,
+    ) -> bool:
+        if not pubdate:
+            return False
+        try:
+            published = datetime.fromtimestamp(int(pubdate), timezone.utc)
+        except (OSError, OverflowError, TypeError, ValueError):
+            return False
+        start = datetime(year, month, 1, tzinfo=timezone.utc)
+        end_month = month + 3
+        end_year = year
+        if end_month > 12:
+            end_month -= 12
+            end_year += 1
+        end = datetime(end_year, end_month, 1, tzinfo=timezone.utc)
+        if content_type == "preseason_guide":
+            return start - timedelta(days=180) <= published <= start + timedelta(days=21)
+        if content_type == "airing_review":
+            return start - timedelta(days=14) <= published <= end + timedelta(days=21)
+        if content_type == "season_recap":
+            return start + timedelta(days=30) <= published <= end + timedelta(days=120)
+        return False
+
+    def _normalize_whitelist_guides(
+        self,
+        links: list[GuideVideoLink],
+        *,
+        preferred_sources: list[str],
+        mode: str,
+        year: int,
+        month: int,
+    ) -> tuple[list[GuideVideoLink], list[GuideVideoLink]]:
+        published: list[GuideVideoLink] = []
+        pending: list[GuideVideoLink] = []
+        preferred = set(preferred_sources)
+        for link in links:
+            source = "preferred" if link.up_name in preferred else "whitelist"
+            link.discovery_source = source
+            link.matched_whitelist = True
+            link.trust_tier = "preferred" if source == "preferred" else "known"
+            kept: list[GuideVideoHit] = []
+            for hit in link.verified_hits:
+                hit.discovery_source = source
+                hit.matched_whitelist = True
+                hit.trust_tier = (
+                    "preferred" if source == "preferred"
+                    else "content_verified" if hit.content_verified
+                    else "known"
+                )
+                if not self._content_type_allowed(hit.content_type, mode):
+                    continue
+                if not self._publication_window_ok(hit.pubdate, hit.content_type, year, month):
+                    continue
+                kept.append(hit)
+            link.verified_hits = kept
+            link.verified = bool(kept)
+            if kept:
+                link.publication_status = "published"
+                published.append(link)
+            else:
+                if link.publication_status == "published":
+                    link.publication_status = "rejected"
+                    link.verification_note = "视频已发布，但类型或发布时间不符合本轮导视阶段。"
+                pending.append(link)
+        return published, pending
+
+    def _discovered_link(
+        self,
+        video: BiliVideoMeta,
+        *,
+        preferred_sources: list[str],
+    ) -> GuideVideoLink:
+        source = (
+            "preferred" if video.author in set(preferred_sources)
+            else "whitelist" if video.matched_whitelist
+            else "discovered"
+        )
+        trust_tier = (
+            "preferred" if source == "preferred"
+            else "content_verified" if video.content_verified
+            else "known" if video.matched_whitelist
+            else "metadata_verified"
+        )
+        up_url = f"https://space.bilibili.com/{video.mid}" if video.mid else ""
+        hit = GuideVideoHit(
+            title=video.title,
+            url=video.url,
+            aid=video.aid,
+            bvid=video.bvid,
+            mid=video.mid,
+            author=video.author,
+            thumbnail_url=video.thumbnail_url,
+            play=video.play,
+            danmaku=video.danmaku,
+            pubdate=video.pubdate,
+            content_type=video.content_type,
+            content_type_reason=video.content_type_reason,
+            discovery_source=source,
+            matched_whitelist=video.matched_whitelist,
+            trust_tier=trust_tier,
+            match_confidence=video.match_confidence,
+            match_reason=video.match_reason,
+            verification_status=video.verification_status,
+            content_verified=video.content_verified,
+            content_match_confidence=video.content_match_confidence,
+            content_match_reason=video.content_match_reason,
+            transcript_source=video.transcript_source,
+            content_mentions=video.content_mentions,
+        )
+        return GuideVideoLink(
+            label=f"{video.title} · {video.author}",
+            url=video.url,
+            up_name=video.author,
+            up_url=up_url,
+            positioning=(
+                "你的首选导视来源" if source == "preferred"
+                else "B站导视白名单来源" if source == "whitelist"
+                else "全站严格筛选补充发现"
+            ),
+            match_reason=video.match_reason,
+            confidence="high" if video.match_confidence >= 0.82 else "medium",
+            discovery_source=source,
+            matched_whitelist=video.matched_whitelist,
+            trust_tier=trust_tier,
+            verified=True,
+            verified_hits=[hit],
+            verification_query=video.url,
+            verification_note=(
+                "已通过字幕正文与视频详情核验。"
+                if video.content_verified else
+                "已通过标题、季度、发布时间与视频详情核验；暂无可用字幕正文。"
+            ),
+            publication_status="published",
+        )
+
+    def _merge_discovered_guides(
+        self,
+        preferred_guides: list[GuideVideoLink],
+        discovered: list[BiliVideoMeta],
+        *,
+        preferred_sources: list[str],
+        mode: str,
+        year: int,
+        month: int,
+        limit: int,
+    ) -> list[GuideVideoLink]:
+        merged = list(preferred_guides)
+        seen = {
+            self._guide_video_key(hit)
+            for link in merged
+            for hit in link.verified_hits
+        }
+        for video in discovered:
+            if not video.verified:
+                continue
+            if not self._content_type_allowed(video.content_type, mode):
+                continue
+            if not self._publication_window_ok(video.pubdate, video.content_type, year, month):
+                continue
+            if video.matched_whitelist:
+                accepted = video.match_confidence >= 0.62
+            else:
+                hard_title_match = (
+                    str(year) in video.title
+                    and bool(re.search(rf"(?<!\d){month}\s*月", video.title))
+                    and video.content_type != "general"
+                )
+                accepted = (
+                    video.content_verified and video.match_confidence >= 0.62
+                ) or (
+                    video.verification_status == "view_verified"
+                    and (
+                        video.match_confidence >= 0.82
+                        or (hard_title_match and video.match_confidence >= 0.58)
+                    )
+                )
+            if not accepted:
+                continue
+            link = self._discovered_link(video, preferred_sources=preferred_sources)
+            key = self._guide_video_key(link.verified_hits[0])
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(link)
+
+        source_rank = {"preferred": 0, "whitelist": 1, "discovered": 2}
+        kind_rank = (
+            {"preseason_guide": 0, "airing_review": 1, "season_recap": 2, "general": 3}
+            if mode == "preseason" else
+            {"airing_review": 0, "preseason_guide": 1, "season_recap": 2, "general": 3}
+        )
+        merged.sort(key=lambda link: (
+            source_rank.get(link.discovery_source, 3),
+            kind_rank.get(link.verified_hits[0].content_type if link.verified_hits else "general", 3),
+            -int(bool(link.verified_hits and link.verified_hits[0].content_verified)),
+            -(link.verified_hits[0].match_confidence if link.verified_hits else 0.0),
+        ))
+        return merged[:limit]
+
     async def run(self, args: SeasonGuideBriefArgs) -> ToolResult[SeasonGuideBriefResult]:
         phase = _season_phase(args.year, args.month)
         mode = _effective_mode(args.mode, phase)
         guide_preferences = self._guide_source_preferences(args)
-        season, yuc_res = await asyncio.gather(
+        guide_query = f"{args.year}年{args.month}月 新番导视"
+        discovery_task = (
+            asyncio.create_task(self._bili_search_tool.run(BiliGuideSearchArgs(
+                query=guide_query,
+                tags=(args.focus_tags or [])[:2],
+                whitelist_only=False,
+                limit=min(8, max(args.guide_result_limit * 2, 6)),
+            )))
+            if args.verify_guide_videos and args.guide_verify_limit > 0 and args.discover_beyond_whitelist
+            else None
+        )
+        core_coroutines = [
             self._season_tool._fetch_season(args.year, args.month, args.limit),
             self._yuc_tool.run(YucSeasonArgs(year=args.year, month=args.month, limit=80)),
-        )
+            self._profile_tags(args.username),
+        ]
+        initial_results = await asyncio.gather(*core_coroutines)
+        season, yuc_res = initial_results[:2]
+        personalized, profile_tags = initial_results[2]
         yuc_items = yuc_res.data.anime if yuc_res.ok and yuc_res.data else []
-        personalized, profile_tags = await self._profile_tags(args.username)
         wanted = list(dict.fromkeys((args.focus_tags or []) + profile_tags))
+        season_guide_links = _guide_links(
+            guide_query,
+            "season",
+            8,
+            wanted,
+            preferred_sources=guide_preferences or None,
+        )
+        verify_guides_task = (
+            asyncio.create_task(verify_guide_video_links(
+                guide_query,
+                season_guide_links,
+                title_aliases=[guide_query, f"{args.year}年{args.month}月新番"],
+                tags=wanted,
+                max_links=min(3, args.guide_verify_limit),
+                max_hits_per_link=1,
+                min_confidence=0.5,
+                verify_content=True,
+                content_verify_limit=min(3, args.guide_verify_limit),
+            ))
+            if args.verify_guide_videos and args.guide_verify_limit > 0
+            else None
+        )
         hot_signals = (
             await self._hot_signal_maps(season.anime[: args.limit])
             if mode != "preseason" else
@@ -684,28 +945,35 @@ class SeasonGuideBriefTool(Tool):
         else:
             items.sort(key=lambda x: (-_fit_rank(x.fit), -x.fit_score, -x.hotness, -(x.bangumi_score or 0)))
 
-        guide_query = f"{args.year}年{args.month}月 新番导视"
-        season_guide_links = _guide_links(
-            guide_query,
-            "season",
-            8,
-            wanted,
-            preferred_sources=guide_preferences or None,
+        discovery_warnings: list[str] = []
+        discovered_videos: list[BiliVideoMeta] = []
+        if verify_guides_task is not None:
+            season_guide_links = await verify_guides_task
+        discovered_result = await discovery_task if discovery_task is not None else None
+        if discovered_result is not None:
+            if discovered_result.ok and discovered_result.data:
+                discovered_videos = discovered_result.data.videos
+                discovery_warnings = discovered_result.data.warnings
+            elif discovered_result.error:
+                discovery_warnings = [discovered_result.error]
+        published_guides, pending_guides = self._normalize_whitelist_guides(
+            season_guide_links,
+            preferred_sources=guide_preferences,
+            mode=mode,
+            year=args.year,
+            month=args.month,
         )
-        if args.verify_guide_videos and args.guide_verify_limit > 0:
-            season_guide_links = await verify_guide_video_links(
-                guide_query,
-                season_guide_links,
-                title_aliases=[guide_query, f"{args.year}年{args.month}月新番"],
-                tags=wanted,
-                max_links=min(3, args.guide_verify_limit),
-                max_hits_per_link=1,
-                min_confidence=0.5,
-                verify_content=True,
-                content_verify_limit=min(3, args.guide_verify_limit),
-            )
-        published_guides = [link for link in season_guide_links if link.publication_status == "published"]
-        pending_guides = [link for link in season_guide_links if link.publication_status != "published"]
+        published_guides = self._merge_discovered_guides(
+            published_guides,
+            discovered_videos,
+            preferred_sources=guide_preferences,
+            mode=mode,
+            year=args.year,
+            month=args.month,
+            limit=args.guide_result_limit,
+        )
+        published_authors = {link.up_name for link in published_guides}
+        pending_guides = [link for link in pending_guides if link.up_name not in published_authors]
         guide_comment_digests = (
             await self._collect_guide_comment_digests(
                 guide_query,
@@ -729,6 +997,7 @@ class SeasonGuideBriefTool(Tool):
             guide_videos=published_guides,
             pending_guide_sources=pending_guides,
             guide_source_preferences=guide_preferences,
+            guide_discovery_warnings=discovery_warnings,
             guide_comment_digests=guide_comment_digests,
             notes=[
                 "Bangumi 提供条目/评分/收藏锚点，yuc 提供放送表/官网/PV/制作阵容。",
@@ -737,8 +1006,9 @@ class SeasonGuideBriefTool(Tool):
                 (
                     "B站导视评论已抽样读取；它们是话语源，不是事实源，且可能包含剧透/玩梗。"
                     if guide_comment_digests else
-                    "季度导视只展示已经发布并通过季度/标题核验的具体视频；未发布、搜索不可用或正文不匹配的 UP 不参与排序。"
+                    "季度视频采用偏好/白名单优先、全站严格补充发现；未发布、阶段不符、搜索不可用或正文不匹配的候选不参与排序。"
                 ),
+                "播前导视、热播漫评和季度复盘会分别标注；非白名单视频必须通过更严格的标题、季度、发布时间与视频详情门槛。",
                 (
                     "hot 模式已融合 Bangumi doing / trending / 分集讨论量；热度是追番参考，不等于质量。"
                     if mode == "hot" else
@@ -758,6 +1028,16 @@ class SeasonGuideBriefTool(Tool):
         ]
         if yuc_res.ok and yuc_res.data:
             sources.append(Citation(title=f"yuc.wiki — {season.season}", url=yuc_res.data.source_url, source="yuc"))
+        sources.extend(
+            Citation(
+                title=f"Bilibili — {hit.title}",
+                url=hit.url,
+                source="bilibili",
+                image=hit.thumbnail_url,
+            )
+            for link in published_guides[:4]
+            for hit in link.verified_hits[:1]
+        )
         return ToolResult(ok=True, data=result, sources=sources)
 
 

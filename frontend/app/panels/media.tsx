@@ -865,40 +865,69 @@ export function SeasonGuidePanel({
     none: "热度：暂无趋势",
   };
   const single = Boolean(anchoredItem);
-  const renderGuideRoute = (video: AnyRecord, idx: number) => {
-    const hit = list(video.verified_hits)[0] || null;
-    const href = hit?.url || video.url || video.up_url || "";
+  const videoTypeLabel: Record<string, string> = {
+    preseason_guide: "播前导视",
+    airing_review: "热播漫评",
+    season_recap: "季度复盘",
+    general: "季度视频",
+  };
+  const sourceLabel: Record<string, string> = {
+    preferred: "你的来源",
+    whitelist: "可信来源",
+    discovered: "全站发现",
+  };
+  const formatCount = (value: unknown) => {
+    const number = Number(value || 0);
+    return number ? new Intl.NumberFormat("zh-CN", { notation: "compact", maximumFractionDigits: 1 }).format(number) : "";
+  };
+  const formatVideoDate = (value: unknown) => {
+    const timestamp = Number(value || 0);
+    return timestamp ? new Date(timestamp * 1000).toLocaleDateString("zh-CN", { year: "numeric", month: "short", day: "numeric" }) : "";
+  };
+  const guideRows = (sources: AnyRecord[], limit = 8) => sources.flatMap((source) => (
+    list(source.verified_hits).map((hit) => ({ source, hit }))
+  )).slice(0, limit);
+  const renderBiliVideoCard = ({ source, hit }: { source: AnyRecord; hit: AnyRecord }, idx: number) => {
+    const href = hit.url || source.url || "";
+    const upHref = source.up_url || (hit.mid ? `https://space.bilibili.com/${hit.mid}` : "");
+    const discoverySource = String(hit.discovery_source || source.discovery_source || "whitelist");
+    const contentType = String(hit.content_type || "general");
     return (
-      <a className={`guide-route ${video.verified ? "verified" : ""}`} href={href || undefined} target={href ? "_blank" : undefined} rel={href ? "noreferrer" : undefined} key={`${video.up_name}-${idx}`}>
-        <div className="guide-route-head">
-          <span>{text(video.up_name)}</span>
-          <Badge tone={video.verified ? "good" : video.confidence === "high" ? "warn" : "dim"}>
-            {video.verified ? "已命中" : "仅导航"}
-          </Badge>
-        </div>
-        <div className="card-meta">{text(video.positioning)}</div>
-        {hit ? (
-          <>
-            <div className="guide-hit-title">{text(hit.title)}</div>
-            <div className="card-meta">
-              conf {pct(hit.match_confidence)}
-              {hit.play ? ` · 播放 ${hit.play}` : ""}
-              {hit.danmaku ? ` · 弹幕 ${hit.danmaku}` : ""}
-            </div>
-            <div className="evidence-row tight">
-              <Badge tone={hit.content_verified ? "good" : "dim"}>{hit.content_verified ? `${hit.transcript_source === "asr" ? "ASR" : "字幕"}正文已核验` : "仅元数据核验"}</Badge>
-              {hit.content_verified && hit.content_mentions ? <Badge tone="dim">正文命中 {hit.content_mentions} 处</Badge> : null}
-            </div>
-          </>
-        ) : (
-          <div className="card-meta">{text(video.verification_note || video.match_reason)}</div>
-        )}
-        {list(video.verticals).length > 0 && (
-          <div className="compact-list inline">
-            {list(video.verticals).slice(0, 2).map((v, j) => <span key={`${v.name}-${j}`}>{text(v.label)} {pct(v.confidence)}</span>)}
+      <article className={`bili-video-card ${discoverySource}`} key={`${hit.bvid || hit.aid || href}-${idx}`}>
+        <a className="bili-video-cover" href={href} target="_blank" rel="noreferrer" aria-label={`打开 B站视频：${text(hit.title)}`}>
+          {hit.thumbnail_url ? (
+            <img src={hit.thumbnail_url} alt="" loading="lazy" referrerPolicy="no-referrer" />
+          ) : (
+            <span><b>BILI</b><small>{videoTypeLabel[contentType] || "季度视频"}</small></span>
+          )}
+          <i>{videoTypeLabel[contentType] || "季度视频"}</i>
+        </a>
+        <div className="bili-video-body">
+          <div className="evidence-row tight">
+            <Badge tone={discoverySource === "preferred" ? "good" : discoverySource === "discovered" ? "warn" : "dim"}>
+              {sourceLabel[discoverySource] || "可信来源"}
+            </Badge>
+            <Badge tone={hit.content_verified ? "good" : "dim"}>
+              {hit.content_verified ? `${hit.transcript_source === "asr" ? "ASR" : "字幕"}正文已核验` : "元数据已核验"}
+            </Badge>
           </div>
-        )}
-      </a>
+          <a className="bili-video-title" href={href} target="_blank" rel="noreferrer">{text(hit.title)}</a>
+          <div className="bili-video-byline">
+            {upHref ? <a href={upHref} target="_blank" rel="noreferrer">{text(hit.author || source.up_name)}</a> : <span>{text(hit.author || source.up_name)}</span>}
+            {formatVideoDate(hit.pubdate) ? <span>{formatVideoDate(hit.pubdate)}</span> : null}
+          </div>
+          <div className="bili-video-stats">
+            {hit.play ? <span>播放 {formatCount(hit.play)}</span> : null}
+            {hit.danmaku ? <span>弹幕 {formatCount(hit.danmaku)}</span> : null}
+            <span>匹配 {pct(hit.match_confidence)}</span>
+          </div>
+          <details className="bili-video-proof">
+            <summary>为什么进入结果</summary>
+            <p>{text(hit.content_type_reason || source.positioning)}</p>
+            <p>{text(hit.content_match_reason || hit.match_reason || source.verification_note)}</p>
+          </details>
+        </div>
+      </article>
     );
   };
   return (
@@ -984,8 +1013,8 @@ export function SeasonGuidePanel({
               {list(item.guide_videos).length > 0 && (
                 <details className="item-guide-details">
                   <summary>导视来源 {list(item.guide_videos).length}</summary>
-                  <div className="guide-route-list">
-                    {list(item.guide_videos).slice(0, 3).map(renderGuideRoute)}
+                  <div className="bili-video-grid compact">
+                    {guideRows(list(item.guide_videos), 3).map(renderBiliVideoCard)}
                   </div>
                 </details>
               )}
@@ -995,9 +1024,10 @@ export function SeasonGuidePanel({
       </div>
       {!single && list(data.guide_videos).length > 0 && (
         <>
-          <div className="section-title">已发布并核验的季度导视</div>
-          <div className="guide-route-list global">
-            {list(data.guide_videos).slice(0, 6).map(renderGuideRoute)}
+          <div className="section-title">B站季度视频</div>
+          <div className="section-copy">偏好来源优先；全站发现使用更严格的标题、季度、发布时间和视频详情门槛。</div>
+          <div className="bili-video-grid">
+            {guideRows(list(data.guide_videos), 6).map(renderBiliVideoCard)}
           </div>
         </>
       )}
@@ -1010,6 +1040,12 @@ export function SeasonGuidePanel({
         </details>
       )}
       {!single && !list(data.guide_videos).length && <div className="inline-notice">目前还没有发现已发布且通过核验的本季导视视频。Otomo 不会用 UP 主页或搜索入口冒充具体导视。</div>}
+      {!single && list<string>(data.guide_discovery_warnings).length > 0 && (
+        <details className="pending-guide-sources">
+          <summary>本轮 B站发现说明</summary>
+          <div className="compact-list">{list<string>(data.guide_discovery_warnings).map((warning, index) => <span key={index}>{warning}</span>)}</div>
+        </details>
+      )}
       {!single && list(data.guide_comment_digests).length > 0 && (
         <>
           <div className="section-title">导视评论摘要</div>

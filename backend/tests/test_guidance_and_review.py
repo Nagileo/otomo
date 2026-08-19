@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import date
+from datetime import date, datetime, timezone
 
 import pytest
 
@@ -39,6 +39,7 @@ from otomo.tools.user_analysis.tool import _build_affinity, _parse_friend_list, 
 from otomo.tools.videos import tool as videos_tool
 from otomo.tools.videos.tool import (
     BiliDanmakuItem,
+    BiliVideoMeta,
     BiliVideoCommentsResult,
     BiliVideoContentArgs,
     BiliVideoDanmakuResult,
@@ -47,6 +48,7 @@ from otomo.tools.videos.tool import (
     GuideVideoLink,
     SummarizeBiliVideoContentTool,
     _clean_bili_title,
+    classify_season_video,
     _guide_links,
     _hit_relevance,
     _match_video_transcript,
@@ -92,6 +94,83 @@ def test_auto_season_mode_uses_preseason_for_future_quarter():
     assert phase == "upcoming"
     assert _effective_mode("auto", phase) == "preseason"
     assert _effective_mode("hot", phase) == "hot"
+
+
+def test_season_video_titles_are_classified_by_editorial_stage():
+    before = int(datetime(2026, 5, 30, tzinfo=timezone.utc).timestamp())
+    airing = int(datetime(2026, 8, 5, tzinfo=timezone.utc).timestamp())
+    after = int(datetime(2026, 10, 20, tzinfo=timezone.utc).timestamp())
+    assert classify_season_video(
+        "终于等到你们！2026年7月新番导视", before, "2026年7月 新番导视",
+    )[0] == "preseason_guide"
+    assert classify_season_video(
+        "看完7月新番，我走火入魔", airing, "2026年7月 新番导视",
+    )[0] == "airing_review"
+    assert classify_season_video(
+        "2026年7月新番季度复盘", after, "2026年7月 新番导视",
+    )[0] == "season_recap"
+
+
+def test_season_discovery_fills_empty_whitelist_with_strict_non_whitelist_video():
+    tool = SeasonGuideBriefTool(object())
+    published = int(datetime(2026, 5, 22, tzinfo=timezone.utc).timestamp())
+    accepted = BiliVideoMeta(
+        title="我为7月新番的伟大而喜悦！【2026年7月新番导视】",
+        url="https://www.bilibili.com/video/BVdiscover",
+        bvid="BVdiscover",
+        author="新锐导视UP",
+        mid=123,
+        pubdate=published,
+        content_type="preseason_guide",
+        content_type_reason="标题明确表明它是播前导视",
+        matched_whitelist=False,
+        match_confidence=0.60,
+        verified=True,
+        verification_status="view_verified",
+    )
+    too_weak = accepted.model_copy(update={
+        "title": "7月新番闲聊", "bvid": "BVweak", "match_confidence": 0.74,
+    })
+    merged = tool._merge_discovered_guides(
+        [], [too_weak, accepted], preferred_sources=[], mode="preseason",
+        year=2026, month=7, limit=4,
+    )
+    assert len(merged) == 1
+    assert merged[0].up_name == "新锐导视UP"
+    assert merged[0].discovery_source == "discovered"
+    assert merged[0].verified_hits[0].trust_tier == "metadata_verified"
+
+
+def test_season_discovery_deduplicates_whitelist_and_rejects_wrong_stage():
+    tool = SeasonGuideBriefTool(object())
+    before = int(datetime(2026, 5, 30, tzinfo=timezone.utc).timestamp())
+    preferred = GuideVideoLink(
+        label="泛式", url="https://www.bilibili.com/video/BVsame", up_name="泛式",
+        up_url="https://space.bilibili.com/63231", positioning="评价向",
+        publication_status="published", verified=True,
+        verified_hits=[videos_tool.GuideVideoHit(
+            title="2026年7月新番导视", url="https://www.bilibili.com/video/BVsame",
+            bvid="BVsame", author="泛式", pubdate=before,
+            content_type="preseason_guide", match_confidence=0.94,
+            verification_status="view_verified",
+        )],
+    )
+    duplicate = BiliVideoMeta(
+        title="2026年7月新番导视", url="https://www.bilibili.com/video/BVsame",
+        bvid="BVsame", author="泛式", pubdate=before,
+        content_type="preseason_guide", matched_whitelist=True,
+        match_confidence=0.96, verified=True, verification_status="view_verified",
+    )
+    wrong_stage = duplicate.model_copy(update={
+        "bvid": "BVrecap", "url": "https://www.bilibili.com/video/BVrecap",
+        "content_type": "season_recap",
+    })
+    merged = tool._merge_discovered_guides(
+        [preferred], [duplicate, wrong_stage], preferred_sources=["泛式"],
+        mode="preseason", year=2026, month=7, limit=4,
+    )
+    assert len(merged) == 1
+    assert merged[0].verified_hits[0].bvid == "BVsame"
 
 
 def test_season_source_preferences_follow_authenticated_surface_identity(tmp_path):
@@ -198,6 +277,10 @@ def test_transcript_conflict_rejects_apparently_matching_season_video(monkeypatc
         ))
 
     monkeypatch.setattr(videos_tool, "_bili_search_async", fake_search)
+    monkeypatch.setattr(videos_tool, "_sync_bili_view", lambda _aid, _bvid: {"data": {
+        "aid": 42, "bvid": "BVtest", "title": "2026年7月新番导视",
+        "owner": {"name": "名作之壁吧", "mid": 2859372}, "pubdate": 1782864000,
+    }})
     monkeypatch.setattr(videos_tool.GetBiliVideoSubtitlesTool, "run", fake_subtitle_run)
     result = asyncio.run(verify_guide_video_links(
         "2026年7月 新番导视",
@@ -247,6 +330,10 @@ def test_ambiguous_monthly_video_is_rejected_without_transcript(monkeypatch):
         return ToolResult(ok=False, error="没有公开字幕")
 
     monkeypatch.setattr(videos_tool, "_bili_search_async", fake_search)
+    monkeypatch.setattr(videos_tool, "_sync_bili_view", lambda _aid, _bvid: {"data": {
+        "aid": 67, "bvid": "BVmonthly", "title": "百合月刊 No.67 2026年7月",
+        "owner": {"name": "FlowerMX-花梦", "mid": 13181306}, "pubdate": 1782864000,
+    }})
     monkeypatch.setattr(videos_tool.GetBiliVideoSubtitlesTool, "run", no_subtitle)
     result = asyncio.run(verify_guide_video_links(
         "2026年7月 新番导视",

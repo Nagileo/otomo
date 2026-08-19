@@ -77,7 +77,7 @@ B站 = 视频搜索 + 创作者社区 + 评论语料。**分阶段**，不一上
 - **评测层（关键）**：把 source routing 做成 **eval 维度**——检查"该用 Bangumi 没乱用 web""问分集有没有查 `episode_comments`""问 galgame 是否用 VNDB"。既不多一跳、又让"选对源"可验证，**直接接上 Agentic-RL 的 source routing reward**（路由从运行时负担变成可评测/可训练的能力）。
 - **后期边界**：工具涨到 40-60 个时，可加**非用户可见的轻量 tool-subset selector**（只为减少暴露给 LLM 的 schema 数、降延迟），是性能优化、不是现在的产品功能。
 - **AniList / Fandom**：作 Canonical / Lore 的**兜底添头**（主源查不到再补），主体不动摇。
-- **B站评论**：保持 link-out + UP 白名单为默认；已开始支持用户给定视频/新番导视场景的单页公开评论摘要。未来再考虑视频评论作 RAG 知识库。保持不大规模爬（反爬 / 账号风险）。
+- **B站评论**：保持 link-out；新番导视先看用户偏好/UP 白名单，再以严格门槛补充全站发现。已支持最终核验视频的单页公开评论摘要。未来再考虑视频评论作 RAG 知识库，保持不大规模爬（反爬 / 账号风险）。
 
 ## C. 算法层（Agentic-RL 平移，拓宽 moat）
 把可验证奖励从"图谱多跳"扩展到垂直 agent 的更多维度：
@@ -106,7 +106,7 @@ B站 = 视频搜索 + 创作者社区 + 评论语料。**分阶段**，不一上
 - `get_episode_comments` 已有工具层 `max_episode_sort` 硬过滤；`analyze_abandoned_subjects` 可结合 `ep_status` 和附近分集讨论做弃坑节点分析。
 - `search_bilibili_guide_videos` 已返回 B站白名单导视视频元数据，`get_bilibili_video_comments` 已能抽取单视频公开评论样本。
 - `get_bilibili_video_comments` 已复用方面级抽取，返回 `aspect_opinions` 与 `opinion_summary`，用于总结导视/漫评评论区的期待点、担心点和争议点。
-- `season_guide_brief(include_video_comments=true)` 已能把白名单导视视频评论摘要接入新番导视结果，默认仍不抓评论以控制成本和风险。
+- `season_guide_brief` 已能把偏好/白名单来源与全站严格发现合并去重，并区分播前导视、热播漫评和季度复盘；`include_video_comments=true` 只读取最终通过核验的视频评论，默认仍不抓评论以控制成本和风险。
 - `explain_acgn_meme` 已接入萌娘百科，用于梗/术语/出处解释。
 - `review_subject` 已增加方面级口碑摘要：story/character/pacing/visual/music/direction/text/system/voice/general + positive/negative/mixed + spoiler_risk，并聚合为 `aspect_summary`。
 - `analyze_user_opinions` 与 `get_bilibili_video_comments` 已返回 `aspect_summary`，可用于解释用户/评论区具体喜欢或担心的是剧情、角色、节奏、作画等哪个方面。

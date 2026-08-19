@@ -85,7 +85,7 @@ Phase 7   图谱 Verifier / benchmark / Agentic-RL + 多模态识番/GraphRAG
 **三个证据面板（先做）**
 - `ReviewEvidencePanel` ← `review_subject`：各源评分卡（Bangumi/EGS/VNDB/AniList/MusicBrainz）+ 样本量 + `confidence`；`aspect_summary`（剧情/角色/节奏/作画正负分歧）；剧透风险标识。
 - `TasteAffinityPanel` ← `compare_user_taste`：`rating_/collection_/user_space_/peer_space_/extreme_similarity` + 共同高分/低分/最大分歧 + `confidence_reasons`。
-- `SeasonGuidePanel` ← `season_guide_brief`：作品卡(Bangumi 评分 + yuc 放送/PV/官网) + `fit/reason/evidence` + B站导视入口 + 可选 `guide_comment_digests`。
+- `SeasonGuidePanel` ← `season_guide_brief`：作品卡(Bangumi 评分 + yuc 放送/PV/官网) + `fit/reason/evidence` + B站视频卡片（偏好/白名单优先、全站严格发现、阶段分类）+ 可选 `guide_comment_digests`。
 - （扩展）`RecommendPanel` ← `recommend_subjects`：`reasons/evidence/external_mappings/quality_badges/notes`。
 
 **⊕ 探索视图 + 可分享产出（自原远期提前——都是"已有结构化数据的可视化"，与面板同源、可一起做）**

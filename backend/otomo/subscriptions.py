@@ -549,10 +549,14 @@ class SubscriptionService:
                 if not test:
                     self.store.touch_run(rule, hit_key)
                 return self._record(rule, hit_key, "skipped", title=rule.title, payload={"reason": "empty payload", **payload})
+            default_title = default_subscription_title(rule.kind)
+            configured_title = rule.title or default_title
+            suggested_title = str(payload.get("notification_title") or "").strip()
+            item_title = suggested_title if suggested_title and configured_title == default_title else configured_title
             item = InboxItem(
                 id=secrets.token_urlsafe(14),
                 kind=_inbox_kind(rule.kind),
-                title=rule.title or default_subscription_title(rule.kind),
+                title=item_title[:120],
                 payload={**payload, "subscription_id": rule.id, "subscription_kind": rule.kind, "push_grading": rule.template, "test": test},
                 unread=("inbox" in rule.channels) and not test,
                 created_at=now_iso(),
@@ -1027,7 +1031,13 @@ class SubscriptionService:
             BiliGuideSearchArgs(query=query, tags=tags, whitelist_only=bool(rule.filters.get("whitelist_only", False)), limit=int(rule.filters.get("limit") or 8))
         )
         items = [x.model_dump(mode="json", exclude_none=True) for x in (res.data.videos if res.ok and res.data else [])]
+        if len(items) == 1:
+            author = str(items[0].get("author") or "B站")
+            notification_title = f"{author}：{str(items[0].get('title') or '新视频')}"
+        else:
+            notification_title = f"发现 {len(items)} 条「{query}」相关视频"
         return {
+            "notification_title": notification_title[:120],
             "sections": [
                 {
                     "title": "B站导视 / 漫评新视频",

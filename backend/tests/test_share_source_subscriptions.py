@@ -203,3 +203,26 @@ def test_subscription_interval_and_test_push_have_no_state_side_effects(monkeypa
     assert after.last_run_at == before.last_run_at
     assert after.last_hit_key == before.last_hit_key
     assert ltm.load_user("alice").inbox == []
+
+
+def test_bili_subscription_uses_specific_video_notification_title(monkeypatch, tmp_path):
+    store = SubscriptionStore(str(tmp_path / "subs.sqlite3"))
+    ltm = LongTermMemory(tmp_path / "ltm")
+    rule = store.create(
+        CreateSubscriptionRuleRequest(kind="bili_up_video", channels=["inbox"]),
+        owner_key="user:alice",
+        username="alice",
+    )
+    service = SubscriptionService(store, ltm, AuthStore(tmp_path / "auth"))
+
+    async def fake_materialize(_rule, *, test=False):
+        return {
+            "notification_title": "泛式：2026年7月新番导视",
+            "sections": [{"title": "B站导视 / 漫评新视频", "items": [{"title": "2026年7月新番导视"}]}],
+        }
+
+    monkeypatch.setattr(service, "_materialize", fake_materialize)
+    record = asyncio.run(service.run_rule(rule))
+    assert record.status == "sent"
+    assert record.title == "泛式：2026年7月新番导视"
+    assert ltm.load_user("alice").inbox[-1].title == record.title

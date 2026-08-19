@@ -187,9 +187,11 @@ function MonthlyReportShare({ data }: { data: AnyRecord }) {
 
 function SeasonGuideShare({ data }: { data: AnyRecord }) {
   const items = list(data.items);
-  const guides = list(data.guide_videos).filter((video) =>
-    video.publication_status === "published" && list(video.verified_hits).some((hit) => Boolean(hit.url)),
-  );
+  const guides = list(data.guide_videos).flatMap((source) => (
+    source.publication_status === "published"
+      ? list(source.verified_hits).filter((hit) => Boolean(hit.url)).map((hit) => ({ source, hit }))
+      : []
+  ));
   const modeLabels: Record<string, string> = {
     preseason: "播前导视",
     hot: "当前热播",
@@ -216,16 +218,18 @@ function SeasonGuideShare({ data }: { data: AnyRecord }) {
       </section>
       {guides.length > 0 && (
         <section className="share-section">
-          <h2>已发布并核验的导视</h2>
-          <div className="share-list">
-            {guides.map((video, i) => {
-              const hit = list(video.verified_hits)[0] || {};
-              const href = hit.url;
+          <h2>B站季度视频</h2>
+          <div className="share-video-grid">
+            {guides.map(({ source, hit }, i) => {
+              const href = safeHref(hit.url);
+              const kind = ({ preseason_guide: "播前导视", airing_review: "热播漫评", season_recap: "季度复盘" } as Record<string, string>)[String(hit.content_type)] || "季度视频";
+              const origin = String(hit.discovery_source || source.discovery_source) === "discovered" ? "全站发现" : String(hit.discovery_source || source.discovery_source) === "preferred" ? "你的来源" : "可信来源";
               return (
-                <a href={safeHref(href)} key={`${video.up_name}-${i}`}>
-                  <b>{text(video.up_name)}</b>
-                  <span>{hit.content_verified ? "字幕正文已核验" : "标题与季度已核验"} · {text(video.positioning)}</span>
-                  <small>{text(hit.title || video.verification_note || video.match_reason, "")}</small>
+                <a href={href} className="share-video-card" key={`${hit.bvid || hit.aid || i}`}>
+                  {hit.thumbnail_url ? <img src={hit.thumbnail_url} alt="" loading="lazy" referrerPolicy="no-referrer" /> : <span className="share-video-placeholder">BILI</span>}
+                  <span className="share-video-tags"><i>{origin}</i><i>{kind}</i></span>
+                  <b>{text(hit.title)}</b>
+                  <span>{text(hit.author || source.up_name)} · {hit.content_verified ? "正文已核验" : "元数据已核验"}</span>
                 </a>
               );
             })}

@@ -9,7 +9,9 @@ const connectSrc = development
 const upgrade = development ? "" : "; upgrade-insecure-requests";
 
 const nextConfig = {
-  output: "standalone",
+  // Production images use standalone output. Local Windows validation can opt out because
+  // creating pnpm symlinks requires Developer Mode/admin privileges on that platform.
+  output: process.env.OTOMO_NEXT_STANDALONE === "0" ? undefined : "standalone",
   async headers() {
     return [{
       source: "/(.*)",
