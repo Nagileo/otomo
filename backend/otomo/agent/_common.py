@@ -1120,6 +1120,8 @@ def _safe_anime_watch_hub_payload(data: dict[str, Any]) -> dict[str, Any]:
     for item in _trim_dicts(bili_raw.get("videos"), limit=8):
         copied = dict(item)
         copied["identity_evidence"] = _trim_strings(copied.get("identity_evidence"), limit=4, text_limit=160)
+        copied["content_evidence"] = _trim_strings(copied.get("content_evidence"), limit=6, text_limit=180)
+        copied["page_titles"] = _trim_strings(copied.get("page_titles"), limit=8, text_limit=100)
         copied["match_reason"] = _trim_text(copied.get("match_reason"), 220)
         copied["caution"] = _trim_text(copied.get("caution"), 220)
         videos.append(copied)

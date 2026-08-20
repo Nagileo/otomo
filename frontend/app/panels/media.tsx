@@ -797,9 +797,11 @@ export function AnimeWatchHubPanel({
   const lifecycle = data.lifecycle || {};
   const bili = data.bilibili || {};
   const videos = list(bili.videos);
-  const directCount = list(bili.watch_candidates).length;
+  const playableVideos = videos.filter((video) => video.watch_candidate);
+  const uncertainVideos = videos.filter((video) => video.role === "episode_candidate");
+  const editorialVideos = videos.filter((video) => !video.watch_candidate && video.role !== "episode_candidate");
   const roleLabel: Record<string, string> = {
-    staff_uploaded_episode: "Staff/制作方直传",
+    public_full_episode: "公开视频正片",
     episode_candidate: "疑似正片",
     official_pv: "官方/PV",
     review: "漫评",
@@ -818,6 +820,54 @@ export function AnimeWatchHubPanel({
     const number = Number(value || 0);
     return number ? new Intl.NumberFormat("zh-CN", { notation: "compact", maximumFractionDigits: 1 }).format(number) : "";
   };
+  const formatDuration = (value: unknown) => {
+    const seconds = Number(value || 0);
+    if (!seconds) return "";
+    const minutes = Math.round(seconds / 60);
+    return minutes >= 60 ? `${Math.floor(minutes / 60)}小时${minutes % 60 ? `${minutes % 60}分` : ""}` : `${minutes}分钟`;
+  };
+  const renderVideoCard = (video: AnyRecord, i: number) => {
+    const href = video.url || "";
+    const upHref = video.mid ? `https://space.bilibili.com/${video.mid}` : "";
+    const copyrightLabel = video.copyright_declaration === "repost" ? "投稿声明：转载" : video.copyright_declaration === "original" ? "投稿声明：自制" : "";
+    return (
+      <article className={`bili-video-card subject-video ${video.watch_candidate ? "public-upload" : ""}`} key={`${video.bvid || video.aid || href}-${i}`}>
+        <a className="bili-video-cover" href={href} target="_blank" rel="noreferrer">
+          {video.thumbnail_url ? <img src={video.thumbnail_url} alt="" loading="lazy" referrerPolicy="no-referrer" /> : <span><b>BILI</b><small>{roleLabel[String(video.role)] || "相关视频"}</small></span>}
+          <i>{roleLabel[String(video.role)] || "相关视频"}</i>
+        </a>
+        <div className="bili-video-body">
+          <div className="evidence-row tight">
+            <Badge tone={video.watch_candidate || video.role === "episode_candidate" ? "warn" : "dim"}>{roleLabel[String(video.role)] || "相关视频"}</Badge>
+            {video.watch_candidate ? <Badge tone="warn">非正版入口 · 版权未核验</Badge> : null}
+            <Badge tone={video.uploader_class === "staff_or_production" || video.uploader_class === "platform_account" ? "good" : video.uploader_class === "self_claimed_official" ? "warn" : "dim"}>{uploaderLabel[String(video.uploader_class)] || "作者身份未知"}</Badge>
+            <Badge tone={video.verified ? "good" : "warn"}>{video.verified ? "稿件元数据已读取" : "仅搜索元数据"}</Badge>
+          </div>
+          <a className="bili-video-title" href={href} target="_blank" rel="noreferrer">{text(video.title)}</a>
+          <div className="bili-video-byline">
+            {upHref ? <a href={upHref} target="_blank" rel="noreferrer">{text(video.author)}</a> : <span>{text(video.author)}</span>}
+            {video.pubdate ? <span>{new Date(Number(video.pubdate) * 1000).toLocaleDateString("zh-CN")}</span> : null}
+          </div>
+          <div className="bili-video-stats">
+            {video.duration_seconds ? <span>时长 {formatDuration(video.duration_seconds)}</span> : null}
+            {Number(video.page_count || 0) > 1 ? <span>{video.page_count} 个分P</span> : null}
+            {video.episode_coverage ? <span>{text(video.episode_coverage)}</span> : null}
+            {copyrightLabel ? <span>{copyrightLabel}</span> : null}
+            {video.play ? <span>播放 {formatCount(video.play)}</span> : null}
+            {video.danmaku ? <span>弹幕 {formatCount(video.danmaku)}</span> : null}
+            <span>作品匹配 {pct(video.match_confidence)}</span>
+          </div>
+          <details className="bili-video-proof">
+            <summary>{video.watch_candidate ? "为什么判断为可看的完整动画内容" : "分类与核验依据"}</summary>
+            {list<string>(video.content_evidence).map((row, j) => <p key={`content-${j}`}>{row}</p>)}
+            {list<string>(video.identity_evidence).map((row, j) => <p key={`identity-${j}`}>{row}</p>)}
+            <p>{text(video.match_reason, "标题与作品别名通过一致性检查")}</p>
+            <p>{text(video.caution, "打开后请核对内容")}</p>
+          </details>
+        </div>
+      </article>
+    );
+  };
   return (
     <>
       <Panel title="动画观看中心" subtitle={`${text(subject.name)} · ${text(lifecycle.label, "状态待确认")}`}>
@@ -825,7 +875,7 @@ export function AnimeWatchHubPanel({
           <Badge tone={lifecycle.state === "airing" ? "good" : lifecycle.state === "upcoming" ? "warn" : "dim"}>{text(lifecycle.label)}</Badge>
           {subject.platform ? <Badge tone="dim">{text(subject.platform)}</Badge> : null}
           {subject.eps ? <Badge tone="dim">{subject.eps} 集</Badge> : null}
-          <Badge tone={directCount ? "good" : "dim"}>B站直传候选 {directCount}</Badge>
+          <Badge tone={playableVideos.length ? "warn" : "dim"}>B站普通投稿可看 {playableVideos.length}</Badge>
         </div>
         <p className="evidence-copy">{text(lifecycle.strategy)}</p>
         <div className="watch-hub-summary">
@@ -834,51 +884,36 @@ export function AnimeWatchHubPanel({
       </Panel>
       {data.online?.title ? <WhereToWatchPanel data={data.online} /> : null}
       <Panel
-        title={`B站视频内容 · ${text(subject.name)}`}
-        subtitle={`${videos.length} 个具体稿件 · 正片直传与漫评严格分开`}
+        title={`B站普通投稿与延伸内容 · ${text(subject.name)}`}
+        subtitle={`${playableVideos.length} 个可看正片候选 · ${editorialVideos.length} 个PV/漫评/回顾 · ${uncertainVideos.length} 个疑似候选`}
       >
         <div className="inline-notice watch-source-boundary">
-          番剧库页面是已核验平台入口；Staff/制作方上传的普通视频稿件会单独标识，不能仅凭稿件推断全部地区版权。
+          番剧库页面才是正版平台入口。下方“公开视频正片”来自B站普通投稿：可以打开观看，但Otomo未核验版权或上传授权，不会把它写成正版。
         </div>
-        {videos.length ? (
+        {playableVideos.length ? (
+          <>
+            <div className="section-title">普通投稿中的可看正片</div>
+            <div className="section-copy">依据作品匹配、总时长、分P及正片/字幕格式信号进入；UP主是否像Staff不是必要条件。</div>
+            <div className="bili-video-grid">
+              {playableVideos.map(renderVideoCard)}
+            </div>
+          </>
+        ) : <EmptyHint text="暂时没有普通投稿通过作品一致性、时长和正片内容门槛；不会用短片或标题党填充观看入口。" />}
+        {editorialVideos.length ? (
+          <>
+            <div className="section-title">PV、漫评与回顾</div>
           <div className="bili-video-grid">
-            {videos.map((video, i) => {
-              const href = video.url || "";
-              const upHref = video.mid ? `https://space.bilibili.com/${video.mid}` : "";
-              return (
-                <article className={`bili-video-card subject-video ${video.watch_candidate ? "staff-upload" : ""}`} key={`${video.bvid || video.aid || href}-${i}`}>
-                  <a className="bili-video-cover" href={href} target="_blank" rel="noreferrer">
-                    {video.thumbnail_url ? <img src={video.thumbnail_url} alt="" loading="lazy" referrerPolicy="no-referrer" /> : <span><b>BILI</b><small>{roleLabel[String(video.role)] || "相关视频"}</small></span>}
-                    <i>{roleLabel[String(video.role)] || "相关视频"}</i>
-                  </a>
-                  <div className="bili-video-body">
-                    <div className="evidence-row tight">
-                      <Badge tone={video.watch_candidate ? "good" : video.role === "episode_candidate" ? "warn" : "dim"}>{roleLabel[String(video.role)] || "相关视频"}</Badge>
-                      <Badge tone={video.uploader_class === "staff_or_production" || video.uploader_class === "platform_account" ? "good" : video.uploader_class === "self_claimed_official" ? "warn" : "dim"}>{uploaderLabel[String(video.uploader_class)] || "作者身份未知"}</Badge>
-                      <Badge tone={video.verified ? "good" : "warn"}>{video.verified ? "稿件详情已核验" : "仅搜索元数据"}</Badge>
-                    </div>
-                    <a className="bili-video-title" href={href} target="_blank" rel="noreferrer">{text(video.title)}</a>
-                    <div className="bili-video-byline">
-                      {upHref ? <a href={upHref} target="_blank" rel="noreferrer">{text(video.author)}</a> : <span>{text(video.author)}</span>}
-                      {video.pubdate ? <span>{new Date(Number(video.pubdate) * 1000).toLocaleDateString("zh-CN")}</span> : null}
-                    </div>
-                    <div className="bili-video-stats">
-                      {video.play ? <span>播放 {formatCount(video.play)}</span> : null}
-                      {video.danmaku ? <span>弹幕 {formatCount(video.danmaku)}</span> : null}
-                      <span>作品匹配 {pct(video.match_confidence)}</span>
-                    </div>
-                    <details className="bili-video-proof">
-                      <summary>{video.watch_candidate ? "为什么认为是直传正片候选" : "分类与核验依据"}</summary>
-                      {list<string>(video.identity_evidence).map((row, j) => <p key={j}>{row}</p>)}
-                      <p>{text(video.match_reason, "标题与作品别名通过一致性检查")}</p>
-                      <p>{text(video.caution, "打开后请核对内容")}</p>
-                    </details>
-                  </div>
-                </article>
-              );
-            })}
+              {editorialVideos.map(renderVideoCard)}
           </div>
-        ) : <EmptyHint text="暂时没有具体视频通过作品与版本一致性门槛；不会用不确定稿件填充卡片。" />}
+          </>
+        ) : null}
+        {uncertainVideos.length ? (
+          <details className="pending-guide-sources">
+            <summary>疑似正片，但证据不足 {uncertainVideos.length}</summary>
+            <div className="section-copy">这些稿件不会进入默认观看入口；打开前请自行确认是否完整、是否同一季以及上传来源。</div>
+            <div className="bili-video-grid compact">{uncertainVideos.map(renderVideoCard)}</div>
+          </details>
+        ) : null}
         {bili.navigation_url ? <div className="panel-actions"><a className="button-secondary" href={bili.navigation_url} target="_blank" rel="noreferrer">在B站继续搜索</a></div> : null}
         <Meta notes={list<string>(bili.warnings)} />
       </Panel>

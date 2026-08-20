@@ -10,7 +10,7 @@ import asyncio
 from collections import Counter, defaultdict
 from datetime import date
 import re
-from statistics import mean
+from statistics import mean, median
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -257,6 +257,21 @@ def _date_prefix(value: str) -> date | None:
         return None
 
 
+def _duration_minutes(value: str) -> float | None:
+    text = str(value or "").strip().lower()
+    if not text:
+        return None
+    clock = re.search(r"(?:(\d{1,2}):)?(\d{1,2}):(\d{2})", text)
+    if clock:
+        hours = int(clock.group(1) or 0)
+        return hours * 60 + int(clock.group(2)) + int(clock.group(3)) / 60
+    hours_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:小时|小時|hours?|hrs?|h)", text)
+    minutes_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:分钟|分鐘|分|min(?:ute)?s?|m)", text)
+    if hours_match or minutes_match:
+        return (float(hours_match.group(1)) * 60 if hours_match else 0) + (float(minutes_match.group(1)) if minutes_match else 0)
+    return None
+
+
 def _anime_lifecycle(raw: dict[str, Any]) -> AnimeLifecycle:
     today = date.today()
     air_text = str(raw.get("date") or "")
@@ -289,7 +304,7 @@ def _anime_lifecycle(raw: dict[str, Any]) -> AnimeLifecycle:
         if age <= 210:
             return AnimeLifecycle(
                 state="airing", label="正在播出或近期上线", air_date=air_text, end_date=end_text,
-                strategy="优先查正版更新、最新集 RSS、Staff 直传候选与首集/阶段漫评",
+                strategy="优先查正版更新、最新集 RSS、B站普通投稿正片候选与首集/阶段漫评",
                 confidence=0.72 if not end else 0.88,
             )
         if age <= 730:
@@ -588,7 +603,7 @@ class WatchCockpitTool(Tool):
 class AnimeWatchHubTool(Tool):
     name = "anime_watch_hub"
     description = (
-        "动画作品的一站式观看枢纽：按 Bangumi 条目聚合正版观看、制作方/Staff B站直传候选、"
+        "动画作品的一站式观看枢纽：按 Bangumi 条目聚合正版观看、B站普通投稿中的可看正片候选、"
         "PV/漫评/回顾、Mikan/字幕组 RSS、BT/BD 入口。适用于新番和老番；只读聚合，下载器仍需单独确认。"
     )
     args_model = AnimeWatchHubArgs
@@ -618,6 +633,22 @@ class AnimeWatchHubTool(Tool):
                 relevant.append(name)
         return relevant[:24]
 
+    async def _episode_runtime_minutes(self, subject_id: int) -> float | None:
+        """Read actual Bangumi episode durations when the subject infobox omits runtime."""
+        try:
+            payload = await self.client.get_episodes(subject_id, episode_type=0, limit=12, offset=0)
+        except Exception:  # noqa: BLE001 - runtime enrichment must not block the hub
+            return None
+        minutes: list[float] = []
+        for row in (payload or {}).get("data") or []:
+            if not isinstance(row, dict):
+                continue
+            seconds = float(row.get("duration_seconds") or 0)
+            value = seconds / 60 if seconds > 0 else _duration_minutes(str(row.get("duration") or ""))
+            if value is not None and 0.5 <= value <= 300:
+                minutes.append(value)
+        return round(float(median(minutes)), 2) if minutes else None
+
     async def run(self, args: AnimeWatchHubArgs) -> ToolResult[AnimeWatchHubResult]:
         raw = await _resolve_subject(self.client, args)
         if not raw:
@@ -628,6 +659,13 @@ class AnimeWatchHubTool(Tool):
         sid = int(subject["id"])
         lifecycle = _anime_lifecycle(raw)
         aliases = [str(subject.get("name") or ""), str(subject.get("name_jp") or "")]
+        production_text = _infobox_text(raw, ("动画制作", "動畫製作", "アニメーション制作", "制作"))
+        production_names = [
+            name.strip() for name in re.split(r"\s*[/、,，]\s*", production_text)
+            if name.strip()
+        ][:12]
+        runtime_text = _infobox_text(raw, ("片长", "片長", "单集片长", "單集片長", "每话时长", "每話時長", "时长", "時長"))
+        expected_episode_minutes = _duration_minutes(runtime_text)
 
         staff_task = asyncio.create_task(asyncio.wait_for(self._staff_signals(sid), timeout=8))
         watch_task = asyncio.create_task(asyncio.wait_for(self.watch.run(WhereToWatchArgs(
@@ -643,21 +681,21 @@ class AnimeWatchHubTool(Tool):
             )), timeout=35))
             if args.include_release else None
         )
-        try:
-            staff_names = await staff_task
-        except TimeoutError:
-            staff_names = []
-        production_text = _infobox_text(raw, ("动画制作", "動畫製作", "アニメーション制作", "制作"))
-        for name in re.split(r"\s*[/、,，]\s*", production_text):
-            name = name.strip()
-            if name and name not in staff_names:
-                staff_names.append(name)
-        staff_names = staff_names[:24]
+        if expected_episode_minutes is None and args.include_videos:
+            try:
+                expected_episode_minutes = await asyncio.wait_for(
+                    self._episode_runtime_minutes(sid), timeout=6,
+                )
+            except (TimeoutError, asyncio.CancelledError):
+                expected_episode_minutes = None
         video_task = (
             asyncio.create_task(asyncio.wait_for(self.videos.run(BiliSubjectVideosArgs(
                 query=str(subject.get("name") or ""),
                 aliases=aliases,
-                staff_names=staff_names,
+                # 身份只作附加说明，不再阻塞或决定“公开视频可看”的判定。
+                staff_names=production_names,
+                expected_episode_minutes=expected_episode_minutes,
+                subject_platform=str(subject.get("platform") or ""),
                 lifecycle=lifecycle.state,
                 limit=args.video_limit,
             )), timeout=25))
@@ -669,6 +707,11 @@ class AnimeWatchHubTool(Tool):
         if video_task is not None:
             pending.append(video_task)
         resolved = await asyncio.gather(*pending, return_exceptions=True)
+        try:
+            person_staff = await staff_task
+        except (TimeoutError, asyncio.CancelledError):
+            person_staff = []
+        staff_names = list(dict.fromkeys([*production_names, *person_staff]))[:24]
 
         watch_res = resolved[0] if resolved else None
         cursor = 1
@@ -698,18 +741,18 @@ class AnimeWatchHubTool(Tool):
         fallback_count = len(online.get("search_fallbacks") or [])
         release_groups = len(releases.get("groups") or [])
         release_items = len(releases.get("fallback_items") or [])
-        staff_uploads = len(bilibili.watch_candidates) if bilibili else 0
+        public_uploads = len(bilibili.watch_candidates) if bilibili else 0
         video_count = len(bilibili.videos) if bilibili else 0
         summary = [
             f"正版/官方平台：{official_count} 个已核验候选" if official_count else (
                 f"正版平台暂不可核验；保留 {fallback_count} 个搜索入口" if fallback_count else "暂未找到可靠正版平台入口"
             ),
-            f"B站 Staff/制作方直传正片候选：{staff_uploads} 个" if staff_uploads else "未发现同时满足作者身份与正片特征的B站直传",
+            f"B站普通投稿可看正片候选：{public_uploads} 个（非正版入口）" if public_uploads else "未发现通过时长、分P与作品一致性核验的B站普通投稿正片",
             f"离线入口：{release_groups} 个 RSS 组 / {release_items} 条 BT/BD 兜底" if releases else "本轮未返回离线入口",
             f"B站延伸内容：{video_count} 个已分类具体视频" if bilibili else "本轮未返回B站延伸内容",
         ]
         caveats = [
-            "B站番剧库页是平台正版入口；普通视频稿件即使匹配制作方/Staff，也只作为直传观看候选，不能据此推断全部地区版权。",
+            "B站番剧库页是平台正版入口；普通投稿即使包含完整动画内容，也只作为公开可看候选，版权与上传授权未核验。",
             "RSS、BT 与 BD 结果只聚合公开标题和外链；Otomo 不代理、不托管、不自动下载内容。",
             "推送 qBittorrent 必须由用户从具体发布项发起，并在确认界面再次确认。",
         ]

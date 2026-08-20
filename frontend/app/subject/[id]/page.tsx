@@ -92,7 +92,7 @@ export default function SubjectPage({ params }: { params: { id: string } }) {
       {error ? <div className="surface-error">{error}</div> : null}
       {watchHubError ? <div className="surface-error">观看中心部分加载失败：{watchHubError}</div> : null}
       {!data && !error ? <div className="surface-loading">正在汇总无剧透评价、系列关系、音乐与观看入口…</div> : null}
-      {!watchHub && !watchHubError ? <div className="surface-loading">正在核验正版页面、Staff直传、B站内容与离线RSS；作品档案可先继续浏览…</div> : null}
+      {!watchHub && !watchHubError ? <div className="surface-loading">正在核验正版页面、B站普通投稿正片、延伸内容与离线RSS；作品档案可先继续浏览…</div> : null}
       {share ? <div className="inline-notice">分享页已生成：<a href={share} target="_blank" rel="noreferrer">打开公开快照</a></div> : null}
       {data ? <SubjectActions subject={subject} /> : null}
       {pendingDownload ? <div className="inline-confirm"><strong>确认推送到你的 qBittorrent？</strong><span>{pendingDownload.summary}</span><div><button className="button-secondary" onClick={() => void confirmDownloader(false)}>取消</button><button className="button-primary" onClick={() => void confirmDownloader(true)}>确认推送</button></div></div> : null}

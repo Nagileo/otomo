@@ -71,6 +71,8 @@ class BiliSubjectVideosArgs(BaseModel):
     query: str = Field(..., description="动画主标题")
     aliases: list[str] = Field(default_factory=list, description="中日英别名；用于排除同名、续作和重制版误配")
     staff_names: list[str] = Field(default_factory=list, description="Bangumi 制作方/Staff 名称；只作为作者身份信号")
+    expected_episode_minutes: float | None = Field(None, gt=0, le=300, description="Bangumi 条目给出的单集/影片时长，用于识别短篇与排除残缺正片")
+    subject_platform: str = Field("", description="Bangumi 条目的媒介形态，如 TV/Web/剧场版；用于排除跨篇章误配")
     lifecycle: Literal["upcoming", "airing", "recent", "archive", "unknown"] = "unknown"
     limit: int = Field(5, ge=1, le=10)
 
@@ -201,7 +203,7 @@ class BiliGuideSearchResult(BaseModel):
 
 class BiliSubjectVideoMeta(BiliVideoMeta):
     role: Literal[
-        "staff_uploaded_episode",
+        "public_full_episode",
         "episode_candidate",
         "official_pv",
         "review",
@@ -218,6 +220,13 @@ class BiliSubjectVideoMeta(BiliVideoMeta):
     ] = "unknown"
     watch_candidate: bool = False
     identity_evidence: list[str] = Field(default_factory=list)
+    content_evidence: list[str] = Field(default_factory=list)
+    duration_seconds: int | None = None
+    page_count: int = 1
+    page_titles: list[str] = Field(default_factory=list)
+    episode_coverage: str = ""
+    copyright_declaration: Literal["original", "repost", "unknown"] = "unknown"
+    rights_status: Literal["uploader_rights_unknown"] = "uploader_rights_unknown"
     caution: str = ""
 
 
@@ -643,6 +652,91 @@ _SUBJECT_EPISODE_RE = re.compile(
     re.IGNORECASE,
 )
 
+_SUBJECT_EPISODE_NUMBER_RE = re.compile(
+    r"(?:第\s*([0-9一二三四五六七八九十百]+)\s*[话話集]|(?:episode|ep)\s*0*([0-9]+))",
+    re.IGNORECASE,
+)
+
+
+def _chinese_number(value: str) -> int | None:
+    if value.isdigit():
+        return int(value)
+    digits = {"零": 0, "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+    if value == "十":
+        return 10
+    if "百" in value:
+        left, right = value.split("百", 1)
+        hundreds = digits.get(left, 1) * 100
+        tail = _chinese_number(right) if right else 0
+        return hundreds + (tail or 0)
+    if "十" in value:
+        left, right = value.split("十", 1)
+        tens = digits.get(left, 1) * 10
+        return tens + digits.get(right, 0)
+    return digits.get(value)
+
+
+def _episode_coverage(title: str, page_titles: list[str]) -> str:
+    numbers: set[int] = set()
+    for value in [title, *page_titles]:
+        for match in _SUBJECT_EPISODE_NUMBER_RE.finditer(value or ""):
+            token = next((item for item in match.groups() if item), "")
+            number = _chinese_number(token)
+            if number is not None and 0 < number <= 10000:
+                numbers.add(number)
+    ordered = sorted(numbers)
+    if len(ordered) >= 2:
+        if ordered == list(range(ordered[0], ordered[-1] + 1)):
+            return f"第 {ordered[0]}–{ordered[-1]} 话"
+        preview = "、".join(str(item) for item in ordered[:6])
+        return f"可识别分集：{preview}{'…' if len(ordered) > 6 else ''}"
+    if ordered:
+        return f"第 {ordered[0]} 话"
+    return ""
+
+
+def _subject_version_compatibility(
+    aliases: list[str],
+    title: str,
+    page_titles: list[str] | None = None,
+    subject_platform: str = "",
+) -> tuple[bool, str]:
+    """Reject watch uploads that explicitly name another installment or format."""
+    query_text = " ".join([*aliases, subject_platform])
+    hit_text = " ".join([title, *(page_titles or [])])
+    query_markers = _season_markers(query_text)
+    hit_markers = _season_markers(hit_text)
+    query_number = _chinese_number(query_markers["numbered"]) if query_markers["numbered"] else None
+    hit_number = _chinese_number(hit_markers["numbered"]) if hit_markers["numbered"] else None
+    if query_number and hit_number and query_number != hit_number:
+        return False, f"候选明确标注第 {hit_number} 季，与当前第 {query_number} 季条目冲突"
+    if query_number is None and hit_number and hit_number >= 2:
+        return False, f"当前条目未标续作编号，候选却明确标注第 {hit_number} 季"
+
+    query_lower = query_text.lower()
+    hit_lower = hit_text.lower()
+    movie_tokens = ("剧场版", "劇場版", "电影版", "電影版", "the movie")
+    ova_tokens = ("ova", "oad")
+    query_is_movie = any(token in query_lower for token in movie_tokens) or any(
+        token in query_lower for token in ("movie", "电影", "電影")
+    )
+    hit_is_movie = any(token in hit_lower for token in movie_tokens)
+    query_is_ova = any(token in query_lower for token in ova_tokens)
+    hit_is_ova = any(token in hit_lower for token in ova_tokens)
+    if hit_is_movie and not query_is_movie:
+        return False, "候选明确标注为剧场版，但当前条目不是电影/剧场版"
+    if hit_is_ova and not query_is_ova:
+        return False, "候选明确标注为 OVA/OAD，但当前条目不是对应篇章"
+    if hit_number and query_number == hit_number:
+        return True, f"候选季数与当前第 {query_number} 季条目一致"
+    if hit_number == 1 and query_number is None:
+        return True, "候选标注第一季，与当前未标续作编号的条目兼容"
+    if hit_is_movie and query_is_movie:
+        return True, "候选与当前条目均为电影/剧场版"
+    if hit_is_ova and query_is_ova:
+        return True, "候选与当前条目均为 OVA/OAD"
+    return True, ""
+
 
 def classify_subject_video(
     title: str,
@@ -650,9 +744,14 @@ def classify_subject_video(
     description: str = "",
     *,
     staff_names: list[str] | None = None,
+    duration_seconds: int | None = None,
+    page_titles: list[str] | None = None,
+    copyright_code: int | None = None,
+    match_confidence: float = 0.0,
+    expected_duration_seconds: int | None = None,
 ) -> tuple[
     Literal[
-        "staff_uploaded_episode", "episode_candidate", "official_pv", "review",
+        "public_full_episode", "episode_candidate", "official_pv", "review",
         "retrospective", "fan_creation", "related",
     ],
     Literal[
@@ -661,14 +760,15 @@ def classify_subject_video(
     ],
     bool,
     list[str],
+    list[str],
     str,
 ]:
-    """Classify a concrete-work Bilibili video without conflating uploads with bangumi pages.
+    """Classify a public Bilibili upload by content shape, separately from licensed pages.
 
-    In recent years production committees, studios and individual staff sometimes publish
-    full animation content as ordinary Bilibili video submissions.  Those are useful watch
-    candidates, but the video API does not prove licensing.  We therefore surface the
-    identity signals and keep them separate from ``where_to_watch`` verified bangumi pages.
+    Ordinary uploads can contain a complete episode or film even when the uploader cannot
+    be mapped to a Bangumi staff name.  Playability therefore depends on work relevance,
+    long-form metadata and episode/full-content signals; uploader identity is supplemental
+    evidence only.  No ordinary upload is promoted to a licensed platform source.
     """
     clean_title = _clean_bili_title(title)
     lower = f"{clean_title} {author} {description}".lower()
@@ -684,70 +784,122 @@ def classify_subject_video(
             or author_key in _norm_video_text(name)
         )
     ]
-    evidence: list[str] = []
+    identity_evidence: list[str] = []
+    content_evidence: list[str] = []
     known_platform = any(token in author_key for token in ("哔哩哔哩番剧", "bilibili番剧", "哔哩哔哩动画"))
     self_claimed = any(token in lower for token in ("官方账号", "官方频道", "official channel")) or any(
         token in author.lower() for token in ("官方", "official")
     )
     if known_platform:
         uploader_class = "platform_account"
-        evidence.append("作者名命中 Bilibili 动画/番剧平台账号信号")
+        identity_evidence.append("作者名命中 Bilibili 动画/番剧平台账号信号")
     elif staff_hits:
         uploader_class = "staff_or_production"
-        evidence.append("作者名与 Bangumi 制作方/Staff 信号匹配：" + "、".join(staff_hits[:2]))
+        identity_evidence.append("作者名与 Bangumi 制作方/Staff 信号匹配：" + "、".join(staff_hits[:2]))
     elif self_claimed:
         uploader_class = "self_claimed_official"
-        evidence.append("作者或简介含官方身份自述，尚未由平台授权页交叉确认")
+        identity_evidence.append("作者或简介含官方身份自述，尚未由平台授权页交叉确认")
     else:
         uploader_class = "unknown"
 
+    pages = [str(item or "").strip() for item in (page_titles or []) if str(item or "").strip()]
+    duration = max(int(duration_seconds or 0), 0)
+    expected_duration = max(int(expected_duration_seconds or 0), 0)
+    page_episode_hits = sum(bool(_SUBJECT_EPISODE_RE.search(item)) for item in pages)
+    copyright_declaration = "转载" if copyright_code == 2 else "自制" if copyright_code == 1 else "未知"
+    if duration:
+        content_evidence.append(f"稿件总时长约 {max(1, round(duration / 60))} 分钟")
+    if expected_duration:
+        content_evidence.append(f"条目参考时长约 {max(1, round(expected_duration / 60))} 分钟")
+    if len(pages) > 1:
+        content_evidence.append(f"稿件含 {len(pages)} 个分P，其中 {page_episode_hits} 个具有分集标题特征")
+    if copyright_code in {1, 2}:
+        content_evidence.append(f"B站投稿声明为“{copyright_declaration}”；该字段不等于版权授权证明")
+
     auxiliary_media = any(
         token in content_lower
-        for token in ("op/ed", "op／ed", "剧中歌", "角色歌", "专辑", "演唱会", "特典", "素材", "剪辑")
-    )
-    reaction = "reaction" in content_lower
-    non_episode_context = auxiliary_media or reaction
-    full_episode = not non_episode_context and (
-        bool(_SUBJECT_EPISODE_RE.search(clean_title)) or any(
-            token in content_lower for token in ("正片", "全片", "全集", "全话", "全話", "完整版", "本篇", "免费放送")
+        for token in (
+            "op/ed", "op／ed", "剧中歌", "角色歌", "专辑", "演唱会", "演奏会",
+            "live event", "concert", "ライブ", "特典", "素材", "剪辑",
         )
     )
+    reaction = "reaction" in content_lower
     promo = "pv" in content_lower or bool(re.search(r"(?:^|\W)(?:teaser|trailer)(?:\W|$)", content_lower, re.IGNORECASE)) or any(
         token in content_lower for token in ("预告", "預告", "先导", "先導", "宣传片")
     )
-    retrospective = any(token in content_lower for token in ("完结评价", "完結", "回顾", "回顧", "复盘", "補番", "补番", "多年后"))
-    review = any(token in content_lower for token in ("漫评", "评价", "解析", "解读", "吐槽", "初印象", "首集", "值不值得看"))
-    fan = any(token in content_lower for token in ("mad", "amv", "手书", "混剪", "二创", "mmd"))
-
-    trusted_identity = uploader_class in {"platform_account", "staff_or_production"}
-    if full_episode and trusted_identity:
-        evidence.append("标题具有正片/分集特征")
-        return (
-            "staff_uploaded_episode", uploader_class, True, evidence,
-            "这是普通视频稿件中的正片候选，不等同于番剧库授权页；请在打开后确认内容完整性、地区与版权说明。",
+    condensed_story = any(
+        token in content_lower
+        for token in (
+            "一口气看完", "一口氣看完", "一口气看懂", "一口氣看懂",
+            "剧情解说", "劇情解說", "动漫解说", "動漫解說", "动画解说", "動畫解說",
+            "电影解说", "電影解說", "影视解说", "影視解說", "速看", "全剧情", "全劇情",
+            "剧情梳理", "劇情梳理", "故事梳理", "剧情回顾", "劇情回顧", "浓缩", "濃縮",
         )
-    if full_episode:
-        evidence.append("标题具有正片/分集特征，但作者身份未交叉确认")
+    ) or bool(re.search(r"\d+\s*(?:分钟|分鐘|分|min(?:ute)?s?)\s*(?:带你|帶你)?\s*看完", content_lower, re.IGNORECASE))
+    retrospective = condensed_story or any(
+        token in content_lower for token in ("完结评价", "完結", "回顾", "回顧", "复盘", "補番", "补番", "多年后")
+    )
+    review = any(token in content_lower for token in ("漫评", "评价", "解析", "解读", "吐槽", "初印象", "值不值得看"))
+    fan = any(token in content_lower for token in ("mad", "amv", "手书", "混剪", "二创", "mmd"))
+    excluded_context = auxiliary_media or reaction or promo or retrospective or review or fan
+    explicit_episode = bool(_SUBJECT_EPISODE_RE.search(clean_title))
+    explicit_full = any(
+        token in content_lower for token in ("正片", "全片", "全集", "全话", "全話", "完整版", "本篇", "免费放送", "限时放送")
+    )
+    release_format = any(
+        token in content_lower for token in ("中字", "字幕", "国语", "國語", "粤语", "粵語", "日语", "日語", "1080p", "720p", "bdrip", "web-dl", "无删减", "無刪減")
+    )
+    short_format = any(token in content_lower for token in ("泡面番", "短篇动画", "短篇動畫", "短片动画", "短片動畫"))
+    multipart_episode = len(pages) > 1 and page_episode_hits > 0
+    long_form = duration >= 12 * 60
+    expected_length_ok = expected_duration > 0 and duration >= max(150, round(expected_duration * 0.75))
+    compatible_length = expected_length_ok if expected_duration > 0 else long_form
+    candidate_signal = not excluded_context and (
+        explicit_episode or explicit_full or multipart_episode or (long_form and release_format)
+    )
+    strong_content = (
+        candidate_signal
+        and match_confidence >= 0.68
+        and duration > 0
+        and (
+            (compatible_length and (explicit_episode or explicit_full or release_format))
+            or (duration >= 8 * 60 and multipart_episode)
+            or (duration >= 3 * 60 and short_format and (explicit_episode or explicit_full))
+        )
+    )
+    if explicit_episode:
+        content_evidence.append("标题具有明确分集特征")
+    if explicit_full:
+        content_evidence.append("标题或简介具有正片/完整内容特征")
+    if release_format:
+        content_evidence.append("标题或简介具有字幕、语言或发行格式特征")
+
+    if strong_content:
         return (
-            "episode_candidate", uploader_class, False, evidence,
-            "可能包含动画正片，但未确认作者与制作方关系，不作为可靠在线观看入口。",
+            "public_full_episode", uploader_class, True, identity_evidence, content_evidence,
+            "这是B站普通投稿中的完整动画内容候选，可打开观看，但不是番剧库正版入口；版权与上传授权未核验。",
+        )
+    if candidate_signal:
+        return (
+            "episode_candidate", uploader_class, False, identity_evidence, content_evidence,
+            "标题像正片，但时长、分P或作品一致性证据不足；折叠展示，不作为默认观看入口。",
         )
     if promo:
-        if trusted_identity or self_claimed:
-            evidence.append("标题具有 PV/预告特征")
-            return "official_pv", uploader_class, False, evidence, "宣传内容不是完整正片。"
-        return "related", uploader_class, False, evidence, "PV 作者身份未确认。"
+        if uploader_class in {"platform_account", "staff_or_production", "self_claimed_official"}:
+            content_evidence.append("标题具有 PV/预告特征")
+            return "official_pv", uploader_class, False, identity_evidence, content_evidence, "宣传内容不是完整正片。"
+        return "related", uploader_class, False, identity_evidence, content_evidence, "PV 作者身份未确认。"
     # OP/ED/特典合集和纯 reaction 并非作品观看链路的核心结果。它们仍可从
     # B站搜索导航抵达，但不占用有限的编辑卡片名额。
     if auxiliary_media or reaction:
-        return "related", uploader_class, False, evidence, "音乐/特典合集或 reaction 不进入默认作品视频卡片。"
+        return "related", uploader_class, False, identity_evidence, content_evidence, "音乐/特典合集或 reaction 不进入默认作品视频卡片。"
     if retrospective:
-        return "retrospective", "creator" if uploader_class == "unknown" else uploader_class, False, evidence, "回顾/复盘属于观点内容。"
+        return "retrospective", "creator" if uploader_class == "unknown" else uploader_class, False, identity_evidence, content_evidence, "回顾/复盘属于观点内容。"
     if review:
-        return "review", "creator" if uploader_class == "unknown" else uploader_class, False, evidence, "漫评属于观点内容，不是正版播放入口。"
+        return "review", "creator" if uploader_class == "unknown" else uploader_class, False, identity_evidence, content_evidence, "漫评属于观点内容，不是正版播放入口。"
     if fan:
-        return "fan_creation", "creator" if uploader_class == "unknown" else uploader_class, False, evidence, "二创内容不是正片播放入口。"
-    return "related", uploader_class, False, evidence, "相关性依据标题和稿件详情，打开后仍应核对内容。"
+        return "fan_creation", "creator" if uploader_class == "unknown" else uploader_class, False, identity_evidence, content_evidence, "二创内容不是正片播放入口。"
+    return "related", uploader_class, False, identity_evidence, content_evidence, "相关性依据标题和稿件详情，打开后仍应核对内容。"
 
 
 def _season_end(start: datetime) -> datetime:
@@ -898,6 +1050,26 @@ def _hit_relevance(raw: dict, *, up_name: str, aliases: list[str], tags: list[st
         coverage = len(term_hits) / max(len(terms), 1)
         score += min(0.48, 0.18 + 0.3 * coverage)
         reasons.append("标题关键词覆盖：" + "、".join(term_hits[:3]))
+    quoted_work_keys = [
+        _norm_video_text(value)
+        for value in re.findall(r"[《「『]([^》」』]{2,60})[》」』]", title)
+        if _norm_video_text(value)
+    ]
+    alias_is_quoted_subject = any(
+        alias in quoted or quoted in alias
+        for alias in alias_keys
+        for quoted in quoted_work_keys
+    )
+    comparison_alias = bool(exact_aliases) and (
+        (bool(quoted_work_keys) and not alias_is_quoted_subject)
+        or any(
+            f"{marker}{alias}" in title_key
+            for marker in ("军队版", "軍隊版", "酷似", "类似", "類似", "堪比", "媲美", "对标", "對標", "号称", "號稱", "被称为", "被稱為")
+            for alias in exact_aliases
+        )
+    )
+    if comparison_alias:
+        reasons.append("目标作品名只出现在类比/副标题位置，标题主体是其他作品")
     query_markers = _season_markers(" ".join([season_query, *aliases]))
     title_markers = _season_markers(title)
     marker_conflict = False
@@ -946,6 +1118,8 @@ def _hit_relevance(raw: dict, *, up_name: str, aliases: list[str], tags: list[st
         score = min(score, 0.28)
         reasons.append("只有作者/泛导视词命中，不能证明是目标视频")
     if marker_conflict:
+        score = min(score, 0.34)
+    if comparison_alias:
         score = min(score, 0.34)
     return max(0.0, min(score, 1.0)), "；".join(reasons) or "弱相关搜索结果"
 
@@ -1798,8 +1972,9 @@ class SearchBiliGuideVideosTool(Tool):
 class SearchBiliSubjectVideosTool(Tool):
     name = "search_bilibili_subject_videos"
     description = (
-        "搜索某一部动画的具体 B站视频并分类为 Staff/制作方直传正片候选、PV、漫评、回顾或二创。"
-        "普通视频稿件中的正片候选与 B站番剧库正版页严格分开；作者身份不足时不会冒充官方入口。"
+        "搜索某一部动画的具体 B站视频并分类为普通投稿中的完整正片候选、疑似正片、PV、漫评、回顾或二创。"
+        "完整正片依据作品匹配、时长、分P与标题特征判断，不要求UP主名称命中Staff；"
+        "普通投稿始终与B站番剧库正版页分开，并标注版权未核验。"
     )
     args_model = BiliSubjectVideosArgs
     result_model = BiliSubjectVideosResult
@@ -1808,13 +1983,14 @@ class SearchBiliSubjectVideosTool(Tool):
         query = args.query.strip()
         aliases = list(dict.fromkeys([query, *(x.strip() for x in args.aliases if x.strip())]))[:8]
         warnings: list[str] = []
+        version_rejections: list[str] = []
 
         if args.lifecycle == "upcoming":
             suffixes = ("官方 PV", "预告", "前瞻", "漫评")
         elif args.lifecycle == "airing":
-            suffixes = ("正片", "官方", "首集 漫评", "PV")
+            suffixes = ("正片", "第1话", "首集 漫评", "PV")
         elif args.lifecycle == "archive":
-            suffixes = ("正片", "全集", "回顾", "补番 漫评")
+            suffixes = ("正片", "全集", "完整版", "回顾")
         else:
             suffixes = ("正片", "官方 PV", "漫评", "回顾")
         variants = list(dict.fromkeys([query, *(f"{query} {suffix}" for suffix in suffixes)]))[:5]
@@ -1851,21 +2027,29 @@ class SearchBiliSubjectVideosTool(Tool):
                     candidates.append((confidence, reason, raw))
         def precheck_priority(row: tuple[float, str, dict]) -> tuple[float, int]:
             confidence, _reason, raw = row
-            role, _uploader, _watch, _evidence, _caution = classify_subject_video(
+            role, _uploader, _watch, _identity, _content, _caution = classify_subject_video(
                 _clean_bili_title(raw.get("title") or ""),
                 str(raw.get("author") or ""),
                 str(raw.get("description") or ""),
                 staff_names=args.staff_names,
+                match_confidence=confidence,
             )
             bonus = {
-                "staff_uploaded_episode": 0.28,
+                "public_full_episode": 0.28,
                 "official_pv": 0.18,
                 "review": 0.15,
                 "retrospective": 0.15,
                 "fan_creation": 0.07,
-                "episode_candidate": 0.02,
+                "episode_candidate": 0.16,
                 "related": -0.3,
             }[role]
+            version_ok, _version_reason = _subject_version_compatibility(
+                aliases,
+                _clean_bili_title(raw.get("title") or ""),
+                subject_platform=args.subject_platform,
+            )
+            if not version_ok and role in {"public_full_episode", "episode_candidate"}:
+                bonus = -0.5
             return -(confidence + bonus), -int(raw.get("pubdate") or 0)
 
         candidates.sort(key=precheck_priority)
@@ -1891,6 +2075,11 @@ class SearchBiliSubjectVideosTool(Tool):
                     "pubdate": detail.get("pubdate") or raw.get("pubdate"),
                     "play": (detail.get("stat") or {}).get("view") or raw.get("play"),
                     "video_review": (detail.get("stat") or {}).get("danmaku") or raw.get("video_review"),
+                    "duration": detail.get("duration") or raw.get("duration"),
+                    "pages": detail.get("pages") or raw.get("pages") or [],
+                    "videos": detail.get("videos") or raw.get("videos"),
+                    "copyright": detail.get("copyright") if detail.get("copyright") is not None else raw.get("copyright"),
+                    "rights": detail.get("rights") or raw.get("rights") or {},
                 }
                 confidence, reason = _hit_relevance(
                     normalized,
@@ -1908,7 +2097,7 @@ class SearchBiliSubjectVideosTool(Tool):
         ))
         ranked: list[tuple[float, BiliSubjectVideoMeta]] = []
         role_bonus = {
-            "staff_uploaded_episode": 0.22,
+            "public_full_episode": 0.22,
             "official_pv": 0.12,
             "review": 0.08,
             "retrospective": 0.08,
@@ -1921,12 +2110,33 @@ class SearchBiliSubjectVideosTool(Tool):
                 continue
             title = _clean_bili_title(raw.get("title") or "")
             author = str(raw.get("author") or "")
-            role, uploader_class, watch_candidate, evidence, caution = classify_subject_video(
+            pages = [item for item in (raw.get("pages") or []) if isinstance(item, dict)]
+            page_titles = [str(item.get("part") or "").strip() for item in pages if str(item.get("part") or "").strip()]
+            page_duration = sum(max(int(item.get("duration") or 0), 0) for item in pages)
+            duration_seconds = max(int(raw.get("duration") or 0), page_duration)
+            copyright_code = int(raw.get("copyright")) if raw.get("copyright") in {1, 2, "1", "2"} else None
+            role, uploader_class, watch_candidate, identity_evidence, content_evidence, caution = classify_subject_video(
                 title,
                 author,
                 str(raw.get("description") or ""),
                 staff_names=args.staff_names,
+                duration_seconds=duration_seconds,
+                page_titles=page_titles,
+                copyright_code=copyright_code,
+                match_confidence=confidence,
+                expected_duration_seconds=(round(args.expected_episode_minutes * 60) if args.expected_episode_minutes else None),
             )
+            version_ok, version_reason = _subject_version_compatibility(
+                aliases,
+                title,
+                page_titles,
+                args.subject_platform,
+            )
+            if version_reason:
+                content_evidence.append(version_reason)
+            if not version_ok and role in {"public_full_episode", "episode_candidate"}:
+                version_rejections.append(f"《{title}》：{version_reason}")
+                continue
             # The work hub is editorial, not a raw Bilibili search page.  Merch,
             # radio, event, material and other generic title matches stay behind
             # the navigation link instead of filling the five recommendation cards.
@@ -1958,7 +2168,13 @@ class SearchBiliSubjectVideosTool(Tool):
                 role=role,
                 uploader_class=uploader_class,
                 watch_candidate=watch_candidate,
-                identity_evidence=evidence,
+                identity_evidence=identity_evidence,
+                content_evidence=content_evidence,
+                duration_seconds=duration_seconds or None,
+                page_count=max(len(pages), int(raw.get("videos") or 0), 1),
+                page_titles=page_titles[:8],
+                episode_coverage=_episode_coverage(title, page_titles),
+                copyright_declaration="repost" if copyright_code == 2 else "original" if copyright_code == 1 else "unknown",
                 caution=caution,
             )
             ranked.append((confidence + role_bonus[role], item))
@@ -1966,7 +2182,7 @@ class SearchBiliSubjectVideosTool(Tool):
 
         # Prefer several editorial roles over five near-identical review videos.
         role_limits = {
-            "staff_uploaded_episode": 2,
+            "public_full_episode": 3,
             "official_pv": 1,
             "review": 2,
             "retrospective": 2,
@@ -1986,10 +2202,16 @@ class SearchBiliSubjectVideosTool(Tool):
         watch_candidates = [item for item in selected if item.watch_candidate]
         if watch_candidates:
             warnings.append(
-                "发现制作方/Staff身份信号与正片特征同时成立的普通视频稿件；已作为直传观看候选展示，但不等同番剧库授权页。"
+                "发现作品匹配、时长与正片/分P特征同时成立的B站普通投稿；已作为可看正片候选展示，"
+                "但它不是番剧库正版入口，版权与上传授权未核验。"
             )
         if any(item.role == "episode_candidate" for item in selected):
-            warnings.append("存在标题像正片但作者身份不足的稿件；只列为视频内容，不作为可靠观看入口。")
+            warnings.append("存在标题像正片但时长、分P或作品一致性证据不足的稿件；只放在疑似区，不作为默认观看入口。")
+        if version_rejections:
+            warnings.append(
+                f"已隐藏 {len(version_rejections)} 个与当前季数/篇章明确冲突的正片候选；"
+                + "；".join(version_rejections[:2])
+            )
         if not selected:
             warnings.append("没有具体视频通过作品标题与版本一致性阈值；保留 B站搜索导航。")
         return ToolResult(

@@ -681,35 +681,53 @@ def _anime_watch_hub_embeds(discord, data: dict) -> list:
     videos = (bili.get("videos") or [])[:3]
     if videos:
         role_labels = {
-            "staff_uploaded_episode": "Staff/制作方直传正片候选",
-            "episode_candidate": "疑似正片（作者待核验）",
+            "public_full_episode": "B站公开视频正片（非正版入口）",
+            "episode_candidate": "疑似正片（证据不足）",
             "official_pv": "官方/PV",
             "review": "漫评",
             "retrospective": "回顾/复盘",
             "fan_creation": "二创",
             "related": "相关视频",
         }
-        video_embed = discord.Embed(
-            title=f"B站具体视频 · {title}"[:256],
-            description="普通视频稿件与番剧库正版页分开展示；直传候选仍需打开核对版权和完整性。",
-            color=_EMBED_COLOR,
-        )
         for video in videos:
             label = role_labels.get(str(video.get("role")), "相关视频")
             name = str(video.get("title") or "?")
             url = str(video.get("url") or "")
-            linked = f"[{name}]({url})" if url.startswith("http") else name
             author = str(video.get("author") or "未知UP")
             caution = str(video.get("caution") or "")
-            video_embed.add_field(
-                name=str(label)[:256],
-                value=f"{linked}\nUP：{author}" + (f"\n{caution[:180]}" if caution else ""),
-                inline=False,
+            duration = int(video.get("duration_seconds") or 0)
+            minutes = max(1, round(duration / 60)) if duration else 0
+            page_count = int(video.get("page_count") or 1)
+            meta = [f"UP：{author}"]
+            if minutes:
+                meta.append(f"时长：{minutes} 分钟")
+            if page_count > 1:
+                meta.append(f"分P：{page_count}")
+            if video.get("episode_coverage"):
+                meta.append(f"范围：{video['episode_coverage']}")
+            if video.get("watch_candidate"):
+                meta.append("⚠️ 普通投稿可打开观看；不是番剧库正版入口，版权与上传授权未核验")
+            if caution:
+                meta.append(caution[:260])
+            video_embed = discord.Embed(
+                title=f"{label} · {name}"[:256],
+                url=url if url.startswith("http") else None,
+                description="\n".join(meta)[:1200],
+                color=0xE0AF68 if video.get("watch_candidate") else _EMBED_COLOR,
             )
-        embeds.append(video_embed)
+            if image := video.get("thumbnail_url"):
+                video_embed.set_thumbnail(url=image)
+            evidence = (video.get("content_evidence") or [])[:3]
+            if evidence:
+                video_embed.add_field(
+                    name="内容判断",
+                    value="\n".join(f"• {row}" for row in evidence)[:1024],
+                    inline=False,
+                )
+            embeds.append(video_embed)
     releases = data.get("releases") or {}
     embeds.extend(_release_embeds(discord, releases)[:1])
-    return embeds[:4]
+    return embeds[:7]
 
 
 def _sections_embeds(discord, data: dict) -> list:
