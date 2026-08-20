@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from .. import __version__
 from ..config import settings
 from ..recsys_registry import cf_model_registry
+from ..tools.videos.tool import verify_bilibili_account
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -50,6 +51,36 @@ class CommentModerationRequest(BaseModel):
 class ReportResolutionRequest(BaseModel):
     status: Literal["resolved", "dismissed"]
     note: str = Field("", max_length=240)
+
+
+class BilibiliCookieImportRequest(BaseModel):
+    cookies_text: str = Field(min_length=32, max_length=512 * 1024)
+
+
+def _bilibili_cookie_path() -> Path:
+    return Path(settings.bilibili_cookies_file).resolve()
+
+
+def _validate_bilibili_cookie_text(value: str) -> None:
+    if "Netscape HTTP Cookie File" not in value[:512]:
+        raise HTTPException(status_code=422, detail="需要浏览器插件导出的 Netscape cookies.txt")
+    valid_rows = []
+    for line in value.splitlines():
+        if not line:
+            continue
+        # Netscape uses this comment-looking prefix for HttpOnly cookies;
+        # SESSDATA is commonly exported in exactly this form.
+        if line.startswith("#HttpOnly_"):
+            line = line[len("#HttpOnly_"):]
+        elif line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) >= 7 and parts[0].lstrip(".").lower().endswith("bilibili.com"):
+            valid_rows.append(parts)
+    if not valid_rows:
+        raise HTTPException(status_code=422, detail="文件中没有 bilibili.com Cookie")
+    if not any(parts[5] == "SESSDATA" for parts in valid_rows):
+        raise HTTPException(status_code=422, detail="没有找到 SESSDATA；这不是可用的 B站登录态导出")
 
 
 def _storage_file(path: str) -> dict[str, Any]:
@@ -113,7 +144,43 @@ async def admin_overview(request: Request, days: int = 30) -> dict[str, Any]:
             "chat": chat_runs,
             "recommendation": recommendation_runs,
         },
+        "integrations": {
+            "bilibili": verify_bilibili_account(),
+        },
     }
+
+
+@router.get("/integrations/bilibili")
+async def bilibili_integration_status(request: Request) -> dict[str, Any]:
+    _admin(request)
+    return {"ok": True, "integration": verify_bilibili_account()}
+
+
+@router.post("/integrations/bilibili")
+async def import_bilibili_cookies(payload: BilibiliCookieImportRequest, request: Request) -> dict[str, Any]:
+    _admin(request)
+    _csrf(request)
+    _validate_bilibili_cookie_text(payload.cookies_text)
+    target = _bilibili_cookie_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.tmp")
+    temporary.write_text(payload.cookies_text.replace("\r\n", "\n"), encoding="utf-8")
+    try:
+        os.chmod(temporary, 0o600)
+    except OSError:
+        pass
+    temporary.replace(target)
+    return {"ok": True, "integration": verify_bilibili_account()}
+
+
+@router.delete("/integrations/bilibili")
+async def clear_bilibili_cookies(request: Request) -> dict[str, Any]:
+    _admin(request)
+    _csrf(request)
+    target = _bilibili_cookie_path()
+    if target.is_file():
+        target.unlink()
+    return {"ok": True, "integration": verify_bilibili_account()}
 
 
 @router.get("/recommendations/batches")

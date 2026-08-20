@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+from http.cookiejar import LoadError, MozillaCookieJar
 from datetime import datetime, timezone
 import urllib.parse
 import html
@@ -40,6 +41,7 @@ _BILI_REPLY_API = "https://api.bilibili.com/x/v2/reply"
 _BILI_VIEW_API = "https://api.bilibili.com/x/web-interface/view"
 _BILI_PAGELIST_API = "https://api.bilibili.com/x/player/pagelist"
 _BILI_PLAYER_API = "https://api.bilibili.com/x/player/v2"
+_BILI_NAV_API = "https://api.bilibili.com/x/web-interface/nav"
 _BILI_DANMAKU_API = "https://comment.bilibili.com/{cid}.xml"
 _BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
 
@@ -226,6 +228,7 @@ class BiliSubjectVideoMeta(BiliVideoMeta):
     duration_seconds: int | None = None
     page_count: int = 1
     page_titles: list[str] = Field(default_factory=list)
+    page_links: list[dict[str, object]] = Field(default_factory=list)
     episode_coverage: str = ""
     copyright_declaration: Literal["original", "repost", "unknown"] = "unknown"
     rights_status: Literal["uploader_rights_unknown"] = "uploader_rights_unknown"
@@ -242,6 +245,9 @@ class BiliVersionConflict(BaseModel):
     suggested_subject_id: int | None = None
     suggested_subject_title: str = ""
     suggested_relation: str = ""
+    suggested_collection_state: str = ""
+    suggested_collection_label: str = ""
+    suggested_completed: bool | None = None
 
 
 class BiliSubjectVideosResult(BaseModel):
@@ -255,6 +261,7 @@ class BiliSubjectVideosResult(BaseModel):
     search_partial: bool = False
     rate_limited: bool = False
     last_verified: str = ""
+    account_mode: Literal["public", "cookie"] = "public"
     warnings: list[str] = Field(default_factory=list)
 
 
@@ -1347,6 +1354,66 @@ def _whitelist_by_name() -> dict[str, dict]:
     return {u["name"]: u for u in _GUIDE_UPS}
 
 
+def _bili_cookie_header() -> str:
+    """Load only bilibili.com cookies from the server-side Netscape jar.
+
+    The raw value must never be returned by a tool or logged.  Reading per
+    request makes admin replacement/clear take effect without a process restart.
+    """
+    path = Path(settings.bilibili_cookies_file)
+    if not path.is_file():
+        return ""
+    try:
+        jar = MozillaCookieJar(str(path))
+        jar.load(ignore_discard=True, ignore_expires=True)
+    except (OSError, ValueError, LoadError):
+        return ""
+    values = [
+        f"{cookie.name}={cookie.value}"
+        for cookie in jar
+        if cookie.value and str(cookie.domain or "").lower().endswith("bilibili.com")
+    ]
+    return "; ".join(values)
+
+
+def bilibili_account_mode() -> Literal["public", "cookie"]:
+    return "cookie" if _bili_cookie_header() else "public"
+
+
+def _bili_headers() -> dict[str, str]:
+    headers = {"User-Agent": _BROWSER_UA, "Referer": "https://www.bilibili.com/"}
+    if cookie := _bili_cookie_header():
+        headers["Cookie"] = cookie
+    return headers
+
+
+def verify_bilibili_account() -> dict[str, object]:
+    """Verify imported login state without exposing cookie material."""
+    configured = bool(_bili_cookie_header())
+    if not configured:
+        return {"configured": False, "authenticated": False, "username": "", "user_id": 0}
+    try:
+        response = httpx.get(_BILI_NAV_API, headers=_bili_headers(), timeout=settings.http_timeout)
+        response.raise_for_status()
+        payload = _bili_json(response.json())
+        data = payload.get("data") or {}
+        authenticated = bool(data.get("isLogin"))
+        return {
+            "configured": True,
+            "authenticated": authenticated,
+            "username": str(data.get("uname") or "") if authenticated else "",
+            "user_id": int(data.get("mid") or 0) if authenticated else 0,
+        }
+    except Exception as exc:  # noqa: BLE001 - status endpoint should explain, not crash admin
+        return {
+            "configured": True,
+            "authenticated": False,
+            "username": "",
+            "user_id": 0,
+            "error": f"{type(exc).__name__}: 登录态不可用或已过期",
+        }
+
+
 def _bili_json(data: dict) -> dict:
     """B站把风控/错误放在 200 响应体的 code 字段（-412 风控 / -404 等），HTTP 状态仍是 200。
 
@@ -1388,25 +1455,30 @@ def _is_rate_limited(exc: BaseException) -> bool:
     return any(token in text for token in ("-412", "429", "rate limit", "too many requests"))
 
 
+def _bili_cache_key(value: str) -> str:
+    return f"{bilibili_account_mode()}:{value}"
+
+
 def _sync_bili_search(query: str) -> dict:
     cache = _bili_cache("search")
-    if hit := cache.get(query, ttl=settings.bilibili_search_cache_ttl):
+    key = _bili_cache_key(query)
+    if hit := cache.get(key, ttl=settings.bilibili_search_cache_ttl):
         return _cache_payload(hit[0], hit[1], hit=True)
     try:
         r = httpx.get(
             _BILI_SEARCH_API,
             params={"search_type": "video", "keyword": query, "page": 1},
-            headers={"User-Agent": _BROWSER_UA, "Referer": "https://www.bilibili.com/"},
+            headers=_bili_headers(),
             timeout=settings.http_timeout,
         )
         r.raise_for_status()
         payload = _bili_json(r.json())
     except (httpx.HTTPError, httpx.TransportError, ValueError) as exc:
-        stale = cache.get(query, ttl=settings.bilibili_stale_cache_ttl)
+        stale = cache.get(key, ttl=settings.bilibili_stale_cache_ttl)
         if stale:
             return _cache_payload(stale[0], stale[1], hit=True, stale=True, rate_limited=_is_rate_limited(exc))
         raise
-    created_at = cache.set(query, payload)
+    created_at = cache.set(key, payload)
     return _cache_payload(payload, created_at, hit=False)
 
 
@@ -1415,7 +1487,7 @@ def _sync_bili_replies(aid: int, limit: int) -> dict:
     r = httpx.get(
         _BILI_REPLY_API,
         params={"type": 1, "oid": aid, "sort": 1, "pn": 1, "ps": min(limit, 50)},
-        headers={"User-Agent": _BROWSER_UA, "Referer": "https://www.bilibili.com/"},
+        headers=_bili_headers(),
         timeout=settings.http_timeout,
     )
     r.raise_for_status()
@@ -1424,22 +1496,23 @@ def _sync_bili_replies(aid: int, limit: int) -> dict:
 
 async def _bili_search_async(q: str) -> dict:
     cache = _bili_cache("search")
-    if hit := cache.get(q, ttl=settings.bilibili_search_cache_ttl):
+    key = _bili_cache_key(q)
+    if hit := cache.get(key, ttl=settings.bilibili_search_cache_ttl):
         return _cache_payload(hit[0], hit[1], hit=True)
     try:
         async with httpx.AsyncClient(
             timeout=settings.http_timeout,
-            headers={"User-Agent": _BROWSER_UA, "Referer": "https://www.bilibili.com/"},
+            headers=_bili_headers(),
         ) as c:
             r = await c.get(_BILI_SEARCH_API, params={"search_type": "video", "keyword": q, "page": 1})
             r.raise_for_status()
             payload = _bili_json(r.json())
     except (httpx.HTTPError, httpx.TransportError, ValueError) as exc:
-        stale = cache.get(q, ttl=settings.bilibili_stale_cache_ttl)
+        stale = cache.get(key, ttl=settings.bilibili_stale_cache_ttl)
         if stale:
             return _cache_payload(stale[0], stale[1], hit=True, stale=True, rate_limited=_is_rate_limited(exc))
         raise
-    created_at = cache.set(q, payload)
+    created_at = cache.set(key, payload)
     return _cache_payload(payload, created_at, hit=False)
 
 
@@ -1448,7 +1521,7 @@ def _summarize_aspect_opinions(opinions: list[AspectOpinion]) -> list[str]:
 
 
 def _sync_bili_view(aid: int | None, bvid: str | None) -> dict:
-    key = str(bvid or f"av{aid or 0}")
+    key = _bili_cache_key(str(bvid or f"av{aid or 0}"))
     cache = _bili_cache("view")
     if hit := cache.get(key, ttl=settings.bilibili_view_cache_ttl):
         return _cache_payload(hit[0], hit[1], hit=True)
@@ -1457,7 +1530,7 @@ def _sync_bili_view(aid: int | None, bvid: str | None) -> dict:
         r = httpx.get(
             _BILI_VIEW_API,
             params=params,
-            headers={"User-Agent": _BROWSER_UA, "Referer": "https://www.bilibili.com/"},
+            headers=_bili_headers(),
             timeout=settings.http_timeout,
         )
         r.raise_for_status()
@@ -1477,7 +1550,7 @@ def _sync_bili_pagelist(aid: int | None, bvid: str | None) -> dict:
     r = httpx.get(
         _BILI_PAGELIST_API,
         params=params,
-        headers={"User-Agent": _BROWSER_UA, "Referer": "https://www.bilibili.com/"},
+        headers=_bili_headers(),
         timeout=settings.http_timeout,
     )
     r.raise_for_status()
@@ -1494,7 +1567,7 @@ def _sync_bili_player(aid: int | None, bvid: str | None, cid: int) -> dict:
     r = httpx.get(
         _BILI_PLAYER_API,
         params=params,
-        headers={"User-Agent": _BROWSER_UA, "Referer": "https://www.bilibili.com/"},
+        headers=_bili_headers(),
         timeout=settings.http_timeout,
     )
     r.raise_for_status()
@@ -1506,7 +1579,7 @@ def _sync_subtitle_json(url: str) -> dict:
     full = "https:" + url if url.startswith("//") else url
     r = httpx.get(
         full,
-        headers={"User-Agent": _BROWSER_UA, "Referer": "https://www.bilibili.com/"},
+        headers=_bili_headers(),
         timeout=settings.http_timeout,
     )
     r.raise_for_status()
@@ -1517,7 +1590,7 @@ def _sync_subtitle_json(url: str) -> dict:
 def _sync_bili_danmaku_xml(cid: int) -> str:
     r = httpx.get(
         _BILI_DANMAKU_API.format(cid=cid),
-        headers={"User-Agent": _BROWSER_UA, "Referer": "https://www.bilibili.com/"},
+        headers=_bili_headers(),
         timeout=settings.http_timeout,
     )
     r.raise_for_status()
@@ -1608,7 +1681,7 @@ def _sync_resolve_bili_url(url: str) -> str:
     """Resolve b23.tv/share links without downloading video content."""
     r = httpx.get(
         url,
-        headers={"User-Agent": _BROWSER_UA, "Referer": "https://www.bilibili.com/"},
+        headers=_bili_headers(),
         timeout=settings.http_timeout,
         follow_redirects=True,
     )
@@ -1678,6 +1751,8 @@ def _sync_local_bili_asr(source_url: str, max_segments: int) -> list[BiliSubtitl
             ydl_opts["cookiesfrombrowser"] = (settings.asr_cookies_from_browser.strip().lower(),)
         elif settings.asr_cookies_file:
             ydl_opts["cookiefile"] = settings.asr_cookies_file
+        elif _bili_cookie_header():
+            ydl_opts["cookiefile"] = settings.bilibili_cookies_file
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(source_url, download=False)
             duration = float(info.get("duration") or 0)
@@ -2205,7 +2280,16 @@ class SearchBiliSubjectVideosTool(Tool):
             )
             if version_reason:
                 content_evidence.append(version_reason)
-            if not version_ok and role in {"public_full_episode", "episode_candidate"}:
+            # The work hub is editorial, not a raw Bilibili search page.  Merch,
+            # radio, event, material and other generic title matches stay behind
+            # the navigation link instead of filling cards or the conflict list.
+            if role == "related":
+                continue
+            # Version consistency is a shared card boundary.  A season-two
+            # recap/PV is just as misleading on a season-one page as a wrong-
+            # season full episode, especially when the decisive signal lives in
+            # multi-P titles rather than the top-level title.
+            if not version_ok:
                 conflict_url = raw.get("arcurl") or f"https://www.bilibili.com/video/{raw.get('bvid') or ('av' + str(raw.get('aid') or raw.get('id')))}"
                 version_conflicts.append(BiliVersionConflict(
                     title=title,
@@ -2216,19 +2300,38 @@ class SearchBiliSubjectVideosTool(Tool):
                     reason=version_reason,
                 ))
                 continue
-            # The work hub is editorial, not a raw Bilibili search page.  Merch,
-            # radio, event, material and other generic title matches stay behind
-            # the navigation link instead of filling the five recommendation cards.
-            if role == "related":
-                continue
             # Unverified full-episode uploads are deliberately harder to surface than reviews.
             if role == "episode_candidate" and confidence < 0.7:
                 continue
             url = raw.get("arcurl") or f"https://www.bilibili.com/video/{raw.get('bvid') or ('av' + str(raw.get('aid') or raw.get('id')))}"
+            url = str(url).replace("http://", "https://")
+            page_links = []
+            for index, page in enumerate(pages, start=1):
+                try:
+                    page_number = max(int(page.get("page") or index), 1)
+                except (TypeError, ValueError):
+                    page_number = index
+                parsed = urllib.parse.urlsplit(url)
+                query_pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+                query_pairs = [(key, value) for key, value in query_pairs if key != "p"]
+                query_pairs.append(("p", str(page_number)))
+                page_url = urllib.parse.urlunsplit((
+                    parsed.scheme,
+                    parsed.netloc,
+                    parsed.path,
+                    urllib.parse.urlencode(query_pairs),
+                    parsed.fragment,
+                ))
+                page_links.append({
+                    "page": page_number,
+                    "title": str(page.get("part") or f"P{page_number}").strip(),
+                    "url": page_url,
+                    "duration_seconds": max(int(page.get("duration") or 0), 0) or None,
+                })
             content_type, content_type_reason = classify_season_video(title, raw.get("pubdate"), query)
             item = BiliSubjectVideoMeta(
                 title=title,
-                url=str(url).replace("http://", "https://"),
+                url=url,
                 aid=raw.get("aid") or raw.get("id"),
                 bvid=raw.get("bvid"),
                 author=author,
@@ -2252,6 +2355,7 @@ class SearchBiliSubjectVideosTool(Tool):
                 duration_seconds=duration_seconds or None,
                 page_count=max(len(pages), int(raw.get("videos") or 0), 1),
                 page_titles=page_titles[:8],
+                page_links=page_links[:100],
                 episode_coverage=_episode_coverage(title, page_titles),
                 copyright_declaration="repost" if copyright_code == 2 else "original" if copyright_code == 1 else "unknown",
                 caution=caution,
@@ -2351,7 +2455,7 @@ class SearchBiliSubjectVideosTool(Tool):
             warnings.append("存在标题像正片但时长、分P或作品一致性证据不足的稿件；只放在疑似区，不作为默认观看入口。")
         if version_conflicts:
             warnings.append(
-                f"已从当前篇章移出 {len(version_conflicts)} 个季数/媒介形态冲突的正片候选；"
+                f"已从当前篇章移出 {len(version_conflicts)} 个季数/媒介形态冲突的视频候选；"
                 + "；".join(f"《{item.title}》：{item.reason}" for item in version_conflicts[:2])
             )
         if not selected:
@@ -2375,6 +2479,7 @@ class SearchBiliSubjectVideosTool(Tool):
                 search_partial=search_partial,
                 rate_limited=rate_limited,
                 last_verified=max(verified_times, default=""),
+                account_mode=bilibili_account_mode(),
                 warnings=warnings,
             ),
             sources=[Citation(title=f"Bilibili — {item.title}", url=item.url, source="bilibili") for item in selected[:5]],

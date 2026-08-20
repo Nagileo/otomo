@@ -1122,6 +1122,15 @@ def _safe_anime_watch_hub_payload(data: dict[str, Any]) -> dict[str, Any]:
         copied["identity_evidence"] = _trim_strings(copied.get("identity_evidence"), limit=4, text_limit=160)
         copied["content_evidence"] = _trim_strings(copied.get("content_evidence"), limit=6, text_limit=180)
         copied["page_titles"] = _trim_strings(copied.get("page_titles"), limit=8, text_limit=100)
+        copied["page_links"] = [
+            {
+                "page": row.get("page"),
+                "title": _trim_text(row.get("title"), 100),
+                "url": row.get("url"),
+                "duration_seconds": row.get("duration_seconds"),
+            }
+            for row in _trim_dicts(copied.get("page_links"), limit=40)
+        ]
         copied["match_reason"] = _trim_text(copied.get("match_reason"), 220)
         copied["caution"] = _trim_text(copied.get("caution"), 220)
         videos.append(copied)
@@ -1143,8 +1152,15 @@ def _safe_anime_watch_hub_payload(data: dict[str, Any]) -> dict[str, Any]:
                 if str(item.get("bvid") or item.get("aid") or "") in watch_keys
             ],
             "navigation_url": bili_raw.get("navigation_url"),
+            "version_conflicts": _trim_dicts(bili_raw.get("version_conflicts"), limit=6),
+            "cache_hit": bool(bili_raw.get("cache_hit")),
+            "search_partial": bool(bili_raw.get("search_partial")),
+            "rate_limited": bool(bili_raw.get("rate_limited")),
+            "last_verified": bili_raw.get("last_verified"),
+            "account_mode": bili_raw.get("account_mode") or "public",
             "warnings": _trim_strings(bili_raw.get("warnings"), limit=5, text_limit=200),
         } if bili_raw else None,
+        "series_progress": dict(data.get("series_progress") or {}) or None,
         "staff_signals": _trim_strings(data.get("staff_signals"), limit=8, text_limit=80),
         "status_summary": _trim_strings(data.get("status_summary"), limit=6, text_limit=180),
         "quick_actions": _trim_strings(data.get("quick_actions"), limit=6, text_limit=80),

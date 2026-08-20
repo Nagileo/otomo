@@ -232,6 +232,9 @@ export function RecommendPanel({
                   {item.episodes ? ` · ${item.episodes} 集` : ""}
                 </div>
                 {(item.media_subtype || list<string>(item.media_notes).length) ? <div className="evidence-row tight rec-media-meta">{item.media_subtype ? <Badge tone="dim">{text(item.media_subtype)}</Badge> : null}{list<string>(item.media_notes).slice(0, 2).map((note) => <span key={note}>{note}</span>)}</div> : null}
+                {item.series_status?.continued_from ? <div className="evidence-row tight"><Badge tone="good">已回到下一部必要主线</Badge><span>原候选：{text(item.series_status.continued_from)}</span></div> : null}
+                {item.series_status?.has_predecessor && item.series_status?.prerequisites_satisfied ? <div className="evidence-row tight"><Badge tone="good">必要前作已完成</Badge></div> : null}
+                {item.series_status?.has_predecessor && !item.series_status?.prerequisites_satisfied ? <p className="card-note rec-risk"><strong>续作前置未完成</strong>{list(item.series_status.missing_predecessors).map((row) => text(row.name)).join("、")}</p> : null}
                 {fit ? <p className="card-note rec-fit"><strong>为什么适合你</strong>{fit}</p> : null}
                 {risk ? <p className="card-note rec-risk"><strong>需要注意</strong>{risk}</p> : null}
                 <div className="evidence-row tight">
@@ -367,6 +370,7 @@ export function WatchCopilotPanel({ data }: { data: AnyRecord }) {
   const queue = list(data.queue);
   const groups = [
     ["继续追", "continue_watching"],
+    ["下一季可开", "continue_series"],
     ["想看开坑", "start_from_wishlist"],
     ["搁置盘活", "revive_on_hold"],
   ];

@@ -191,5 +191,6 @@ export type PrepareWriteHandler = (
   },
 ) => void;
 export type PrepareDownloaderHandler = (payload: AnyRecord) => void;
+export type PrepareRssFollowHandler = (payload: AnyRecord) => void | Promise<void>;
 
 

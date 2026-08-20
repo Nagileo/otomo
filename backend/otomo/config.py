@@ -183,6 +183,9 @@ class Settings(BaseSettings):
     #    Chrome/Edge 因 app-bound 加密可能读不出来）② 插件导出 cookies.txt 填路径。
     asr_cookies_from_browser: str = ""  # firefox | chrome | edge，留空不用
     asr_cookies_file: str = ""
+    # 管理页导入的 Netscape cookies.txt。只在服务器端用于 B站检索/详情/字幕/ASR，
+    # 不进入 agent observation、日志或普通用户 API。
+    bilibili_cookies_file: str = "cache/bilibili_cookies.txt"
 
     # ---- Pixiv（可选；无官方公开 API，默认关闭，本地 demo 建议小号 refresh_token）----
     pixiv_enabled: bool = False

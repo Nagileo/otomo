@@ -28,6 +28,7 @@ from ..animethemes.tool import AnimeThemesArgs, SearchAnimeThemesTool
 from ..release.tool import AnimeReleaseFeedsArgs, GetAnimeReleaseFeedsTool
 from ..media_identity import assess_media_scope, media_identity_from_subject
 from ..review.tool import ReviewSubjectArgs, ReviewSubjectTool
+from ..series_progress import SeriesProgressArgs, SeriesProgressResult, SeriesProgressService
 from ..videos.tool import (
     BiliSubjectVideosArgs,
     BiliSubjectVideosResult,
@@ -92,6 +93,7 @@ class AnimeWatchHubArgs(BaseModel):
     include_videos: bool = True
     video_limit: int = Field(5, ge=1, le=10)
     stage: Literal["all", "core", "videos", "releases"] = "all"
+    username: str | None = Field(None, description="可选 Bangumi 用户名；用于合并逐季系列进度")
 
 
 class AnimeWatchHubResult(BaseModel):
@@ -100,6 +102,7 @@ class AnimeWatchHubResult(BaseModel):
     online: dict[str, Any] = Field(default_factory=dict)
     releases: dict[str, Any] = Field(default_factory=dict)
     bilibili: BiliSubjectVideosResult | None = None
+    series_progress: SeriesProgressResult | None = None
     staff_signals: list[str] = Field(default_factory=list)
     status_summary: list[str] = Field(default_factory=list)
     quick_actions: list[str] = Field(default_factory=list)
@@ -616,6 +619,7 @@ class AnimeWatchHubTool(Tool):
         self.watch = WhereToWatchTool(client)
         self.release = GetAnimeReleaseFeedsTool(client)
         self.videos = SearchBiliSubjectVideosTool()
+        self.series = SeriesProgressService(client)
 
     async def _staff_signals(self, subject_id: int) -> list[str]:
         try:
@@ -682,6 +686,11 @@ class AnimeWatchHubTool(Tool):
                 subject_id=sid,
                 title=str(subject.get("name") or ""),
             )), timeout=20))
+            tasks["series"] = asyncio.create_task(asyncio.wait_for(self.series.build(SeriesProgressArgs(
+                subject_id=sid,
+                username=args.username,
+                max_members=18,
+            )), timeout=25))
         if want_release:
             tasks["release"] = asyncio.create_task(asyncio.wait_for(self.release.run(AnimeReleaseFeedsArgs(
                 subject_id=sid,
@@ -727,9 +736,11 @@ class AnimeWatchHubTool(Tool):
         release_res = resolved.get("release")
         video_res = resolved.get("videos")
         relation_res = resolved.get("relations")
+        series_res = resolved.get("series")
         online: dict[str, Any] = {}
         releases: dict[str, Any] = {}
         bilibili: BiliSubjectVideosResult | None = None
+        series_progress = series_res if isinstance(series_res, SeriesProgressResult) else None
         sources = [Citation(
             title=str(subject.get("name") or sid),
             url=f"https://bgm.tv/subject/{sid}",
@@ -772,6 +783,19 @@ class AnimeWatchHubTool(Tool):
                     conflict.suggested_subject_id = int(related["id"])
                     conflict.suggested_subject_title = str(related.get("name_cn") or related.get("name") or related["id"])
                     conflict.suggested_relation = str(related.get("relation") or "关联篇章")
+                    if series_progress:
+                        progress_item = next(
+                            (
+                                item for item in (
+                                    series_progress.mainline + series_progress.optional + series_progress.alternates
+                                ) if item.id == conflict.suggested_subject_id
+                            ),
+                            None,
+                        )
+                        if progress_item is not None:
+                            conflict.suggested_collection_state = progress_item.collection_state
+                            conflict.suggested_collection_label = progress_item.collection_label
+                            conflict.suggested_completed = progress_item.completed
 
         official_count = len(online.get("official_sources") or [])
         fallback_count = len(online.get("search_fallbacks") or [])
@@ -784,6 +808,8 @@ class AnimeWatchHubTool(Tool):
             summary.append(f"正版/官方平台：{official_count} 个已核验候选" if official_count else (
                 f"正版平台暂不可核验；保留 {fallback_count} 个搜索入口" if fallback_count else "暂未找到可靠正版平台入口"
             ))
+            if series_progress:
+                summary.insert(0, series_progress.summary)
         if want_videos:
             summary.extend([
                 f"B站普通投稿可看正片候选：{public_uploads} 个（非正版入口）" if public_uploads else "未发现通过时长、分P与作品一致性核验的B站普通投稿正片",
@@ -802,6 +828,8 @@ class AnimeWatchHubTool(Tool):
             caveats.append("离线/RSS 冷查询超过 35 秒，本轮已停止等待；不会让慢源阻塞整个作品页。")
         if isinstance(video_res, TimeoutError):
             caveats.append("B站具体视频核验超过 30 秒，本轮已停止等待；搜索导航仍可使用。")
+        if isinstance(series_res, TimeoutError):
+            caveats.append("系列进度冷查询超过 25 秒，本轮只展示当前条目的观看入口；不会猜测你是否看过前作。")
         if bilibili:
             caveats.extend(bilibili.warnings[:3])
         return ToolResult(
@@ -812,9 +840,10 @@ class AnimeWatchHubTool(Tool):
                 online=online,
                 releases=releases,
                 bilibili=bilibili,
+                series_progress=series_progress,
                 staff_signals=staff_names[:8],
                 status_summary=summary,
-                quick_actions=["打开正版入口", "选择 RSS/字幕组", "查看具体视频", "准备下载器推送"],
+                quick_actions=["继续下一部主线", "打开正版入口", "选择 RSS/字幕组", "查看具体视频", "准备下载器推送"],
                 caveats=list(dict.fromkeys(caveats)),
             ),
             sources=sources[:14],

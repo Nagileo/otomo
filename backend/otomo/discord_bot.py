@@ -535,6 +535,7 @@ def _copilot_embeds(discord, data: dict) -> list:
     groups = [
         ("今晚队列", data.get("queue")),
         ("继续追", data.get("continue_watching")),
+        ("下一季可开", data.get("continue_series")),
         ("从想看开坑", data.get("start_from_wishlist")),
         ("捞回搁置", data.get("revive_on_hold")),
     ]
@@ -676,6 +677,8 @@ def _anime_watch_hub_embeds(discord, data: dict) -> list:
     if cover := subject.get("image"):
         overview.set_thumbnail(url=cover)
     embeds = [overview]
+    if progress := data.get("series_progress"):
+        embeds.extend(_series_progress_embeds(discord, progress))
     online = data.get("online") or {}
     embeds.extend(_watch_embeds(discord, online)[:1])
     bili = data.get("bilibili") or {}
@@ -725,10 +728,56 @@ def _anime_watch_hub_embeds(discord, data: dict) -> list:
                     value="\n".join(f"• {row}" for row in evidence)[:1024],
                     inline=False,
                 )
+            page_links = (video.get("page_links") or [])[:10]
+            if page_links:
+                page_lines = []
+                for page in page_links:
+                    page_number = int(page.get("page") or 0)
+                    page_title = str(page.get("title") or f"P{page_number}")
+                    page_url = str(page.get("url") or "")
+                    label = f"P{page_number} · {page_title}" if page_number else page_title
+                    page_lines.append(f"• [{label[:80]}]({page_url})")
+                remaining = max(len(video.get("page_links") or []) - len(page_links), 0)
+                if remaining:
+                    page_lines.append(f"• 另有 {remaining} 个分P，请在稿件页查看")
+                video_embed.add_field(
+                    name="按分P打开",
+                    value="\n".join(page_lines)[:1024],
+                    inline=False,
+                )
             embeds.append(video_embed)
     releases = data.get("releases") or {}
     embeds.extend(_release_embeds(discord, releases)[:1])
-    return embeds[:7]
+    return embeds[:8]
+
+
+def _series_progress_embeds(discord, data: dict) -> list:
+    mainline = (data.get("mainline") or [])[:12]
+    if not mainline:
+        return []
+    completed = int(data.get("completed_required") or 0)
+    total = int(data.get("total_required") or 0)
+    e = discord.Embed(
+        title=f"系列追番进度 · {completed}/{total}"[:256],
+        description=str(data.get("summary") or "")[:1200] or None,
+        color=0x9ECE6A if total and completed >= total else _EMBED_COLOR,
+    )
+    lines = []
+    for item in mainline:
+        sid = item.get("id")
+        name = str(item.get("name") or sid or "?")
+        linked = f"[{name}](https://bgm.tv/subject/{sid})" if sid else name
+        glyph = "✅" if item.get("completed") else "▶️" if item.get("is_next") else "🔒" if item.get("blocked_by") else "▫️"
+        status = str(item.get("collection_label") or "状态未知")
+        suffix = " · 下一步" if item.get("is_next") else ""
+        lines.append(f"{glyph} {linked} · {status}{suffix}")
+    e.add_field(name="主线", value="\n".join(lines)[:1024], inline=False)
+    if next_item := data.get("next_unwatched"):
+        e.add_field(name="建议动作", value=str(next_item.get("action") or "继续下一部")[:1024], inline=False)
+    optional_count = len(data.get("optional") or []) + len(data.get("alternates") or [])
+    if optional_count:
+        e.set_footer(text=f"另有 {optional_count} 个可选旁支/替代路线；它们默认不阻塞主线")
+    return [e]
 
 
 def _sections_embeds(discord, data: dict) -> list:
@@ -773,6 +822,7 @@ def build_embeds(discord, name: str, data: dict | None) -> list:
             "compare_user_taste": _taste_embeds,
             "get_airing_progress": _airing_progress_embeds,
             "plan_watch_order": _watch_order_embeds,
+            "get_series_progress": _series_progress_embeds,
             "plan_watch_copilot": _copilot_embeds,
             "get_user_memory": _memory_embeds,
             "remember_user_preference": _memory_embeds,

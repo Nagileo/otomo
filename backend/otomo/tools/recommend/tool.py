@@ -40,6 +40,7 @@ from ..bangumi.client import SUBJECT_TYPE, BangumiClient
 from ..curation import curated_recall_candidates
 from ..erogamescape.tool import EGSRankArgs, RankErogameScapeTool
 from ..review.tool import ReviewFusionResult, ReviewSubjectArgs, ReviewSubjectTool, _ASPECT_HINTS
+from ..series_progress import SeriesRelationMemo, collection_completed, collection_map, collection_state, necessity_for, state_label
 from .explanations import RecommendationClaim, refresh_item_explanation
 
 _RECALL_PER_TAG = 50
@@ -600,6 +601,7 @@ class RecItem(BaseModel):
     media_notes: list[str] = Field(default_factory=list)
     diversity_tags: list[str] = Field(default_factory=list)
     series_origin: str | None = None
+    series_status: dict[str, Any] = Field(default_factory=dict)
     claims: list[RecommendationClaim] = Field(default_factory=list)
     features: dict[str, float] | None = None  # export_features=True 时填；LTR 训练用
 
@@ -969,13 +971,26 @@ class RecommendTool(Tool):
             c["eps"] = c.get("eps") or _eps_value(raw.get("eps") or raw.get("total_episodes"))
             c["tags"].update(_tag_names(raw))
 
-    async def _series_context(self, sid: int, stype: int, seen: set[int]):
-        """一次查 relations，同时拿：①续集→回溯入口（顺序关系，要替换） ②同 IP 旁支（平行关系，只提示）。
+    async def _series_context(
+        self,
+        sid: int,
+        stype: int,
+        collections: dict[int, dict[str, Any]],
+        collection_available: bool,
+        relation_memo: SeriesRelationMemo | None = None,
+    ):
+        """Resolve the complete required predecessor chain for one candidate.
 
-        返回入口、关系簇 root、前作观看状态和旁支。是否替换入口由场景策略决定，
-        不在关系解析阶段把“前作已看”误当成“没有前作”。
+        The old policy used ``any(predecessor in seen)``.  That allowed season 3
+        when season 1 was complete but season 2 was not, and even counted
+        on-hold/dropped as sufficient.  This context only unlocks a candidate
+        when every required predecessor is complete.
         """
-        rels = await self.client.get_subject_relations(sid)
+        rels = await (
+            relation_memo.get(sid)
+            if relation_memo is not None
+            else self.client.get_subject_relations(sid)
+        )
         siblings = [
             n for n in dict.fromkeys(
                 (r.get("name_cn") or r.get("name")) for r in (rels or [])
@@ -983,42 +998,122 @@ class RecommendTool(Tool):
             ) if n
         ][:3]
 
-        cur, last, cur_rels = sid, None, rels
-        has_predecessor = False
-        seen_predecessor = False
-        for _ in range(_SERIES_MAX_HOP):
-            pre = next(
-                (r for r in (cur_rels or [])
-                 if r.get("relation") == "前传" and r.get("type") == stype
-                 and r.get("id")),
-                None,
-            )
-            if not pre:
-                break
-            has_predecessor = True
-            seen_predecessor = seen_predecessor or int(pre["id"]) in seen
-            cur, last = pre["id"], pre
-            cur_rels = await self.client.get_subject_relations(cur)
+        raw_by_id: dict[int, dict[str, Any]] = {sid: {"id": sid}}
+        edges: set[tuple[int, int]] = set()
+        queue: list[tuple[int, list[dict[str, Any]], int]] = [(sid, list(rels or []), 0)]
+        visited = {sid}
+        while queue:
+            current, current_rels, depth = queue.pop(0)
+            if depth >= _SERIES_MAX_HOP:
+                continue
+            for pre in current_rels:
+                if pre.get("relation") != "前传" or pre.get("type") != stype or not pre.get("id"):
+                    continue
+                pid = int(pre["id"])
+                edges.add((pid, current))
+                raw_by_id.setdefault(pid, pre)
+                if pid not in visited:
+                    visited.add(pid)
+                    try:
+                        pre_rels = await (
+                            relation_memo.get(pid)
+                            if relation_memo is not None
+                            else self.client.get_subject_relations(pid)
+                        )
+                    except Exception:  # noqa: BLE001
+                        pre_rels = []
+                    queue.append((pid, list(pre_rels or []), depth + 1))
 
-        entry = None
-        entry_candidate = None
-        if last is not None:
+        predecessor_ids = {source for source, _target in edges}
+        all_ids = predecessor_ids | {sid}
+        incoming_count = {item_id: 0 for item_id in all_ids}
+        outgoing: dict[int, set[int]] = {item_id: set() for item_id in all_ids}
+        for source, target in edges:
+            if target not in outgoing[source]:
+                outgoing[source].add(target)
+                incoming_count[target] += 1
+
+        def order_key(item_id: int) -> tuple[str, int]:
+            return (str(raw_by_id.get(item_id, {}).get("date") or "9999"), item_id)
+
+        ready = sorted((item_id for item_id, count in incoming_count.items() if count == 0), key=order_key)
+        ordered: list[int] = []
+        while ready:
+            item_id = ready.pop(0)
+            ordered.append(item_id)
+            for target in sorted(outgoing[item_id], key=order_key):
+                incoming_count[target] -= 1
+                if incoming_count[target] == 0:
+                    ready.append(target)
+            ready.sort(key=order_key)
+        ordered.extend(sorted(all_ids - set(ordered), key=order_key))
+
+        required_ids = {
+            item_id for item_id in predecessor_ids
+            if necessity_for(
+                str(raw_by_id.get(item_id, {}).get("name_cn") or raw_by_id.get(item_id, {}).get("name") or item_id),
+                "main",
+            ) == "required"
+        }
+        completed_ids = {
+            item_id for item_id in required_ids
+            if collection_completed(
+                collections.get(item_id),
+                _eps_value(
+                    raw_by_id.get(item_id, {}).get("eps")
+                    or raw_by_id.get(item_id, {}).get("total_episodes")
+                ),
+            )[0]
+        }
+        missing_ids = required_ids - completed_ids
+        entry_id = next((item_id for item_id in ordered if item_id in predecessor_ids), None)
+        next_required_id = next((item_id for item_id in ordered if item_id in missing_ids), None)
+
+        async def resolved_candidate(item_id: int | None) -> tuple[tuple | None, dict | None]:
+            if item_id is None:
+                return None, None
+            fallback = raw_by_id.get(item_id, {})
             try:
-                raw = await self.client.get_subject(cur)
+                raw = await self.client.get_subject(item_id)
                 img = raw.get("images") or {}
-                entry = (cur, raw.get("name_cn") or raw.get("name"),
-                         img.get("common") or img.get("medium"), raw.get("rating") or {})
-                entry_candidate = _blank(raw)
+                entry = (
+                    item_id,
+                    raw.get("name_cn") or raw.get("name") or str(item_id),
+                    img.get("common") or img.get("medium"),
+                    raw.get("rating") or {},
+                )
+                return entry, _blank(raw)
             except Exception:  # noqa: BLE001
-                entry = (cur, last.get("name_cn") or last.get("name"), None, {})
-                entry_candidate = _blank(last)
+                entry = (item_id, fallback.get("name_cn") or fallback.get("name") or str(item_id), None, {})
+                return entry, _blank(fallback)
+
+        entry, entry_candidate = await resolved_candidate(entry_id)
+        next_required, next_required_candidate = await resolved_candidate(next_required_id)
+        next_state = (
+            collection_state(collections.get(next_required_id), available=collection_available)
+            if next_required_id is not None else None
+        )
+        missing = [
+            {
+                "id": item_id,
+                "name": str(raw_by_id.get(item_id, {}).get("name_cn") or raw_by_id.get(item_id, {}).get("name") or item_id),
+                "state": collection_state(collections.get(item_id), available=collection_available),
+                "label": state_label(collection_state(collections.get(item_id), available=collection_available)),
+            }
+            for item_id in ordered if item_id in missing_ids
+        ]
         return {
             "entry": entry,
             "entry_candidate": entry_candidate,
+            "next_required": next_required,
+            "next_required_candidate": next_required_candidate,
+            "next_required_state": next_state,
             "siblings": siblings,
-            "root_id": int(cur),
-            "has_predecessor": has_predecessor,
-            "seen_predecessor": seen_predecessor,
+            "root_id": int(entry_id or sid),
+            "has_predecessor": bool(predecessor_ids),
+            "seen_predecessor": bool(completed_ids),
+            "all_predecessors_completed": not missing_ids,
+            "missing_predecessors": missing,
         }
 
     async def run(self, args: RecommendArgs) -> ToolResult[RecommendResult]:
@@ -1103,11 +1198,7 @@ class RecommendTool(Tool):
         else:
             seen = {it["subject"]["id"] for it in items if it.get("subject", {}).get("id")} | excluded
         watched = [it for it in items if it.get("type") == 2]
-        series_seen = {
-            int(it["subject"]["id"])
-            for it in items
-            if it.get("type") in {2, 3, 4, 5} and (it.get("subject") or {}).get("id")
-        }
+        series_collections = collection_map(items)
         wishlist = [it for it in items if it.get("type") == 1]
         # 画像需要同时看到在看/搁置/抛弃和低分作品；只传“看过”会把所有标签
         # 都误算成正向兴趣。compute_taste_profile 会按状态和个人均分中心化。
@@ -1589,6 +1680,7 @@ class RecommendTool(Tool):
         if args.export_features:
             pool_limit = 60  # LTR 训练：导出更大候选池以容纳 hold-out 正样本（训练专用路径）
         series_contexts: dict[int, dict[str, Any]] = {}
+        relation_memo = SeriesRelationMemo(self.client)
         effective_series_policy = args.series_policy
         if effective_series_policy == "auto":
             effective_series_policy = (
@@ -1603,7 +1695,7 @@ class RecommendTool(Tool):
             ][:30]
             if series_targets:
                 series_results = await gather_limited(
-                    [self._series_context(sid, stype, series_seen) for sid, _c in series_targets],
+                    [self._series_context(sid, stype, series_collections, bool(username), relation_memo) for sid, _c in series_targets],
                     host="bangumi",
                 )
                 for (sid, _c), res in zip(series_targets, series_results, strict=False):
@@ -1707,31 +1799,62 @@ class RecommendTool(Tool):
                 continue
             effective_candidate = c
             series_origin: str | None = None
+            visible_series_status: dict[str, Any] = {}
             r_id, r_name, r_img, r_rating, extra = sid, c["name"], c.get("image"), c["rating"], []
             franchise_key = _series_key(r_name)
             if args.use_series:
-                context = series_contexts.get(sid) or await self._series_context(sid, stype, series_seen)
+                context = series_contexts.get(sid) or await self._series_context(
+                    sid, stype, series_collections, bool(username), relation_memo
+                )
                 entry = context["entry"]
                 siblings = context["siblings"]
                 franchise_key = f"root:{context['root_id']}"
                 if effective_series_policy == "discover" and context["seen_predecessor"]:
                     elimination_counts["seen_series"] += 1
                     continue
-                replace_with_entry = bool(entry) and (
+                replacement_target = entry
+                replacement_raw = context.get("entry_candidate")
+                if effective_series_policy == "continue" and not context["all_predecessors_completed"]:
+                    replacement_target = context.get("next_required") or entry
+                    replacement_raw = context.get("next_required_candidate") or replacement_raw
+                    if context.get("next_required_state") in {"on_hold", "dropped"}:
+                        elimination_counts["blocked_series_needs_user_choice"] += 1
+                        continue
+                replace_with_predecessor = bool(replacement_target) and (
                     effective_series_policy == "entry_only"
-                    or (effective_series_policy in {"discover", "continue"} and not context["seen_predecessor"])
+                    or (effective_series_policy == "discover" and not context["seen_predecessor"])
+                    or (effective_series_policy == "continue" and not context["all_predecessors_completed"])
                 )
-                if replace_with_entry:
-                    r_id, r_name, r_img, r_rating = entry
-                    replacement = entry_candidate(context, c)
+                if replace_with_predecessor:
+                    r_id, r_name, r_img, r_rating = replacement_target
+                    replacement_context = {**context, "entry_candidate": replacement_raw}
+                    replacement = entry_candidate(replacement_context, c)
                     if replacement is None:
                         elimination_counts["series_entry_missing"] += 1
                         continue
                     effective_candidate = replacement
                     series_origin = str(c["name"])
-                    extra.append(f"系列入口：由《{c['name']}》回溯，建议从这部开始")
-                elif context["seen_predecessor"] and effective_series_policy in {"continue", "allow"}:
-                    extra.append("你已接触该系列前作，本轮保留后续作候选")
+                    visible_series_status = {
+                        "has_predecessor": r_id != context.get("root_id"),
+                        "prerequisites_satisfied": True,
+                        "missing_predecessors": [],
+                        "continued_from": str(c["name"]),
+                    }
+                    if context["all_predecessors_completed"]:
+                        extra.append(f"系列入口：由《{c['name']}》回溯，建议从这部开始")
+                    else:
+                        extra.append(f"《{c['name']}》仍有必要前作未完成，先继续《{r_name}》")
+                elif context["all_predecessors_completed"] and context["has_predecessor"] and effective_series_policy in {"continue", "allow"}:
+                    extra.append("所有必要前作已完成，本轮允许推荐这一续作")
+                elif context["missing_predecessors"] and effective_series_policy == "allow":
+                    names = "、".join(str(item["name"]) for item in context["missing_predecessors"][:3])
+                    extra.append(f"仍缺必要前作：{names}；因本轮明确允许续作而保留")
+                if not visible_series_status:
+                    visible_series_status = {
+                        "has_predecessor": bool(context.get("has_predecessor")),
+                        "prerequisites_satisfied": bool(context.get("all_predecessors_completed")),
+                        "missing_predecessors": list(context.get("missing_predecessors") or []),
+                    }
                 if siblings:  # 同 IP 旁支 → 提一嘴（平行关系，不替换）
                     extra.append("同 IP 还有：" + "、".join(f"《{s}》" for s in siblings))
             sk = franchise_key or _series_key(r_name)
@@ -1822,6 +1945,7 @@ class RecommendTool(Tool):
                 media_notes=subtype_notes,
                 diversity_tags=sorted(effective_candidate.get("tags") or ())[:16],
                 series_origin=series_origin,
+                series_status=visible_series_status,
                 features=(
                     feature_vector(r_id, effective_candidate)
                     if args.export_features

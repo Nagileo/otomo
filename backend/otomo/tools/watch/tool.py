@@ -42,7 +42,10 @@ _INSTALLMENT_RE = re.compile(
 
 
 def _installment_number(value: str) -> int | None:
-    match = _INSTALLMENT_RE.search(value or "")
+    # Bilibili search injects <em class="keyword"> around each matched token,
+    # which can split a marker into e.g. ``第</em>一季``.  Strip highlight tags
+    # before parsing or a first-season hit can leak onto a second-season page.
+    match = _INSTALLMENT_RE.search(_EM_TAG_RE.sub("", value or ""))
     if not match:
         return None
     token = next((item for item in match.groups() if item), "")

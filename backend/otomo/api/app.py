@@ -2185,6 +2185,7 @@ async def product_anime_watch_hub(
             include_videos=include_videos,
             video_limit=min(max(video_limit, 1), 10),
             stage=stage,
+            username=identity.username if identity.authenticated else None,
         )
         with tenant_scope(identity.username, authenticated=identity.authenticated):
             result = await AnimeWatchHubTool(client).run(args)

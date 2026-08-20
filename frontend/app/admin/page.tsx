@@ -22,6 +22,10 @@ function bytes(value: number) {
   return `${(value / (1024 ** index)).toFixed(index > 1 ? 1 : 0)} ${units[index]}`;
 }
 
+function BadgeLike({ good, label }: { good: boolean; label: string }) {
+  return <span className={`admin-integration-badge ${good ? "good" : "dim"}`}>{label}</span>;
+}
+
 const scoreLabels: Record<string, string> = {
   affinity: "口味贴合", graph: "主创关联", cf: "相似用户", external: "外部证据",
   explicit_request: "本轮要求", scenario: "场景", feedback: "近期反馈",
@@ -39,6 +43,8 @@ export default function AdminPage() {
   const [days, setDays] = useState(30);
   const [batchDetail, setBatchDetail] = useState<AnyRow | null>(null);
   const [batchBusy, setBatchBusy] = useState("");
+  const [biliCookies, setBiliCookies] = useState("");
+  const [biliBusy, setBiliBusy] = useState(false);
 
   async function load(nextDays = days) {
     setBusy(true); setError("");
@@ -95,6 +101,36 @@ export default function AdminPage() {
     await load();
   }
 
+  async function connectBilibili() {
+    if (!biliCookies.trim()) return;
+    setBiliBusy(true); setError("");
+    try {
+      const result = await productFetch("/admin/integrations/bilibili", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-otomo-csrf": exp.csrf },
+        body: JSON.stringify({ cookies_text: biliCookies }),
+      });
+      setBiliCookies("");
+      setData((current) => current ? ({ ...current, integrations: { ...current.integrations, bilibili: result.integration } }) : current);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally { setBiliBusy(false); }
+  }
+
+  async function disconnectBilibili() {
+    if (!window.confirm("清除服务器保存的 B站登录态？公开视频搜索仍然可用。")) return;
+    setBiliBusy(true); setError("");
+    try {
+      const result = await productFetch("/admin/integrations/bilibili", {
+        method: "DELETE",
+        headers: { "x-otomo-csrf": exp.csrf },
+      });
+      setData((current) => current ? ({ ...current, integrations: { ...current.integrations, bilibili: result.integration } }) : current);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally { setBiliBusy(false); }
+  }
+
   const evaluation = data?.recommendations?.evaluation?.current || {};
   const moderation = data?.community?.moderation || {};
   const allTasks = useMemo(() => [
@@ -120,6 +156,16 @@ export default function AdminPage() {
         <article className={moderation.counts?.pending_reports ? "warn" : ""}><Flag size={18} /><span>待处理举报</span><strong>{moderation.counts?.pending_reports || 0}</strong><small>隐藏留言 {moderation.counts?.hidden || 0}</small></article>
         <article><Gauge size={18} /><span>Acceptance@3</span><strong>{pct(evaluation.acceptance_at_k?.["3"])}</strong><small>MRR {Number(evaluation.mrr || 0).toFixed(2)} · NDCG {Number(evaluation.ndcg || 0).toFixed(2)}</small></article>
         <article><BarChart3 size={18} /><span>推荐 P95</span><strong>{duration(evaluation.performance?.p95_ms)}</strong><small>证据缓存命中 {pct(evaluation.performance?.cache_hit_rate)}</small></article>
+      </section>
+
+      <section className="admin-section admin-integration">
+        <header><div><span className="section-kicker">外部账号</span><h2>Bilibili 登录态</h2></div><span>{data.integrations?.bilibili?.authenticated ? `已连接 @${data.integrations.bilibili.username}` : data.integrations?.bilibili?.configured ? "Cookie 已导入但登录态失效" : "当前使用公开模式"}</span></header>
+        <div className="integration-status-row">
+          <BadgeLike good={Boolean(data.integrations?.bilibili?.authenticated)} label={data.integrations?.bilibili?.authenticated ? "登录态有效" : "未连接"} />
+          <p>用于 B站搜索、视频详情、字幕读取和 ASR 音频下载。Cookie 只保存在服务器，不会进入聊天、模型上下文或普通用户 API。</p>
+        </div>
+        <label className="admin-cookie-import"><span>粘贴浏览器插件导出的 Netscape cookies.txt</span><textarea value={biliCookies} onChange={(event) => setBiliCookies(event.target.value)} placeholder="# Netscape HTTP Cookie File…" rows={5} spellCheck={false} /><small>建议使用专门账号；过期后重新导入即可。不要把 cookies.txt 提交进 Git。</small></label>
+        <div className="panel-actions"><button className="button-primary" disabled={biliBusy || !biliCookies.trim()} onClick={() => void connectBilibili()}>{biliBusy ? <LoaderCircle className="spin" size={15} /> : <ShieldCheck size={15} />}导入并验证</button>{data.integrations?.bilibili?.configured ? <button className="button-secondary" disabled={biliBusy} onClick={() => void disconnectBilibili()}><Trash2 size={15} />清除登录态</button> : null}</div>
       </section>
 
       <section className="admin-section">

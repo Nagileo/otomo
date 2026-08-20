@@ -7,7 +7,7 @@
 
 import { useState } from "react";
 import { Badge, Panel, list, text, type AnyRecord , Meta } from "./shared";
-import { type ShareSnapshotHandler, type PrepareWriteHandler, type PrepareDownloaderHandler, fmtScore, clsBySignal, pct, EmptyHint, ShareSnapshotButton } from "./shared";
+import { type ShareSnapshotHandler, type PrepareWriteHandler, type PrepareDownloaderHandler, type PrepareRssFollowHandler, fmtScore, clsBySignal, pct, EmptyHint, ShareSnapshotButton } from "./shared";
 
 export function TrendingPanel({ data }: { data: AnyRecord }) {
   const items = list(data.items);
@@ -709,12 +709,13 @@ export function ReleaseItemCard({
   );
 }
 
-export function ReleaseFeedsPanel({ data, onPrepareDownloaderPush }: { data: AnyRecord; onPrepareDownloaderPush?: PrepareDownloaderHandler }) {
+export function ReleaseFeedsPanel({ data, onPrepareDownloaderPush, onCreateRssFollow }: { data: AnyRecord; onPrepareDownloaderPush?: PrepareDownloaderHandler; onCreateRssFollow?: PrepareRssFollowHandler }) {
   const groups = list(data.groups);
   const fallback = list(data.fallback_items);
   const related = list(data.related_items);
   const links = list(data.search_links);
   const subjectId = data.subject_id ? Number(data.subject_id) : undefined;
+  const [rssNotice, setRssNotice] = useState("");
   return (
     <div id="watch-release" className="watch-hub-anchor">
       <Panel
@@ -725,6 +726,7 @@ export function ReleaseFeedsPanel({ data, onPrepareDownloaderPush }: { data: Any
         <Badge tone={data.mapping_confidence >= 0.8 ? "good" : "warn"}>{data.mapping_confidence >= 0.8 ? "外站对齐可靠" : "外站对齐存疑"}</Badge>
         <Badge tone="warn">link aggregation only</Badge>
       </div>
+      {rssNotice ? <div className="inline-notice">{rssNotice}</div> : null}
       {groups.length ? (
         <div className="digest-list">
           {groups.map((group, i) => (
@@ -743,6 +745,29 @@ export function ReleaseFeedsPanel({ data, onPrepareDownloaderPush }: { data: Any
                     >
                       复制 RSS
                     </button>
+                    {onCreateRssFollow ? (
+                      <button
+                        type="button"
+                        className="inline-action"
+                        onClick={async () => {
+                          setRssNotice("正在创建真实追更规则…");
+                          try {
+                            await onCreateRssFollow({
+                              rss_url: group.rss_url,
+                              title: text(data.title),
+                              subgroup: text(group.subgroup),
+                              subject_id: subjectId,
+                              source: text(group.source),
+                            });
+                            setRssNotice(`已追更 ${text(group.subgroup)}；默认每小时检查并写入 Otomo 收件箱。`);
+                          } catch (error) {
+                            setRssNotice(`创建追更失败：${String(error)}`);
+                          }
+                        }}
+                      >
+                        追更这个 RSS
+                      </button>
+                    ) : null}
                   </>
                 )}
               </div>
@@ -817,9 +842,13 @@ export function ReleaseFeedsPanel({ data, onPrepareDownloaderPush }: { data: Any
 export function AnimeWatchHubPanel({
   data,
   onPrepareDownloaderPush,
+  onPrepareWrite,
+  onCreateRssFollow,
 }: {
   data: AnyRecord;
   onPrepareDownloaderPush?: PrepareDownloaderHandler;
+  onPrepareWrite?: PrepareWriteHandler;
+  onCreateRssFollow?: PrepareRssFollowHandler;
 }) {
   const subject = data.subject || {};
   const lifecycle = data.lifecycle || {};
@@ -857,6 +886,7 @@ export function AnimeWatchHubPanel({
   };
   const renderVideoCard = (video: AnyRecord, i: number) => {
     const href = video.url || "";
+    const pageLinks = list(video.page_links);
     const upHref = video.mid ? `https://space.bilibili.com/${video.mid}` : "";
     const copyrightLabel = video.copyright_declaration === "repost" ? "投稿声明：转载" : video.copyright_declaration === "original" ? "投稿声明：自制" : "";
     return (
@@ -886,6 +916,20 @@ export function AnimeWatchHubPanel({
             {video.danmaku ? <span>弹幕 {formatCount(video.danmaku)}</span> : null}
             <span>作品匹配 {pct(video.match_confidence)}</span>
           </div>
+          {pageLinks.length ? (
+            <details className="bili-video-pages">
+              <summary>按分P打开具体集 · {pageLinks.length}</summary>
+              <div className="bili-page-links">
+                {pageLinks.map((page, pageIndex) => (
+                  <a href={page.url} target="_blank" rel="noreferrer" key={`${page.page || pageIndex}-${page.url}`}>
+                    <b>P{page.page || pageIndex + 1}</b>
+                    <span>{text(page.title, `第 ${page.page || pageIndex + 1} 部分`)}</span>
+                    {page.duration_seconds ? <small>{formatDuration(page.duration_seconds)}</small> : null}
+                  </a>
+                ))}
+              </div>
+            </details>
+          ) : null}
           <details className="bili-video-proof">
             <summary>{video.watch_candidate ? "为什么判断为可看的完整动画内容" : "分类与核验依据"}</summary>
             {list<string>(video.content_evidence).map((row, j) => <p key={`content-${j}`}>{row}</p>)}
@@ -911,6 +955,7 @@ export function AnimeWatchHubPanel({
           {list<string>(data.status_summary).map((row, i) => <span key={i}>{row}</span>)}
         </div>
       </Panel>
+      {data.series_progress ? <SeriesProgressPanel data={data.series_progress} onPrepareWrite={onPrepareWrite} /> : null}
       {data.online?.title ? <WhereToWatchPanel data={data.online} /> : null}
       {data.bilibili ? <div id="watch-bilibili" className="watch-hub-anchor">
         <Panel
@@ -918,6 +963,7 @@ export function AnimeWatchHubPanel({
           subtitle={`${playableVideos.length} 个可看正片候选 · ${editorialVideos.length} 个PV/漫评/回顾 · ${uncertainVideos.length} 个疑似候选`}
         >
         <div className="evidence-row">
+          <Badge tone={bili.account_mode === "cookie" ? "good" : "dim"}>{bili.account_mode === "cookie" ? "B站登录态已接入" : "B站公开模式"}</Badge>
           {bili.cache_hit ? <Badge tone="good">已复用核验缓存</Badge> : <Badge tone="dim">本轮实时核验</Badge>}
           {bili.search_partial ? <Badge tone="warn">部分搜索源降级</Badge> : null}
           {bili.rate_limited ? <Badge tone="warn">B站限流 · 缓存兜底</Badge> : null}
@@ -959,7 +1005,7 @@ export function AnimeWatchHubPanel({
                 <span key={`${item.bvid || item.aid || item.title}-${index}`}>
                   <a href={item.url} target="_blank" rel="noreferrer">{text(item.title)}</a>
                   {` · ${text(item.reason)}`}
-                  {item.suggested_subject_id ? <> · 可能属于 <a href={`/subject/${item.suggested_subject_id}`}>{text(item.suggested_subject_title)}</a>{item.suggested_relation ? `（${text(item.suggested_relation)}）` : ""}</> : " · 暂不能可靠映射到具体关联条目"}
+                  {item.suggested_subject_id ? <> · 可能属于 <a href={`/subject/${item.suggested_subject_id}`}>{text(item.suggested_subject_title)}</a>{item.suggested_relation ? `（${text(item.suggested_relation)}）` : ""}{item.suggested_collection_label ? ` · 你的状态：${text(item.suggested_collection_label)}` : ""}</> : " · 暂不能可靠映射到具体关联条目"}
                 </span>
               ))}
             </div>
@@ -969,9 +1015,95 @@ export function AnimeWatchHubPanel({
         <Meta notes={list<string>(bili.warnings)} />
         </Panel>
       </div> : null}
-      {data.releases?.title ? <ReleaseFeedsPanel data={data.releases} onPrepareDownloaderPush={onPrepareDownloaderPush} /> : null}
+      {data.releases?.title ? <ReleaseFeedsPanel data={data.releases} onPrepareDownloaderPush={onPrepareDownloaderPush} onCreateRssFollow={onCreateRssFollow} /> : null}
       <Meta notes={list<string>(data.caveats)} />
     </>
+  );
+}
+
+export function SeriesProgressPanel({
+  data,
+  onPrepareWrite,
+}: {
+  data: AnyRecord;
+  onPrepareWrite?: PrepareWriteHandler;
+}) {
+  const mainline = list(data.mainline);
+  const optional = list(data.optional);
+  const alternates = list(data.alternates);
+  const next = data.next_unwatched || null;
+  const current = data.current || null;
+  const names = new Map(mainline.map((item) => [Number(item.id), text(item.name)]));
+  const statusTone = (state: string) => state === "watched"
+    ? "good" : state === "watching" ? "good" : state === "on_hold" || state === "dropped" ? "warn" : "dim";
+  const statusGlyph = (item: AnyRecord) => item.completed
+    ? "✓" : item.is_next ? "▶" : list(item.blocked_by).length ? "锁" : "○";
+  const canStart = next && onPrepareWrite && data.personalized && !next.completed;
+  return (
+    <Panel
+      title="系列追番进度"
+      subtitle={data.personalized ? `@${text(data.username)} · 主线 ${data.completed_required ?? 0}/${data.total_required ?? 0}` : "客观顺序 · 登录后合并收藏"}
+    >
+      <div className="series-progress-head">
+        <div className="series-progress-track" aria-label={`系列主线完成 ${data.progress_percent ?? 0}%`}>
+          <span style={{ width: `${Math.max(0, Math.min(100, Number(data.progress_percent || 0)))}%` }} />
+        </div>
+        <strong>{data.progress_percent ?? 0}%</strong>
+      </div>
+      <p className="evidence-copy">{text(data.summary)}</p>
+      <div className="series-progress-grid">
+        {mainline.map((item, index) => (
+          <article className={`series-progress-card${item.is_current ? " current" : ""}${item.is_next ? " next" : ""}`} key={item.id}>
+            <span className="series-order">{statusGlyph(item)}</span>
+            {item.image ? <img src={item.image} alt="" loading="lazy" /> : <div className="series-cover-placeholder">{index + 1}</div>}
+            <div>
+              <a className="card-title title-link" href={`/subject/${item.id}`}>{text(item.name)}</a>
+              <div className="evidence-row tight">
+                <Badge tone={statusTone(String(item.collection_state))}>{text(item.collection_label)}</Badge>
+                {item.is_current ? <Badge tone="dim">当前页面</Badge> : null}
+                {item.is_next ? <Badge tone="good">下一步</Badge> : null}
+                {item.necessity !== "required" ? <Badge tone="dim">{item.necessity === "skip" ? "可跳过" : "可选"}</Badge> : null}
+              </div>
+              {item.ep_status ? <small>分集进度 {item.ep_status}/{item.eps || "?"}</small> : null}
+              {list(item.blocked_by).length ? (
+                <small>需先完成：{list<number>(item.blocked_by).map((id) => names.get(Number(id)) || `subject ${id}`).join("、")}</small>
+              ) : null}
+              {item.is_next ? <p className="card-note">{text(item.action)}</p> : null}
+            </div>
+          </article>
+        ))}
+      </div>
+      {onPrepareWrite && data.personalized ? (
+        <div className="panel-actions series-actions">
+          {current && !current.completed && current.collection_state === "watching" ? (
+            <button className="button-secondary" type="button" onClick={() => onPrepareWrite(Number(current.id), text(current.name), 2)}>
+              看完整季后标为看过
+            </button>
+          ) : null}
+          {current && current.completed && current.collection_state === "watching" ? (
+            <button className="button-secondary" type="button" onClick={() => onPrepareWrite(Number(current.id), text(current.name), 2)}>
+              将本季状态同步为看过
+            </button>
+          ) : null}
+          {canStart ? (
+            <button className="button-primary" type="button" onClick={() => onPrepareWrite(Number(next.id), text(next.name), 3)}>
+              {next.collection_state === "watching" ? "继续下一部" : next.collection_state === "on_hold" || next.collection_state === "dropped" ? "恢复下一部为在看" : "开始下一部"}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+      {optional.length || alternates.length ? (
+        <details className="series-optional">
+          <summary>可选旁支与替代路线 {optional.length + alternates.length}</summary>
+          <div className="compact-list">
+            {[...optional, ...alternates].map((item) => (
+              <span key={`${item.role}-${item.id}`}><a href={`/subject/${item.id}`}>{text(item.name)}</a> · {text(item.relation || item.action)} · {text(item.collection_label)}</span>
+            ))}
+          </div>
+        </details>
+      ) : null}
+      <Meta notes={list<string>(data.notes)} />
+    </Panel>
   );
 }
 
@@ -1156,7 +1288,17 @@ export function SeasonGuidePanel({
                   {heatLabel[String(item.hotness_level)] || heatLabel.none}
                 </Badge>
                 {item.pre_air_wish != null && <Badge tone="dim">播前期待 {item.pre_air_wish}</Badge>}
+                {item.series_status ? <Badge tone={item.series_status.collection_state === "watched" || item.series_status.collection_state === "watching" ? "good" : item.series_status.collection_state === "on_hold" || item.series_status.collection_state === "dropped" ? "warn" : "dim"}>{text(item.series_status.collection_label)}</Badge> : null}
+                {item.series_status?.is_sequel ? <Badge tone={item.series_status.prerequisites_satisfied ? "good" : "warn"}>{item.series_status.prerequisites_satisfied ? "前作已完成" : "缺少必要前作"}</Badge> : null}
               </div>
+              {item.series_status && !item.series_status.prerequisites_satisfied ? (
+                <div className="inline-notice season-series-warning">
+                  <strong>暂不建议直接开这部</strong>
+                  <span>{text(item.series_status.note)}</span>
+                  {list(item.series_status.missing_predecessors).length ? <span>先看：{list(item.series_status.missing_predecessors).map((row) => text(row.name)).join("、")}</span> : null}
+                  {item.series_status.next_subject_id ? <a href={`/subject/${item.series_status.next_subject_id}`}>去下一部必要主线：{text(item.series_status.next_subject_name)}</a> : null}
+                </div>
+              ) : null}
               {item.mapping_warning ? <p className="card-note season-mapping-warning">{text(item.mapping_warning)}</p> : null}
               {list(item.verticals).length > 0 && (
                 <div className="evidence-row tight">
@@ -1186,17 +1328,21 @@ export function SeasonGuidePanel({
                 {item.subject_id && <a href={`/subject/${item.subject_id}#watch-online`}>在线观看</a>}
                 {item.subject_id && <a href={`/subject/${item.subject_id}#watch-bilibili`}>B站内容</a>}
                 {item.subject_id && <a href={`/subject/${item.subject_id}#watch-release`}>RSS/下载</a>}
-                {item.subject_id && onPrepareWrite && (
+                {item.subject_id && onPrepareWrite && (!item.series_status || item.series_status.prerequisites_satisfied) && !["watched", "watching"].includes(String(item.series_status?.collection_state || "")) && (
                   <button
                     type="button"
                     className="inline-action card-action"
                     onClick={(e) => {
                       e.preventDefault();
                       e.stopPropagation();
-                      onPrepareWrite(Number(item.subject_id), text(item.title), 1);
+                      onPrepareWrite(
+                        Number(item.subject_id),
+                        text(item.title),
+                        item.series_status?.collection_state === "wishlist" ? 3 : 1,
+                      );
                     }}
                   >
-                    想看
+                    {item.series_status?.collection_state === "wishlist" ? "开始追" : "想看"}
                   </button>
                 )}
                 {item.official_url && <a href={item.official_url} target="_blank" rel="noreferrer">官网</a>}

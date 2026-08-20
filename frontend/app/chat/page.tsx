@@ -1520,6 +1520,30 @@ export default function Home() {
     }
   }
 
+  async function createRssFollow(payload: Record<string, any>) {
+    const existingResponse = await fetch(`${BACKEND}/subscriptions/rules`, { credentials: "include" });
+    const existing = await existingResponse.json().catch(() => ({}));
+    if (!existingResponse.ok || !existing.ok) throw new Error(existing.detail || "读取订阅失败");
+    if ((existing.rules || []).some((rule: any) => rule.kind === "rss_release" && rule.filters?.rss_url === payload.rss_url)) return;
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Shanghai";
+    const response = await fetch(`${BACKEND}/subscriptions/rules`, {
+      method: "POST",
+      credentials: "include",
+      headers: csrfHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({
+        kind: "rss_release",
+        title: `${payload.title} · ${payload.subgroup} 新资源`,
+        enabled: true,
+        filters: { ...payload, include_watch_plan: false },
+        schedule: { timezone, hour: 9, minute: 0, interval_minutes: 60 },
+        channels: ["inbox"],
+        template: "normal",
+      }),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !result.ok) throw new Error(result.detail || result.error || `HTTP ${response.status}`);
+  }
+
   const hasEvidence = Object.values(evidence).some((rows) => list(rows).length > 0);
 
   const panelHandlerProps = {
@@ -1532,6 +1556,7 @@ export default function Home() {
     onRecommendationFeedback: postRecommendationFeedback,
     onNextRecommendationBatch: nextRecommendationBatch,
     onPrepareDownloaderPush: postPrepareDownloaderPush,
+    onCreateRssFollow: createRssFollow,
     onVisualFeedback: postVisualFeedback,
     onVisualCorrectionSearch: searchVisualCorrection,
   };

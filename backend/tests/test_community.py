@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
 from otomo import config
+from otomo.api import admin as admin_api
 from otomo.api.app import app
 from otomo.auth import BangumiToken
 from otomo.community import CommunityStore
@@ -73,9 +76,16 @@ def test_community_api_requires_login_and_csrf_for_comments(tmp_path, monkeypatc
     monkeypatch.setattr(config.settings, "community_store_path", str(tmp_path / "community.sqlite3"))
     monkeypatch.setattr(config.settings, "ltm_store_path", str(tmp_path / "ltm.sqlite3"))
     monkeypatch.setattr(config.settings, "quota_store_path", str(tmp_path / "quota.json"))
+    monkeypatch.setattr(config.settings, "bilibili_cookies_file", str(tmp_path / "bilibili-cookies.txt"))
     monkeypatch.setattr(config.settings, "subscription_scheduler_enabled", False)
     monkeypatch.setattr(config.settings, "rate_limit_enabled", False)
     monkeypatch.setattr(config.settings, "community_admin_usernames", "moderator")
+    monkeypatch.setattr(admin_api, "verify_bilibili_account", lambda: {
+        "configured": Path(config.settings.bilibili_cookies_file).is_file(),
+        "authenticated": Path(config.settings.bilibili_cookies_file).is_file(),
+        "username": "test-bili" if Path(config.settings.bilibili_cookies_file).is_file() else "",
+        "user_id": 42 if Path(config.settings.bilibili_cookies_file).is_file() else 0,
+    })
 
     with TestClient(app) as client:
         auth = client.get("/auth/session").json()
@@ -135,6 +145,27 @@ def test_community_api_requires_login_and_csrf_for_comments(tmp_path, monkeypatc
         ))
         dashboard = client.get("/admin/overview?days=7")
         assert dashboard.status_code == 200
+        cookie_text = (
+            "# Netscape HTTP Cookie File\n"
+            "#HttpOnly_.bilibili.com\tTRUE\t/\tTRUE\t0\tSESSDATA\tserver-only-secret\n"
+        )
+        imported = client.post(
+            "/admin/integrations/bilibili",
+            headers={"x-otomo-csrf": moderator_auth["csrf_token"]},
+            json={"cookies_text": cookie_text},
+        )
+        assert imported.status_code == 200
+        assert imported.json()["integration"]["authenticated"] is True
+        assert "server-only-secret" not in imported.text
+        assert Path(config.settings.bilibili_cookies_file).read_text(encoding="utf-8") == cookie_text
+        assert client.get("/admin/integrations/bilibili").json()["integration"]["configured"] is True
+        cleared = client.delete(
+            "/admin/integrations/bilibili",
+            headers={"x-otomo-csrf": moderator_auth["csrf_token"]},
+        )
+        assert cleared.status_code == 200
+        assert cleared.json()["integration"]["configured"] is False
+        assert not Path(config.settings.bilibili_cookies_file).exists()
         report_id = dashboard.json()["community"]["moderation"]["reports"][0]["id"]
         hidden = client.post(
             f"/admin/comments/{comment['id']}/moderate",

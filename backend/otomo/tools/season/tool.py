@@ -24,6 +24,7 @@ from ..bangumi.client import SUBJECT_TYPE, BangumiClient
 from ..bangumi.models import SubjectBrief
 from ..calendar.tool import BroadcastCalendarArgs, BroadcastCalendarTool
 from ..discovery.tool import GetTrendingSubjectsTool, TrendingArgs
+from ..series_progress import SeriesCandidateStatus, SeriesRelationMemo, collection_map, inspect_series_candidate
 from ..videos.tool import (
     BiliGuideSearchArgs,
     BiliVideoMeta,
@@ -156,6 +157,7 @@ class SeasonGuideItem(BaseModel):
     bili_url: str | None = None
     stream_urls: list[dict] = Field(default_factory=list)
     image: str | None = None
+    series_status: SeriesCandidateStatus | None = None
 
 
 class GuideCommentDigest(BaseModel):
@@ -494,7 +496,7 @@ class SeasonGuideBriefTool(Tool):
                 item.pre_air_wish = res.data.pre_air_wish
                 item.hotness_evidence.append(f"开播前想看 {res.data.pre_air_wish} 人")
 
-    async def _profile_tags(self, username: str | None) -> tuple[bool, list[str]]:
+    async def _profile_tags(self, username: str | None) -> tuple[bool, list[str], list[dict]]:
         try:
             user = username
             if not user:
@@ -504,9 +506,9 @@ class SeasonGuideBriefTool(Tool):
                 user, SUBJECT_TYPE["anime"], collection_type=None, max_items=1000
             )
         except Exception:  # noqa: BLE001
-            return False, []
+            return False, [], []
         profile = compute_taste_profile(user, items)
-        return True, [t["tag"] for t in profile.top_tags[:10]]
+        return True, [t["tag"] for t in profile.top_tags[:10]], items
 
     async def _verify_yuc_match(
         self, subject: SubjectBrief, yuc: YucAnime | None, confidence: float, matched_by: str
@@ -809,7 +811,8 @@ class SeasonGuideBriefTool(Tool):
         ]
         initial_results = await asyncio.gather(*core_coroutines)
         season, yuc_res = initial_results[:2]
-        personalized, profile_tags = initial_results[2]
+        personalized, profile_tags, collection_rows = initial_results[2]
+        user_collections = collection_map(collection_rows)
         yuc_items = yuc_res.data.anime if yuc_res.ok and yuc_res.data else []
         wanted = list(dict.fromkeys((args.focus_tags or []) + profile_tags))
         season_guide_links = _guide_links(
@@ -839,8 +842,21 @@ class SeasonGuideBriefTool(Tool):
             if mode != "preseason" else
             {subject.id: HotSignals() for subject in season.anime[: args.limit]}
         )
+        relation_memo = SeriesRelationMemo(self.client)
 
         async def build_item(subject: SubjectBrief) -> SeasonGuideItem:
+            series_status = (
+                await inspect_series_candidate(
+                    self.client,
+                    subject.id,
+                    user_collections,
+                    collection_available=True,
+                    subject_name=subject.name_cn or subject.name,
+                    max_hops=6,
+                    relation_memo=relation_memo,
+                )
+                if personalized else None
+            )
             yuc, match_confidence, matched_by = _match_yuc(subject, yuc_items)
             match_confidence, matched_by = await self._verify_yuc_match(subject, yuc, match_confidence, matched_by)
             bangumi_tags: list[str] = []
@@ -924,12 +940,28 @@ class SeasonGuideBriefTool(Tool):
                 bili_url=yuc.bili_url if yuc else None,
                 stream_urls=[x.model_dump(mode="json") for x in (yuc.stream_urls if yuc else [])],
                 image=subject.image or (yuc.image if yuc else None),
+                series_status=series_status,
             )
         item_results = await gather_limited([build_item(subject) for subject in season.anime[: args.limit]], host="bangumi")
         items = [item for item in item_results if isinstance(item, SeasonGuideItem)]
         dropped = len(item_results) - len(items)
+        def series_priority(item: SeasonGuideItem) -> int:
+            status = item.series_status
+            if status is None:
+                return 0
+            if not status.prerequisites_satisfied:
+                return 3
+            if status.collection_state == "watching":
+                return -2
+            if status.collection_state in {"wishlist", "uncollected"}:
+                return -1
+            if status.collection_state == "watched":
+                return 2
+            if status.collection_state in {"on_hold", "dropped"}:
+                return 1
+            return 0
         if mode == "hot":
-            items.sort(key=lambda x: (-(x.hotness * 0.7 + min(x.fit_score / 8.0, 1.0) * 0.3), -x.hotness, -(x.bangumi_score or 0)))
+            items.sort(key=lambda x: (series_priority(x), -(x.hotness * 0.7 + min(x.fit_score / 8.0, 1.0) * 0.3), -x.hotness, -(x.bangumi_score or 0)))
             await self._enrich_pre_air_hype(items[:12])
         elif mode == "preseason":
             await self._enrich_pre_air_hype(items)
@@ -941,9 +973,9 @@ class SeasonGuideBriefTool(Tool):
                 readiness = sum(bool(value) for value in (item.broadcast, item.studio, item.pv_url)) / 3.0
                 return 0.5 * taste + 0.3 * hype + 0.2 * readiness
 
-            items.sort(key=lambda x: (-preseason_score(x), -_fit_rank(x.fit), -(x.pre_air_wish or 0)))
+            items.sort(key=lambda x: (series_priority(x), -preseason_score(x), -_fit_rank(x.fit), -(x.pre_air_wish or 0)))
         else:
-            items.sort(key=lambda x: (-_fit_rank(x.fit), -x.fit_score, -x.hotness, -(x.bangumi_score or 0)))
+            items.sort(key=lambda x: (series_priority(x), -_fit_rank(x.fit), -x.fit_score, -x.hotness, -(x.bangumi_score or 0)))
 
         discovery_warnings: list[str] = []
         discovered_videos: list[BiliVideoMeta] = []
@@ -1003,6 +1035,7 @@ class SeasonGuideBriefTool(Tool):
                 "Bangumi 提供条目/评分/收藏锚点，yuc 提供放送表/官网/PV/制作阵容。",
                 "本季分诊以 Bangumi 已收录且有播出日期的条目为骨架，yuc 仅补充放送/制作信息；Bangumi 未收录的番不会出现在分诊里，冷门或尚未收录的新番可能遗漏，可对照 yuc.wiki 原表。",
                 "默认只核验整季导视，不逐部搜索漫评；只有明确要求逐部视频时才开启，以兼顾准确率与等待时间。",
+                "登录后逐部合并系列前作状态；缺少必要前作的续作会降序并明确提示，不会因为看过任意一季就直接放行更后面的季度。",
                 (
                     "B站导视评论已抽样读取；它们是话语源，不是事实源，且可能包含剧透/玩梗。"
                     if guide_comment_digests else

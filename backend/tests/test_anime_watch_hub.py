@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from otomo.agent._common import _safe_anime_watch_hub_payload
 from otomo.agent.contracts import ToolResult
 from otomo.tools.product_loop.tool import AnimeWatchHubArgs, AnimeWatchHubTool, _duration_minutes
 from otomo.tools.release.tool import AnimeReleaseFeedsResult
@@ -169,6 +170,34 @@ def test_multi_page_episode_coverage_is_explained() -> None:
     ) == "第 1–3 话"
 
 
+def test_chat_safe_payload_keeps_series_bili_status_and_bounded_page_links() -> None:
+    safe = _safe_anime_watch_hub_payload({
+        "subject": {"id": 42, "name": "测试动画"},
+        "series_progress": {"subject_id": 42, "summary": "第一季完成，下一步第二季"},
+        "bilibili": {
+            "account_mode": "cookie",
+            "cache_hit": True,
+            "search_partial": True,
+            "rate_limited": False,
+            "last_verified": "2026-08-20T00:00:00Z",
+            "videos": [{
+                "bvid": "BVpages",
+                "page_links": [
+                    {"page": page, "title": f"第{page}话", "url": f"https://www.bilibili.com/video/BVpages?p={page}"}
+                    for page in range(1, 46)
+                ],
+            }],
+            "version_conflicts": [{"title": "测试动画 第三季", "reason": "错季"}],
+        },
+    })
+    assert safe["series_progress"]["subject_id"] == 42
+    assert safe["bilibili"]["account_mode"] == "cookie"
+    assert safe["bilibili"]["cache_hit"] is True
+    assert safe["bilibili"]["search_partial"] is True
+    assert len(safe["bilibili"]["videos"][0]["page_links"]) == 40
+    assert safe["bilibili"]["version_conflicts"][0]["reason"] == "错季"
+
+
 def test_reaction_and_extras_do_not_fill_default_video_cards() -> None:
     reaction = classify_subject_video(
         "【英配版】轻音少女 第一季【1080P/英文字幕】reaction",
@@ -293,9 +322,12 @@ async def test_subject_video_search_promotes_long_public_upload_without_staff_id
     def fake_view(_aid, _bvid):
         return {"data": {
             **row,
-            "duration": 24 * 60,
+            "duration": 48 * 60,
             "copyright": 2,
-            "pages": [{"part": "K-ON轻音少女 台配国语中字", "duration": 24 * 60}],
+            "pages": [
+                {"page": 1, "part": "第1话 台配国语中字", "duration": 24 * 60},
+                {"page": 2, "part": "第2话 台配国语中字", "duration": 24 * 60},
+            ],
             "owner": {"name": row["author"], "mid": 9},
             "stat": {"view": 1200, "danmaku": 20},
         }}
@@ -312,8 +344,56 @@ async def test_subject_video_search_promotes_long_public_upload_without_staff_id
     assert result.ok and result.data is not None
     assert result.data.watch_candidates[0].role == "public_full_episode"
     assert result.data.watch_candidates[0].uploader_class == "unknown"
-    assert result.data.watch_candidates[0].duration_seconds == 24 * 60
-    assert result.data.watch_candidates[0].copyright_declaration == "repost"
+    video = result.data.watch_candidates[0]
+    assert video.duration_seconds == 48 * 60
+    assert video.copyright_declaration == "repost"
+    assert video.page_count == 2
+    assert [link["page"] for link in video.page_links] == [1, 2]
+    assert video.page_links[1]["url"] == "https://www.bilibili.com/video/BVpublic?p=2"
+
+
+@pytest.mark.asyncio
+async def test_wrong_season_retrospective_is_removed_using_multi_page_titles(monkeypatch) -> None:
+    from otomo.tools.videos import tool as videos_tool
+
+    row = {
+        "title": "一口气看完【轻音少女 TV】青春回忆",
+        "author": "动画回顾UP",
+        "bvid": "BVseason2recap",
+        "aid": 19,
+        "pubdate": 100,
+        "arcurl": "https://www.bilibili.com/video/BVseason2recap",
+    }
+
+    async def fake_search(_query: str):
+        return {"data": {"result": [row]}}
+
+    def fake_view(_aid, _bvid):
+        return {"data": {
+            **row,
+            "duration": 90 * 60,
+            "pages": [
+                {"page": 1, "part": "轻音少女 第二季 上", "duration": 45 * 60},
+                {"page": 2, "part": "轻音少女 第二季 下", "duration": 45 * 60},
+            ],
+            "owner": {"name": row["author"], "mid": 19},
+            "stat": {"view": 1000, "danmaku": 10},
+        }}
+
+    monkeypatch.setattr(videos_tool, "_bili_search_async", fake_search)
+    monkeypatch.setattr(videos_tool, "_sync_bili_view", fake_view)
+    result = await SearchBiliSubjectVideosTool().run(BiliSubjectVideosArgs(
+        query="轻音少女",
+        aliases=["K-ON!"],
+        subject_platform="TV",
+        lifecycle="archive",
+        limit=5,
+    ))
+
+    assert result.ok and result.data is not None
+    assert result.data.videos == []
+    assert result.data.version_conflicts[0].bvid == "BVseason2recap"
+    assert "第 2 季" in result.data.version_conflicts[0].reason
 
 
 @pytest.mark.asyncio

@@ -9,13 +9,15 @@ import asyncio
 from difflib import SequenceMatcher
 from email.utils import parsedate_to_datetime
 import html as html_lib
+import ipaddress
 import json
 from pathlib import Path
 import re
 import secrets
+import socket
 import time
 from typing import Any, Literal
-from urllib.parse import quote
+from urllib.parse import quote, urljoin, urlparse
 import xml.etree.ElementTree as ET
 
 import httpx
@@ -136,6 +138,17 @@ class DownloaderPushActionResult(BaseModel):
     requires_confirmation: bool = True
     warning: str
     memory: MemorySummary
+
+
+class TorrentInspection(BaseModel):
+    verified: bool = False
+    file_count: int = 0
+    total_size: int = 0
+    sample_files: list[str] = Field(default_factory=list)
+    episode_numbers: list[int] = Field(default_factory=list)
+    scope_status: Literal["exact", "compatible", "bundle", "conflict", "unknown"] = "unknown"
+    scope_reason: str = ""
+    warnings: list[str] = Field(default_factory=list)
 
 
 def _new_id(prefix: str) -> str:
@@ -668,6 +681,169 @@ class GetAnimeReleaseFeedsTool(Tool):
         return ToolResult(ok=True, data=result, sources=sources[:8])
 
 
+class _BencodeReader:
+    def __init__(self, payload: bytes) -> None:
+        self.payload = payload
+        self.pos = 0
+
+    def read(self, depth: int = 0) -> Any:
+        if depth > 32 or self.pos >= len(self.payload):
+            raise ValueError("invalid bencode")
+        marker = self.payload[self.pos : self.pos + 1]
+        if marker == b"i":
+            self.pos += 1
+            end = self.payload.index(b"e", self.pos)
+            value = int(self.payload[self.pos:end])
+            self.pos = end + 1
+            return value
+        if marker == b"l":
+            self.pos += 1
+            values = []
+            while self.payload[self.pos : self.pos + 1] != b"e":
+                values.append(self.read(depth + 1))
+            self.pos += 1
+            return values
+        if marker == b"d":
+            self.pos += 1
+            values = {}
+            while self.payload[self.pos : self.pos + 1] != b"e":
+                key = self.read(depth + 1)
+                if not isinstance(key, bytes):
+                    raise ValueError("invalid bencode dict key")
+                values[key] = self.read(depth + 1)
+            self.pos += 1
+            return values
+        if marker.isdigit():
+            colon = self.payload.index(b":", self.pos)
+            length = int(self.payload[self.pos:colon])
+            self.pos = colon + 1
+            end = self.pos + length
+            if end > len(self.payload):
+                raise ValueError("invalid bencode string length")
+            value = self.payload[self.pos:end]
+            self.pos = end
+            return value
+        raise ValueError("invalid bencode marker")
+
+
+def _decode_torrent_text(value: Any) -> str:
+    if isinstance(value, bytes):
+        for encoding in ("utf-8", "gb18030", "shift_jis"):
+            try:
+                return value.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+        return value.decode("utf-8", errors="replace")
+    return str(value or "")
+
+
+def _torrent_files(payload: bytes) -> tuple[list[tuple[str, int]], str]:
+    root = _BencodeReader(payload).read()
+    if not isinstance(root, dict) or not isinstance(root.get(b"info"), dict):
+        raise ValueError("torrent missing info dictionary")
+    info = root[b"info"]
+    root_name = _decode_torrent_text(info.get(b"name.utf-8") or info.get(b"name"))
+    files: list[tuple[str, int]] = []
+    for row in info.get(b"files") or []:
+        if not isinstance(row, dict):
+            continue
+        parts = row.get(b"path.utf-8") or row.get(b"path") or []
+        path = "/".join(_decode_torrent_text(part) for part in parts)
+        if root_name and path:
+            path = f"{root_name}/{path}"
+        files.append((path or root_name, max(0, int(row.get(b"length") or 0))))
+    if not files:
+        files.append((root_name or "unnamed", max(0, int(info.get(b"length") or 0))))
+    return files, root_name
+
+
+async def _validate_public_https_url(value: str) -> str:
+    parsed = urlparse(value.strip())
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+        raise ValueError("种子检查只允许无账号信息的公网 HTTPS URL")
+    host = parsed.hostname.rstrip(".").lower()
+    try:
+        addresses = [ipaddress.ip_address(host)]
+    except ValueError:
+        loop = asyncio.get_running_loop()
+        infos = await loop.run_in_executor(
+            None,
+            lambda: socket.getaddrinfo(host, parsed.port or 443, type=socket.SOCK_STREAM),
+        )
+        addresses = list({ipaddress.ip_address(info[4][0]) for info in infos})
+    if not addresses or any(not address.is_global for address in addresses):
+        raise ValueError("种子 URL 不能指向 localhost、内网或保留地址")
+    return parsed.geturl()
+
+
+async def inspect_torrent_url(url: str, identity: MediaIdentity | None = None) -> TorrentInspection:
+    """Read only torrent metadata (not payload content) with SSRF/size guards."""
+    current = url.strip()
+    body = bytearray()
+    async with httpx.AsyncClient(timeout=settings.release_feed_timeout, follow_redirects=False) as client:
+        for _ in range(4):
+            current = await _validate_public_https_url(current)
+            async with client.stream("GET", current, headers={"User-Agent": "otomo/0.1"}) as response:
+                if response.status_code in {301, 302, 303, 307, 308}:
+                    location = response.headers.get("location") or ""
+                    if not location:
+                        raise ValueError("种子地址重定向缺少 Location")
+                    current = urljoin(current, location)
+                    continue
+                response.raise_for_status()
+                async for chunk in response.aiter_bytes():
+                    body.extend(chunk)
+                    if len(body) > 4 * 1024 * 1024:
+                        raise ValueError("torrent 元数据超过 4 MiB，停止检查")
+                break
+        else:
+            raise ValueError("种子地址重定向次数过多")
+    files, root_name = _torrent_files(bytes(body))
+    names = [name for name, _size in files if name]
+    episode_numbers: set[int] = set()
+    for name in names:
+        for match in re.finditer(r"(?:\bE(?:P)?|\[|\s)(\d{1,3})(?=\b|\]|\s|\.)", name, re.I):
+            number = int(match.group(1))
+            if 0 < number <= 300:
+                episode_numbers.add(number)
+    if identity and names:
+        assessments = [assess_media_scope(identity, name) for name in names[:80]]
+        counts = {status: sum(item.status == status for item in assessments) for status in ("exact", "compatible", "bundle", "conflict", "unknown")}
+        if counts["conflict"] and not counts["exact"] and not counts["compatible"]:
+            status = "conflict"
+            reason = "种子内部文件全部指向其他季度/媒介形态"
+        elif counts["bundle"] or (counts["conflict"] and (counts["exact"] or counts["compatible"])):
+            status = "bundle"
+            reason = "种子内部混有跨季、合集或其他篇章文件"
+        elif counts["exact"]:
+            status = "exact"
+            reason = "种子内部文件名与当前篇章一致"
+        elif counts["compatible"]:
+            status = "compatible"
+            reason = "种子内部文件未发现篇章冲突"
+        else:
+            status = "unknown"
+            reason = "文件名不足以确认具体篇章"
+    else:
+        status, reason = "unknown", "没有作品身份可供核对"
+    warnings = []
+    media_files = [name for name in names if re.search(r"\.(mkv|mp4|avi|m2ts|ts|webm)$", name, re.I)]
+    if not media_files:
+        warnings.append("种子内部未识别到常见视频文件扩展名")
+    if status in {"bundle", "conflict", "unknown"}:
+        warnings.append(reason)
+    return TorrentInspection(
+        verified=True,
+        file_count=len(files),
+        total_size=sum(size for _name, size in files),
+        sample_files=names[:8],
+        episode_numbers=sorted(episode_numbers),
+        scope_status=status,
+        scope_reason=reason or root_name,
+        warnings=warnings,
+    )
+
+
 class PrepareDownloaderPushTool(Tool):
     name = "prepare_downloader_push"
     description = (
@@ -692,18 +868,45 @@ class PrepareDownloaderPushTool(Tool):
             return ToolResult(ok=False, error="qBittorrent 未配置，无法准备推送动作")
         mem = self.ltm.load_user(username)
         title = args.title.strip() or args.subject_name.strip() or "未命名资源"
+        identity: MediaIdentity | None = None
+        if args.subject_id:
+            try:
+                identity = media_identity_from_subject(await self.client.get_subject(args.subject_id), fallback_title=title)
+            except Exception:  # noqa: BLE001
+                identity = build_media_identity(title=args.subject_name.strip() or title, subject_id=args.subject_id)
+        elif args.subject_name.strip():
+            identity = build_media_identity(title=args.subject_name.strip())
+        inspection: TorrentInspection | None = None
+        inspection_warning = ""
+        if args.torrent_url.strip():
+            try:
+                inspection = await inspect_torrent_url(args.torrent_url.strip(), identity)
+            except Exception as exc:  # noqa: BLE001 - user can still confirm an unverified public URL
+                inspection_warning = f"种子内部文件检查失败（{type(exc).__name__}）；将按未核验资源处理"
+        if inspection and inspection.scope_status == "conflict":
+            return ToolResult(
+                ok=False,
+                error=f"种子内部文件与当前篇章冲突：{inspection.scope_reason}；已阻止进入下载器确认。",
+            )
+        paused = args.paused or (bool(args.magnet.strip()) and inspection is None)
+        inspection_suffix = ""
+        if inspection:
+            inspection_suffix = f"；已检查种子内 {inspection.file_count} 个文件（{inspection.scope_reason}）"
+        elif paused and args.magnet.strip():
+            inspection_suffix = "；磁力链接无法预读文件清单，将以暂停状态加入"
         action = PendingWriteAction(
             id=_new_id("dl"),
             operation="push_downloader",
-            summary=f"推送《{title}》到 qBittorrent",
+            summary=f"推送《{title}》到 qBittorrent{inspection_suffix}",
             subject_id=args.subject_id,
             subject_name=args.subject_name.strip() or title,
             payload={
                 "url": url,
                 "category": args.category or settings.qbittorrent_category,
                 "save_path": args.save_path or settings.qbittorrent_save_path,
-                "paused": args.paused,
+                "paused": paused,
                 "title": title,
+                "torrent_inspection": inspection.model_dump(mode="json") if inspection else None,
             },
             status="pending",
             created_at=now_iso(),
@@ -731,7 +934,11 @@ class PrepareDownloaderPushTool(Tool):
             data=DownloaderPushActionResult(
                 username=username,
                 action=action,
-                warning="这是对你自己 qBittorrent WebUI 的真实写操作；前端确认前不会执行。",
+                warning="；".join(filter(None, [
+                    "这是对你自己 qBittorrent WebUI 的真实写操作；前端确认前不会执行。",
+                    inspection_warning,
+                    "种子内部文件只核验名称/大小，不读取媒体内容。" if inspection else "",
+                ])),
                 memory=memory_summary(mem),
             ),
         )

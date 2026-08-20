@@ -12,14 +12,14 @@ import { PixivPanel } from "./panels/visual";
 type EvidenceMap = Record<string, AnyRecord[]>;
 type EvidenceMode = "user" | "dev";
 
-import { AnimeWatchHubPanel, ReviewEvidencePanel, SourceRoutingPanel, TasteAffinityPanel, WhereToWatchPanel, ReleaseFeedsPanel, BangumiIndexPanel, SeasonGuidePanel, BroadcastCalendarPanel, AiringProgressPanel, EpisodeRadarPanel, ExplorerPanel, TodayCockpitPanel } from "./panels/media";
+import { AnimeWatchHubPanel, SeriesProgressPanel, ReviewEvidencePanel, SourceRoutingPanel, TasteAffinityPanel, WhereToWatchPanel, ReleaseFeedsPanel, BangumiIndexPanel, SeasonGuidePanel, BroadcastCalendarPanel, AiringProgressPanel, EpisodeRadarPanel, ExplorerPanel, TodayCockpitPanel } from "./panels/media";
 import { AspectProfilePanel, RecommendPanel, WatchCopilotPanel, WatchOrderPanel } from "./panels/recommend";
 import { MonthlyWatchReportPanel, ProductSectionsPanel, SubjectDossierPanel, AnimeMusicThemesPanel, AnimeThemesPanel, WeeklyDigestPanel } from "./panels/product";
 import { VisualTextPanel, VisualStylePanel, ImageSourcePanel, RouteImageSourcePanel, BiliVideoContentPanel, VideoFramePanel } from "./panels/visual";
 import { TasteReportPanel, CollectionDashboardPanel } from "./panels/report";
 import { SpoilerBadge, MemoryBadge, MemoryPanel, ClaimCheckPanel } from "./panels/memory";
 
-import { Badge, Panel, hasActionableMemory, list, text, type AnyRecord, type MemoryState, type PrepareDownloaderHandler, type PrepareWriteHandler, type ShareSnapshotHandler, type SpoilerState } from "./panels/shared";
+import { Badge, Panel, hasActionableMemory, list, text, type AnyRecord, type MemoryState, type PrepareDownloaderHandler, type PrepareRssFollowHandler, type PrepareWriteHandler, type ShareSnapshotHandler, type SpoilerState } from "./panels/shared";
 export { Badge, Panel, list, text } from "./panels/shared";
 export type { AnyRecord } from "./panels/shared";
 export { SpoilerBadge, MemoryBadge } from "./panels/memory";
@@ -35,6 +35,7 @@ export type PanelHandlers = {
   onRecommendationFeedback?: (payload: AnyRecord) => Promise<boolean>;
   onNextRecommendationBatch?: (setId: string) => Promise<AnyRecord | null>;
   onPrepareDownloaderPush?: PrepareDownloaderHandler;
+  onCreateRssFollow?: PrepareRssFollowHandler;
   onVisualFeedback?: (payload: AnyRecord) => void;
   onVisualCorrectionSearch?: (query: string, subjectType?: string) => Promise<AnyRecord[]>;
 };
@@ -63,6 +64,7 @@ export const PANEL_LABELS: Record<string, string> = {
   watch_cockpit: "追番驾驶舱",
   subject_dossier: "作品档案",
   anime_watch_hub: "动画观看中心",
+  get_series_progress: "系列追番进度",
   franchise_map: "IP 图谱",
   monthly_watch_report: "观看报告",
   get_subject_trend: "口碑走势",
@@ -138,12 +140,13 @@ export function renderPanelByName(name: string, rows: AnyRecord[], h: PanelHandl
     case "get_airing_progress": return render((d, i) => <AiringProgressPanel data={d} key={`${name}-${i}`} />);
     case "watch_cockpit": return render((d, i) => <ProductSectionsPanel data={d} title="追番驾驶舱" shareType="watch_cockpit" onShareSnapshot={h.onShareSnapshot} key={`${name}-${i}`} />);
     case "subject_dossier": return render((d, i) => <SubjectDossierPanel data={d} onShareSnapshot={h.onShareSnapshot} key={`${name}-${i}`} />);
-    case "anime_watch_hub": return render((d, i) => <AnimeWatchHubPanel data={d} onPrepareDownloaderPush={h.onPrepareDownloaderPush} key={`${name}-${i}`} />);
+    case "anime_watch_hub": return render((d, i) => <AnimeWatchHubPanel data={d} onPrepareDownloaderPush={h.onPrepareDownloaderPush} onPrepareWrite={h.onPrepareWrite} onCreateRssFollow={h.onCreateRssFollow} key={`${name}-${i}`} />);
+    case "get_series_progress": return render((d, i) => <SeriesProgressPanel data={d} onPrepareWrite={h.onPrepareWrite} key={`${name}-${i}`} />);
     case "franchise_map": return render((d, i) => <ProductSectionsPanel data={d} title="IP 图谱" key={`${name}-${i}`} />);
     case "monthly_watch_report": return render((d, i) => <MonthlyWatchReportPanel data={d} onShareSnapshot={h.onShareSnapshot} key={`${name}-${i}`} />);
     case "anime_music_themes": return render((d, i) => <AnimeMusicThemesPanel data={d} key={`${name}-${i}`} />);
     case "where_to_watch": return render((d, i) => <WhereToWatchPanel data={d} key={`${name}-${i}`} />);
-    case "get_anime_release_feeds": return render((d, i) => <ReleaseFeedsPanel data={d} onPrepareDownloaderPush={h.onPrepareDownloaderPush} key={`${name}-${i}`} />);
+    case "get_anime_release_feeds": return render((d, i) => <ReleaseFeedsPanel data={d} onPrepareDownloaderPush={h.onPrepareDownloaderPush} onCreateRssFollow={h.onCreateRssFollow} key={`${name}-${i}`} />);
     case "get_bangumi_index": return render((d, i) => <BangumiIndexPanel data={d} onPrepareWrite={h.onPrepareWrite} key={`${name}-${i}`} />);
     case "recommend_subjects": return render((d, i) => <RecommendPanel data={d} onCritique={h.onCritique} onPrepareWrite={h.onPrepareWrite} onFeedback={h.onRecommendationFeedback} onNextBatch={h.onNextRecommendationBatch} key={`${name}-${i}`} />);
     case "season_guide_brief": return render((d, i) => <SeasonGuidePanel data={d} onPrepareWrite={h.onPrepareWrite} onShareSnapshot={h.onShareSnapshot} anchor={anchor} key={`${name}-${anchor || "all"}-${i}`} />);
@@ -191,6 +194,7 @@ export function EvidencePanels({
   onRecommendationFeedback,
   onNextRecommendationBatch,
   onPrepareDownloaderPush,
+  onCreateRssFollow,
   onVisualFeedback,
   onVisualCorrectionSearch,
 }: {
@@ -206,6 +210,7 @@ export function EvidencePanels({
   onRecommendationFeedback?: (payload: AnyRecord) => Promise<boolean>;
   onNextRecommendationBatch?: (setId: string) => Promise<AnyRecord | null>;
   onPrepareDownloaderPush?: PrepareDownloaderHandler;
+  onCreateRssFollow?: PrepareRssFollowHandler;
   onVisualFeedback?: (payload: AnyRecord) => void;
   onVisualCorrectionSearch?: (query: string, subjectType?: string) => Promise<AnyRecord[]>;
   onShareSnapshot?: ShareSnapshotHandler;
@@ -215,7 +220,7 @@ export function EvidencePanels({
   const handlers: PanelHandlers = {
     devMode, onShareSnapshot, onCritique, onConfirmAction, onCancelAction, onUndoAction,
     onPrepareWrite, onRecommendationFeedback, onNextRecommendationBatch,
-    onPrepareDownloaderPush, onVisualFeedback, onVisualCorrectionSearch,
+    onPrepareDownloaderPush, onCreateRssFollow, onVisualFeedback, onVisualCorrectionSearch,
   };
   const exclude = new Set(excludeNames);
   const names = availablePanelNames(evidence, devMode).filter((n) => !exclude.has(n));

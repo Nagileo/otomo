@@ -17,10 +17,18 @@ from ...memory import LongTermMemory
 from ...memory.consolidate import now_iso
 from ...memory.models import InboxItem, MemorySummary, memory_summary
 from ...profile import compute_taste_profile
+from .._concurrency import gather_limited
 from ..bangumi.client import SUBJECT_TYPE, BangumiClient
 from ..calendar.tool import AiringProgressArgs, AiringProgressItem, AiringProgressTool
+from ..series_progress import (
+    SeriesRelationMemo,
+    SeriesProgressTool,
+    collection_completed,
+    collection_map,
+    inspect_series_candidate,
+)
 
-_SERIES_REL = {"续集", "前传", "不同演绎"}             # 同一观看线（排进顺序）
+_SERIES_REL = {"续集", "前传"}                         # 同一观看线（排进顺序）
 _SIDE_REL = {"外传", "相同世界观", "不同世界观", "番外篇"}  # 旁支（可选看，不排进主线）
 _MAX_SERIES = 15  # 系列规模上限（控 API / 性能）
 
@@ -64,7 +72,7 @@ class WatchCopilotItem(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: int
     name: str
-    status: Literal["在看", "想看", "搁置"]
+    status: Literal["在看", "想看", "搁置", "续作可开"]
     action: str
     why: list[str] = Field(default_factory=list)
     score: float = 0.0
@@ -82,6 +90,7 @@ class WatchCopilotResult(BaseModel):
     continue_watching: list[WatchCopilotItem] = Field(default_factory=list)
     start_from_wishlist: list[WatchCopilotItem] = Field(default_factory=list)
     revive_on_hold: list[WatchCopilotItem] = Field(default_factory=list)
+    continue_series: list[WatchCopilotItem] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 
 
@@ -218,8 +227,10 @@ class WatchOrderTool(Tool):
         side_map: dict[int, dict] = {}
         alternate_map: dict[int, dict] = {}
         queue, visited = [sid], {sid}
+        main_edges: set[tuple[int, int]] = set()
         while queue and len(visited) < _MAX_SERIES:
-            rels = await self.client.get_subject_relations(queue.pop(0))
+            current = queue.pop(0)
+            rels = await self.client.get_subject_relations(current)
             for r in rels or []:
                 if r.get("type") != stype or not r.get("id"):
                     continue
@@ -228,6 +239,9 @@ class WatchOrderTool(Tool):
                     visited.add(rid)
                     queue.append(rid)
                     members[rid] = r
+                    main_edges.add((rid, current) if rel == "前传" else (current, rid))
+                elif rel in _SERIES_REL:
+                    main_edges.add((rid, current) if rel == "前传" else (current, rid))
                 elif rel in _SIDE_REL:
                     side_map.setdefault(rid, r)
                 elif rel in {"不同演绎", "重制", "再编集"}:
@@ -261,7 +275,26 @@ class WatchOrderTool(Tool):
             }
 
         rows = [await row_of(mid, m, role="main") for mid, m in members.items()]
-        rows.sort(key=lambda x: x["date"] or "9999")  # 无日期的沉底
+        row_by_id = {int(row["id"]): row for row in rows}
+        indegree = {mid: 0 for mid in row_by_id}
+        outgoing: dict[int, set[int]] = {mid: set() for mid in row_by_id}
+        for source, target in main_edges:
+            if source in indegree and target in indegree and target not in outgoing[source]:
+                outgoing[source].add(target)
+                indegree[target] += 1
+        order_key = lambda mid: (row_by_id[mid]["date"] or "9999", mid)  # noqa: E731
+        ready = sorted((mid for mid, degree in indegree.items() if degree == 0), key=order_key)
+        ordered_ids: list[int] = []
+        while ready:
+            mid = ready.pop(0)
+            ordered_ids.append(mid)
+            for target in sorted(outgoing[mid], key=order_key):
+                indegree[target] -= 1
+                if indegree[target] == 0:
+                    ready.append(target)
+            ready.sort(key=order_key)
+        ordered_ids.extend(sorted(set(row_by_id) - set(ordered_ids), key=order_key))
+        rows = [row_by_id[mid] for mid in ordered_ids]
 
         order = [
             WatchItem(
@@ -317,7 +350,7 @@ class WatchOrderTool(Tool):
         ]
         skip_candidates = [x for x in order + sides + alternates if x.necessity == "skip"]
         notes = [
-            "主线按 Bangumi 关系边和播出日期排序；没有日期的条目沉底。",
+            "主线先按 Bangumi 前传/续集关系做拓扑排序，播出日期只用于同层关系和缺边时的稳定排序。",
             "外传/番外/世界观分支不强制排进主线，适合看完入口后按兴趣补。",
             "必要性是基于 Bangumi relation、标题关键词和集数的启发式判断；总集篇/OVA/OAD/番外会标为可跳过或可选。",
         ]
@@ -358,7 +391,7 @@ class WatchCopilotTool(Tool):
     def _item(
         self,
         raw: dict,
-        status: Literal["在看", "想看", "搁置"],
+        status: Literal["在看", "想看", "搁置", "续作可开"],
         profile_tags: set[str],
     ) -> WatchCopilotItem | None:
         sid = _subject_id(raw)
@@ -393,6 +426,10 @@ class WatchCopilotTool(Tool):
             base += 0.45
             action = f"试着补到第 {(ep_status or 0) + 1} 集再判断" if ep_status else "先补 1 集判断是否盘活"
             why.append("来自搁置列表，属于低压力盘活候选")
+        elif status == "续作可开":
+            base += 1.05
+            action = "必要前作已完成，可以开始这部续作"
+            why.append("系列进度确认所有必要前作已经完成")
         else:
             base += 0.75
             action = "本周开坑 1-2 集试口味"
@@ -439,10 +476,60 @@ class WatchCopilotTool(Tool):
         cont = build(watching, "在看")[: max(args.limit, 4)]
         start = build(wishlist, "想看")[: max(args.limit, 4)]
         revive = build(on_hold, "搁置")[: max(args.limit, 4)]
-        queue = sorted(cont[:3] + start[:3] + revive[:2], key=lambda x: -x.score)[: args.limit]
+        all_rows = watched + watching + wishlist + on_hold
+        user_collections = collection_map(all_rows)
+        completed_seeds = [
+            row for row in all_rows
+            if collection_completed(row, _eps(row))[0]
+        ]
+        completed_seeds.sort(key=lambda row: str(row.get("updated_at") or ""), reverse=True)
+        relation_results = (
+            await gather_limited(
+                [self.client.get_subject_relations(_subject_id(row)) for row in completed_seeds[:24] if _subject_id(row)],
+                host="bangumi",
+                return_exceptions=True,
+            )
+            if hasattr(self.client, "get_subject_relations") else []
+        )
+        sequel_raw: dict[int, dict] = {}
+        for rels in relation_results:
+            if isinstance(rels, BaseException):
+                continue
+            for rel in rels or []:
+                rid = rel.get("id")
+                if rel.get("type") == SUBJECT_TYPE["anime"] and rel.get("relation") == "续集" and rid and int(rid) not in user_collections:
+                    sequel_raw.setdefault(int(rid), rel)
+        sequel_items = list(sequel_raw.items())[:16]
+        relation_memo = SeriesRelationMemo(self.client)
+        audits = await gather_limited(
+            [
+                inspect_series_candidate(
+                    self.client,
+                    sid,
+                    user_collections,
+                    collection_available=True,
+                    subject_name=_subject_name(raw),
+                    max_hops=8,
+                    relation_memo=relation_memo,
+                )
+                for sid, raw in sequel_items
+            ],
+            host="bangumi",
+            return_exceptions=True,
+        )
+        continuation: list[WatchCopilotItem] = []
+        for (_sid, raw), audit in zip(sequel_items, audits, strict=False):
+            if isinstance(audit, BaseException) or not audit.prerequisites_satisfied:
+                continue
+            item = self._item(raw, "续作可开", profile_tags)
+            if item is not None:
+                continuation.append(item)
+        continuation.sort(key=lambda item: -item.score)
+        queue = sorted(cont[:3] + continuation[:2] + start[:3] + revive[:2], key=lambda x: -x.score)[: args.limit]
         notes = [
             "追番副驾只基于 Bangumi 收藏状态、评分、标签和 ep_status；不会断言你为何搁置。",
             "在看优先于想看，搁置盘活默认低权重；短篇会轻微加权，适合本周执行。",
+            "看过一季后会检查直接续作的完整必要前作链；只有全部完成、且续作尚未收藏时才进入“续作可开”。",
         ]
         if not queue:
             notes.append("没有拿到在看/想看/搁置候选，可能收藏不可见或列表为空。")
@@ -455,6 +542,7 @@ class WatchCopilotTool(Tool):
                 continue_watching=cont[:5],
                 start_from_wishlist=start[:5],
                 revive_on_hold=revive[:5],
+                continue_series=continuation[:5],
                 notes=notes,
             ),
             sources=[Citation(title=i.name, url=f"https://bgm.tv/subject/{i.id}", source="bangumi", image=i.image) for i in queue[:5]],
@@ -595,7 +683,9 @@ class ListWeeklyDigestInboxTool(Tool):
 
 
 def build_watchorder_tools(client: BangumiClient, ltm: LongTermMemory | None = None) -> list[Tool]:
-    tools: list[Tool] = [WatchOrderTool(client), WatchCopilotTool(client), WeeklyDigestTool(client)]
+    tools: list[Tool] = [
+        WatchOrderTool(client), SeriesProgressTool(client), WatchCopilotTool(client), WeeklyDigestTool(client)
+    ]
     if ltm is not None:
         tools.append(ListWeeklyDigestInboxTool(client, ltm))
     return tools

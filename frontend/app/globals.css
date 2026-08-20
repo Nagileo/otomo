@@ -1358,9 +1358,42 @@ a.card-title:hover { color: var(--accent); }
 .bili-video-proof { border-top: 1px solid var(--line); padding-top: 6px; }
 .bili-video-proof summary { cursor: pointer; color: var(--dim); font-size: 10.5px; }
 .bili-video-proof p { margin: 5px 0 0; color: var(--dim); font-size: 10.5px; line-height: 1.5; }
+.bili-video-pages { border-top: 1px solid var(--line); padding-top: 6px; }
+.bili-video-pages summary { cursor: pointer; color: var(--text-soft); font-size: 10.5px; }
+.bili-page-links { display: grid; gap: 5px; margin-top: 7px; max-height: 240px; overflow: auto; }
+.bili-page-links a { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 7px; align-items: center; padding: 6px 8px; border: 1px solid var(--line); border-radius: 7px; color: var(--text-soft); text-decoration: none; background: color-mix(in srgb, var(--panel) 86%, transparent); }
+.bili-page-links a:hover { border-color: var(--accent); color: var(--text); }
+.bili-page-links b { color: var(--accent); font-size: 10px; }
+.bili-page-links span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10.5px; }
+.bili-page-links small { color: var(--dim); font-size: 9.5px; }
 .watch-hub-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; margin-top: 10px; }
 .watch-hub-summary > span { padding: 9px 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); color: var(--text-soft); font-size: 12px; line-height: 1.5; }
 .watch-hub-anchor { scroll-margin-top: 84px; }
+.series-progress-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; margin: 8px 0; }
+.series-progress-track { height: 8px; overflow: hidden; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--line); }
+.series-progress-track > span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--accent), var(--green)); }
+.series-progress-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 9px; margin-top: 12px; }
+.series-progress-card { position: relative; display: grid; grid-template-columns: 28px 48px minmax(0, 1fr); gap: 9px; align-items: start; min-width: 0; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); }
+.series-progress-card.current { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
+.series-progress-card.next { background: color-mix(in srgb, var(--accent) 8%, var(--surface-2)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 20%, transparent); }
+.series-progress-card img, .series-cover-placeholder { width: 48px; height: 66px; border-radius: 6px; object-fit: cover; background: var(--surface-raised); }
+.series-cover-placeholder { display: grid; place-items: center; color: var(--dim); font-weight: 800; }
+.series-order { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; color: var(--text-soft); background: var(--surface-raised); border: 1px solid var(--line); font-size: 11px; font-weight: 800; }
+.series-progress-card small { display: block; margin-top: 5px; color: var(--dim); font-size: 10px; line-height: 1.45; }
+.series-actions { margin-top: 12px; }
+.series-optional { margin-top: 12px; }
+.season-series-warning { display: grid; gap: 3px; margin: 8px 0; }
+.season-series-warning strong { color: var(--warning); font-size: 11px; }
+.season-series-warning span, .season-series-warning a { font-size: 10px; }
+.integration-status-row { display: flex; align-items: center; gap: 10px; }
+.integration-status-row p { margin: 0; color: var(--dim); font-size: 11px; line-height: 1.5; }
+.admin-integration-badge { flex: 0 0 auto; padding: 5px 9px; border: 1px solid var(--line); border-radius: 999px; font-size: 10px; font-weight: 800; }
+.admin-integration-badge.good { color: var(--green); border-color: color-mix(in srgb, var(--green) 45%, var(--line)); }
+.admin-integration-badge.dim { color: var(--dim); }
+.admin-cookie-import { display: grid; gap: 6px; margin-top: 12px; }
+.admin-cookie-import span { font-size: 11px; font-weight: 700; }
+.admin-cookie-import textarea { width: 100%; resize: vertical; min-height: 96px; padding: 9px; color: var(--text); background: var(--surface-2); border: 1px solid var(--line); border-radius: 7px; font: 10px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.admin-cookie-import small { color: var(--dim); font-size: 10px; }
 .release-related-items .release-list { margin-top: 10px; }
 .watch-source-boundary { margin-bottom: 12px; }
 @media (max-width: 620px) {

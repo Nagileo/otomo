@@ -82,6 +82,12 @@ def test_bilibili_bangumi_match_rejects_second_season_for_unmarked_first_season(
     assert _bili_title_match("轻音少女 第二季", "けいおん！！", first)[0] == 0
     assert _bili_title_match("轻音少女 第二季", "けいおん！！", second)[0] > 0
 
+    highlighted_first = {
+        "title": '<em class="keyword">轻音少女</em> <em class="keyword">第</em>一季',
+        "org_title": "けいおん!",
+    }
+    assert _bili_title_match("轻音少女 第二季", "けいおん！！", highlighted_first)[0] == 0
+
 
 def test_where_to_watch_uses_bangumi_data(monkeypatch):
     async def fake_data():

@@ -205,6 +205,7 @@ def test_watch_hub_surface_forwards_lazy_module_flags(tmp_path, monkeypatch):
             "include_videos": True,
             "video_limit": 3,
             "stage": "all",
+            "username": None,
         }
 
         staged = client.get(

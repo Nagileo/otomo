@@ -19,6 +19,7 @@ export default function SubjectPage({ params }: { params: { id: string } }) {
   const [watchHubError, setWatchHubError] = useState("");
   const [watchHubLoading, setWatchHubLoading] = useState({ core: true, videos: true, releases: true });
   const [pendingDownload, setPendingDownload] = useState<any>(null);
+  const [pendingWrite, setPendingWrite] = useState<any>(null);
   const [error, setError] = useState("");
   const [share, setShare] = useState("");
 
@@ -31,6 +32,7 @@ export default function SubjectPage({ params }: { params: { id: string } }) {
     setWatchHubError("");
     setWatchHubLoading({ core: true, videos: true, releases: true });
     setPendingDownload(null);
+    setPendingWrite(null);
     productFetch(`/product/subjects/${encodeURIComponent(params.id)}?spoiler_level=none&include_watch=false&include_release=false`)
       .then((payload) => {
         if (cancelled) return;
@@ -48,6 +50,7 @@ export default function SubjectPage({ params }: { params: { id: string } }) {
         online: next?.online?.title ? next.online : current.online,
         bilibili: next?.bilibili || current.bilibili,
         releases: next?.releases?.title ? next.releases : current.releases,
+        series_progress: next?.series_progress || current.series_progress,
         staff_signals: Array.from(new Set([...(current.staff_signals || []), ...(next?.staff_signals || [])])),
         status_summary: Array.from(new Set([...(current.status_summary || []), ...(next?.status_summary || [])])),
         caveats: Array.from(new Set([...(current.caveats || []), ...(next?.caveats || [])])),
@@ -107,6 +110,58 @@ export default function SubjectPage({ params }: { params: { id: string } }) {
     } catch (e) { setWatchHubError(String(e)); }
   }
 
+  async function prepareSeriesWrite(subjectId: number, subjectName: string, collectionType = 3) {
+    try {
+      const result = await productFetch("/actions/prepare-write", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-otomo-csrf": csrf },
+        body: JSON.stringify({
+          operation: "set_collection",
+          subject_id: subjectId,
+          subject_name: subjectName,
+          collection_type: collectionType,
+          reason: collectionType === 2 ? "从系列进度确认完成本季" : "从系列进度开始或恢复下一部主线",
+        }),
+      });
+      setPendingWrite(result.data?.action || null);
+    } catch (e) { setWatchHubError(String(e)); }
+  }
+
+  async function confirmSeriesWrite(ok: boolean) {
+    if (!pendingWrite?.id) return;
+    try {
+      await productFetch(`/actions/${ok ? "confirm" : "cancel"}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-otomo-csrf": csrf },
+        body: JSON.stringify({ action_id: pendingWrite.id, reason: ok ? "" : "用户在系列进度中取消" }),
+      });
+      setPendingWrite(null);
+      if (ok) window.location.reload();
+    } catch (e) { setWatchHubError(String(e)); }
+  }
+
+  async function createRssFollow(payload: Record<string, any>) {
+    const existing = await productFetch("/subscriptions/rules");
+    const duplicate = (existing.rules || []).find((rule: any) => (
+      rule.kind === "rss_release" && rule.filters?.rss_url === payload.rss_url
+    ));
+    if (duplicate) return;
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Shanghai";
+    await productFetch("/subscriptions/rules", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-otomo-csrf": csrf },
+      body: JSON.stringify({
+        kind: "rss_release",
+        title: `${payload.title} · ${payload.subgroup} 新资源`,
+        enabled: true,
+        filters: { ...payload, include_watch_plan: false },
+        schedule: { timezone, hour: 9, minute: 0, interval_minutes: 60 },
+        channels: ["inbox"],
+        template: "normal",
+      }),
+    });
+  }
+
   async function shareSnapshot(request: Record<string, any>) {
     try {
       const payload = await createShareSnapshot(request, csrf, sources);
@@ -132,7 +187,8 @@ export default function SubjectPage({ params }: { params: { id: string } }) {
       {share ? <div className="inline-notice">分享页已生成：<a href={share} target="_blank" rel="noreferrer">打开公开快照</a></div> : null}
       {data ? <SubjectActions subject={subject} /> : null}
       {pendingDownload ? <div className="inline-confirm"><strong>确认推送到你的 qBittorrent？</strong><span>{pendingDownload.summary}</span><div><button className="button-secondary" onClick={() => void confirmDownloader(false)}>取消</button><button className="button-primary" onClick={() => void confirmDownloader(true)}>确认推送</button></div></div> : null}
-      {watchHub ? <AnimeWatchHubPanel data={watchHub} onPrepareDownloaderPush={authenticated ? (payload) => void prepareDownloaderPush(payload) : undefined} /> : null}
+      {pendingWrite ? <div className="inline-confirm"><strong>确认写回 Bangumi？</strong><span>{pendingWrite.summary}</span><div><button className="button-secondary" onClick={() => void confirmSeriesWrite(false)}>取消</button><button className="button-primary" onClick={() => void confirmSeriesWrite(true)}>确认写回</button></div></div> : null}
+      {watchHub ? <AnimeWatchHubPanel data={watchHub} onPrepareDownloaderPush={authenticated ? (payload) => void prepareDownloaderPush(payload) : undefined} onPrepareWrite={authenticated ? (subjectId, subjectName, collectionType) => void prepareSeriesWrite(subjectId, subjectName, collectionType) : undefined} onCreateRssFollow={authenticated ? createRssFollow : undefined} /> : null}
       {data ? <SubjectDossierPanel data={data} productView onShareSnapshot={authenticated ? (request) => void shareSnapshot(request) : undefined} /> : null}
     </main>
   );
