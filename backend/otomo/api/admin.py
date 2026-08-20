@@ -103,6 +103,8 @@ async def admin_overview(request: Request, days: int = 30) -> dict[str, Any]:
         "long_term_memory": settings.ltm_store_path,
         "recommendation_events": settings.recommendation_event_store_path,
         "recommendation_cache": settings.recommendation_artifact_cache_path,
+        "anime_hub_cache": settings.anime_hub_cache_path,
+        "anime_hub_metrics": settings.anime_hub_metrics_path,
         "background_tasks": settings.background_run_store_path,
         "community": settings.community_store_path,
         "sessions": settings.session_store_path,
@@ -139,6 +141,10 @@ async def admin_overview(request: Request, days: int = 30) -> dict[str, Any]:
                 for status in cf_model_registry.statuses()
             ],
             "artifact_cache": request.app.state.recommendation_artifact_cache.stats(),
+        },
+        "anime_hub": {
+            "metrics": request.app.state.anime_hub_metrics.summary(bounded_days),
+            "artifact_cache": request.app.state.anime_hub_cache.stats(),
         },
         "tasks": {
             "chat": chat_runs,

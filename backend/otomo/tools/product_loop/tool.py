@@ -11,13 +11,16 @@ from collections import Counter, defaultdict
 from datetime import date
 import re
 from statistics import mean, median
+import time
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from ...agent.contracts import Citation, Tool, ToolResult
 from ...memory import LongTermMemory
+from ...memory.consolidate import now_iso
 from ...memory.models import MemorySummary, memory_summary
+from ...recommendation_cache import RecommendationArtifactCache
 from ...subscription_read import public_subscription_summary
 from .._concurrency import gather_limited
 from ..bangumi.client import SUBJECT_TYPE, BangumiClient
@@ -26,7 +29,7 @@ from ..calendar.tool import AiringProgressArgs, AiringProgressTool, BroadcastCal
 from ..discovery.tool import EpisodeBuzzRadarTool, EpisodeRadarArgs
 from ..animethemes.tool import AnimeThemesArgs, SearchAnimeThemesTool
 from ..release.tool import AnimeReleaseFeedsArgs, GetAnimeReleaseFeedsTool
-from ..media_identity import assess_media_scope, media_identity_from_subject
+from ..media_identity import MediaIdentity, assess_media_scope, media_identity_from_subject, normalize_media_title
 from ..review.tool import ReviewSubjectArgs, ReviewSubjectTool
 from ..series_progress import SeriesProgressArgs, SeriesProgressResult, SeriesProgressService
 from ..videos.tool import (
@@ -79,11 +82,43 @@ class SubjectDossierResult(BaseModel):
 
 class AnimeLifecycle(BaseModel):
     state: Literal["upcoming", "airing", "recent", "archive", "unknown"] = "unknown"
+    phase: Literal[
+        "upcoming_tv", "airing_tv", "completed_tv", "archive_tv",
+        "upcoming_movie", "theatrical", "awaiting_streaming", "awaiting_bd", "archive_movie",
+        "upcoming_ova", "releasing_ova", "completed_ova", "unknown",
+    ] = "unknown"
+    media_kind: Literal["tv", "web", "movie", "ova", "unknown"] = "unknown"
     label: str = "状态待确认"
     air_date: str = ""
     end_date: str = ""
     strategy: str = "按作品身份查询观看与内容入口"
     confidence: float = 0.5
+    resource_mode: Literal["episodic", "one_shot", "archive", "unknown"] = "unknown"
+
+
+class AnimeResolutionCandidate(BaseModel):
+    subject_id: int
+    title: str
+    title_jp: str = ""
+    date: str = ""
+    platform: str = ""
+
+
+class AnimeResolution(BaseModel):
+    status: Literal["resolved", "ambiguous", "not_found"] = "resolved"
+    matched_by: Literal["subject_id", "exact_title", "normalized_title", "none"] = "subject_id"
+    query: str = ""
+    reason: str = ""
+    candidates: list[AnimeResolutionCandidate] = Field(default_factory=list)
+
+
+class HubModuleState(BaseModel):
+    status: Literal["idle", "loading", "ready", "empty", "degraded", "failed"] = "idle"
+    duration_ms: int = 0
+    error: str = ""
+    cache_hit: bool | None = None
+    retryable: bool = True
+    updated_at: str = ""
 
 
 class AnimeWatchHubArgs(BaseModel):
@@ -92,13 +127,25 @@ class AnimeWatchHubArgs(BaseModel):
     include_release: bool = True
     include_videos: bool = True
     video_limit: int = Field(5, ge=1, le=10)
-    stage: Literal["all", "core", "videos", "releases"] = "all"
+    stage: Literal["all", "identity", "overview", "core", "videos", "releases", "music", "follow"] = "all"
     username: str | None = Field(None, description="可选 Bangumi 用户名；用于合并逐季系列进度")
+    include_viewer_state: bool = True
+    spoiler_level: Literal["none", "mild", "full"] = "none"
 
 
 class AnimeWatchHubResult(BaseModel):
-    subject: dict[str, Any]
-    lifecycle: AnimeLifecycle
+    subject: dict[str, Any] = Field(default_factory=dict)
+    identity: MediaIdentity | None = None
+    resolution: AnimeResolution = Field(default_factory=AnimeResolution)
+    lifecycle: AnimeLifecycle = Field(default_factory=AnimeLifecycle)
+    viewer_state: dict[str, Any] = Field(default_factory=dict)
+    preferences: dict[str, Any] = Field(default_factory=dict)
+    overview: dict[str, Any] = Field(default_factory=dict)
+    reputation: dict[str, Any] = Field(default_factory=dict)
+    relations: list[dict[str, Any]] = Field(default_factory=list)
+    episode_radar: dict[str, Any] = Field(default_factory=dict)
+    trend: dict[str, Any] = Field(default_factory=dict)
+    music: dict[str, Any] = Field(default_factory=dict)
     online: dict[str, Any] = Field(default_factory=dict)
     releases: dict[str, Any] = Field(default_factory=dict)
     bilibili: BiliSubjectVideosResult | None = None
@@ -106,6 +153,8 @@ class AnimeWatchHubResult(BaseModel):
     staff_signals: list[str] = Field(default_factory=list)
     status_summary: list[str] = Field(default_factory=list)
     quick_actions: list[str] = Field(default_factory=list)
+    modules: dict[str, HubModuleState] = Field(default_factory=dict)
+    generated_at: str = ""
     caveats: list[str] = Field(default_factory=list)
 
 
@@ -221,6 +270,65 @@ async def _resolve_subject(
     return exact[0] if exact else rows[0]
 
 
+def _resolution_candidates(rows: list[dict[str, Any]]) -> list[AnimeResolutionCandidate]:
+    return [
+        AnimeResolutionCandidate(
+            subject_id=int(row["id"]),
+            title=_title(row),
+            title_jp=str(row.get("name") or ""),
+            date=str(row.get("date") or ""),
+            platform=str(row.get("platform") or ""),
+        )
+        for row in rows[:6]
+        if row.get("id")
+    ]
+
+
+async def _resolve_anime_subject(
+    client: BangumiClient, args: AnimeWatchHubArgs,
+) -> tuple[dict[str, Any] | None, AnimeResolution]:
+    """Resolve titles conservatively; never silently take a fuzzy first hit."""
+    if args.subject_id:
+        raw = await client.get_subject(args.subject_id)
+        return raw, AnimeResolution(
+            status="resolved", matched_by="subject_id", query=str(args.subject_id),
+            reason="已使用明确的 Bangumi subject_id。",
+        )
+    query = args.title.strip()
+    if not query:
+        return None, AnimeResolution(status="not_found", matched_by="none", reason="需要 subject_id 或动画标题。")
+    payload = await client.search_subjects(query, SUBJECT_TYPE["anime"], limit=8)
+    rows = [row for row in (payload.get("data") or []) if isinstance(row, dict) and row.get("id")]
+    if not rows:
+        return None, AnimeResolution(
+            status="not_found", matched_by="none", query=query, reason="Bangumi 没有返回动画候选。",
+        )
+    exact = [row for row in rows if query in {str(row.get("name_cn") or "").strip(), str(row.get("name") or "").strip()}]
+    if len(exact) == 1:
+        return exact[0], AnimeResolution(
+            status="resolved", matched_by="exact_title", query=query, reason="标题与唯一 Bangumi 条目完全一致。",
+        )
+    normalized_query = normalize_media_title(query)
+    normalized = [
+        row for row in rows
+        if normalized_query and normalized_query in {
+            normalize_media_title(str(row.get("name_cn") or "")),
+            normalize_media_title(str(row.get("name") or "")),
+        }
+    ]
+    if len(normalized) == 1:
+        return normalized[0], AnimeResolution(
+            status="resolved", matched_by="normalized_title", query=query,
+            reason="忽略空格与标点后只对应一个 Bangumi 条目。",
+        )
+    candidates = exact or normalized or rows
+    return None, AnimeResolution(
+        status="ambiguous", matched_by="none", query=query,
+        reason="标题可能对应多个版本、季度或重制条目；请选择具体 Bangumi 条目后再继续。",
+        candidates=_resolution_candidates(candidates),
+    )
+
+
 def _subject_payload(raw: dict[str, Any]) -> dict[str, Any]:
     rating = raw.get("rating") or {}
     return {
@@ -279,21 +387,78 @@ def _duration_minutes(value: str) -> float | None:
 
 def _anime_lifecycle(raw: dict[str, Any]) -> AnimeLifecycle:
     today = date.today()
+    identity = media_identity_from_subject(raw)
+    media_kind = identity.media_kind
     air_text = str(raw.get("date") or "")
     end_text = _infobox_text(raw, ("播放结束", "放送结束", "上映结束", "发售日", "発売日"))
     start = _date_prefix(air_text)
     end = _date_prefix(end_text)
+    if media_kind == "movie":
+        if start and start > today:
+            return AnimeLifecycle(
+                state="upcoming", phase="upcoming_movie", media_kind=media_kind,
+                label="尚未上映", air_date=air_text, end_date=end_text,
+                strategy="优先查正式PV、上映日期和正版预约；不按周更动画搜索分集或RSS。",
+                confidence=0.95, resource_mode="one_shot",
+            )
+        age = (today - start).days if start else None
+        if age is not None and age <= 120:
+            return AnimeLifecycle(
+                state="airing", phase="theatrical", media_kind=media_kind,
+                label="院线/上映阶段", air_date=air_text, end_date=end_text,
+                strategy="优先查上映信息、无剧透评价和官方物料；流媒体与BD未核验前不写成可观看。",
+                confidence=0.82, resource_mode="one_shot",
+            )
+        if age is not None and age <= 365:
+            return AnimeLifecycle(
+                state="recent", phase="awaiting_streaming", media_kind=media_kind,
+                label="等待流媒体上线", air_date=air_text, end_date=end_text,
+                strategy="优先核验正版流媒体和发行公告；不使用TV番组周更RSS。",
+                confidence=0.72, resource_mode="one_shot",
+            )
+        if age is not None and age <= 730:
+            return AnimeLifecycle(
+                state="recent", phase="awaiting_bd", media_kind=media_kind,
+                label="流媒体/BD发行阶段", air_date=air_text, end_date=end_text,
+                strategy="优先查正版存量、BD发行和完整影评；离线入口只显示明确电影版本。",
+                confidence=0.7, resource_mode="one_shot",
+            )
+        return AnimeLifecycle(
+            state="archive" if start else "unknown", phase="archive_movie" if start else "unknown",
+            media_kind=media_kind, label="已发行剧场版" if start else "上映状态待确认",
+            air_date=air_text, end_date=end_text,
+            strategy="优先查正版存量、BD/合集和系列位置，不按分集周更处理。",
+            confidence=0.78 if start else 0.4, resource_mode="archive" if start else "unknown",
+        )
+    if media_kind == "ova":
+        if start and start > today:
+            return AnimeLifecycle(
+                state="upcoming", phase="upcoming_ova", media_kind=media_kind,
+                label="OVA尚未发售", air_date=air_text, end_date=end_text,
+                strategy="优先查发售日、系列位置和官方PV；不把预售期资源写成可观看。",
+                confidence=0.93, resource_mode="one_shot",
+            )
+        recent_ova = bool(start and (today - start).days <= 365 and not end)
+        return AnimeLifecycle(
+            state="airing" if recent_ova else "recent" if start and (today - start).days <= 730 else "archive" if start else "unknown",
+            phase="releasing_ova" if recent_ova else "completed_ova" if start else "unknown",
+            media_kind=media_kind, label="OVA发行中" if recent_ova else "OVA已发行" if start else "OVA状态待确认",
+            air_date=air_text, end_date=end_text,
+            strategy="按单次/分卷发行处理，优先系列位置、正版/BD状态和明确OVA资源，不套用TV周更逻辑。",
+            confidence=0.76 if start else 0.4, resource_mode="one_shot" if recent_ova else "archive" if start else "unknown",
+        )
     if start and start > today:
         return AnimeLifecycle(
-            state="upcoming", label="尚未开播", air_date=air_text, end_date=end_text,
+            state="upcoming", phase="upcoming_tv", media_kind=media_kind,
+            label="尚未开播", air_date=air_text, end_date=end_text,
             strategy="优先查正版预约、官方/Staff PV 与播前内容；不把未发布资源写成可观看",
-            confidence=0.94,
+            confidence=0.94, resource_mode="episodic",
         )
     if end and end < today:
         days = (today - end).days
         state = "recent" if days <= 365 else "archive"
         return AnimeLifecycle(
-            state=state,
+            state=state, phase="completed_tv" if state == "recent" else "archive_tv", media_kind=media_kind,
             label="近期完结" if state == "recent" else "已完结老番",
             air_date=air_text,
             end_date=end_text,
@@ -302,34 +467,38 @@ def _anime_lifecycle(raw: dict[str, Any]) -> AnimeLifecycle:
                 if state == "recent"
                 else "优先查正版存量、全集/BD/VCB、补番回顾与系列顺序"
             ),
-            confidence=0.92,
+            confidence=0.92, resource_mode="episodic" if state == "recent" else "archive",
         )
     if start:
         age = (today - start).days
         if age <= 210:
             return AnimeLifecycle(
-                state="airing", label="正在播出或近期上线", air_date=air_text, end_date=end_text,
+                state="airing", phase="airing_tv", media_kind=media_kind,
+                label="正在播出或近期上线", air_date=air_text, end_date=end_text,
                 strategy="优先查正版更新、最新集 RSS、B站普通投稿正片候选与首集/阶段漫评",
-                confidence=0.72 if not end else 0.88,
+                confidence=0.72 if not end else 0.88, resource_mode="episodic",
             )
         if age <= 730:
             return AnimeLifecycle(
-                state="recent", label="近期作品", air_date=air_text, end_date=end_text,
+                state="recent", phase="completed_tv", media_kind=media_kind,
+                label="近期作品", air_date=air_text, end_date=end_text,
                 strategy="兼顾正版存量、番组 RSS、完结评价和系列路线",
-                confidence=0.68,
+                confidence=0.68, resource_mode="episodic",
             )
         return AnimeLifecycle(
-            state="archive", label="已完结老番", air_date=air_text, end_date=end_text,
+            state="archive", phase="archive_tv", media_kind=media_kind,
+            label="已完结老番", air_date=air_text, end_date=end_text,
             strategy="优先查正版存量、全集/BD/VCB、补番回顾与系列顺序",
-            confidence=0.78,
+            confidence=0.78, resource_mode="archive",
         )
     return AnimeLifecycle(
         state="unknown",
+        phase="unknown", media_kind=media_kind,
         label="播出状态待确认",
         air_date=air_text,
         end_date=end_text,
         strategy="先按作品条目查询；对资源与视频结果保留较强版本警告",
-        confidence=0.4,
+        confidence=0.4, resource_mode="unknown",
     )
 
 
@@ -614,12 +783,25 @@ class AnimeWatchHubTool(Tool):
     args_model = AnimeWatchHubArgs
     result_model = AnimeWatchHubResult
 
-    def __init__(self, client: BangumiClient) -> None:
+    def __init__(
+        self,
+        client: BangumiClient,
+        ltm: LongTermMemory | None = None,
+        friend_usernames: list[str] | None = None,
+        artifact_cache: RecommendationArtifactCache | None = None,
+    ) -> None:
         self.client = client
+        self.ltm = ltm
+        self.friend_usernames = list(dict.fromkeys(friend_usernames or []))[:12]
+        self.artifact_cache = artifact_cache
         self.watch = WhereToWatchTool(client)
         self.release = GetAnimeReleaseFeedsTool(client)
         self.videos = SearchBiliSubjectVideosTool()
         self.series = SeriesProgressService(client)
+        self.reviewer = ReviewSubjectTool(client)
+        self.relations_tool = GetSubjectRelationsTool(client)
+        self.radar = EpisodeBuzzRadarTool(client)
+        self.music_tool = AnimeMusicThemesTool(client)
 
     async def _staff_signals(self, subject_id: int) -> list[str]:
         try:
@@ -655,112 +837,400 @@ class AnimeWatchHubTool(Tool):
                 minutes.append(value)
         return round(float(median(minutes)), 2) if minutes else None
 
+    def _preferences(self, subject_id: int, username: str | None) -> tuple[dict[str, Any], Any | None]:
+        if not self.ltm or not username:
+            return {}, None
+        mem = self.ltm.load_user(username)
+        prefs = mem.anime_hub_preferences.get(str(subject_id))
+        return (prefs.model_dump(mode="json", exclude_none=True) if prefs else {}), mem
+
+    async def _viewer_state(self, subject_id: int, username: str | None) -> dict[str, Any]:
+        if not username:
+            return {"authenticated": False, "collection_state": "unknown", "collection_label": "登录后显示进度"}
+        labels = {1: "想看", 2: "看过", 3: "在看", 4: "搁置", 5: "抛弃"}
+        try:
+            row = await asyncio.wait_for(self.client.get_user_collection(username, subject_id), timeout=3)
+        except Exception as exc:  # 404 means uncollected; other failures remain explicit
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status == 404:
+                return {
+                    "authenticated": True, "username": username, "collection_type": 0,
+                    "collection_state": "uncollected", "collection_label": "未收藏", "ep_status": 0,
+                }
+            return {
+                "authenticated": True, "username": username, "collection_state": "unknown",
+                "collection_label": "进度读取失败", "error": type(exc).__name__,
+            }
+        ctype = int(row.get("type") or 0)
+        return {
+            "authenticated": True,
+            "username": username,
+            "collection_type": ctype,
+            "collection_state": {1: "wishlist", 2: "watched", 3: "watching", 4: "on_hold", 5: "dropped"}.get(ctype, "unknown"),
+            "collection_label": labels.get(ctype, "状态未知"),
+            "ep_status": int(row.get("ep_status") or 0),
+            "rate": int(row.get("rate") or 0),
+            "comment": str(row.get("comment") or ""),
+            "private": bool(row.get("private", False)),
+        }
+
+    async def _friend_feedback(self, subject_id: int) -> list[dict[str, Any]]:
+        if not self.friend_usernames:
+            return []
+
+        async def one(username: str) -> dict[str, Any] | None:
+            try:
+                row = await asyncio.wait_for(self.client.get_user_collection(username, subject_id), timeout=4)
+            except Exception:
+                return None
+            ctype = int(row.get("type") or 0)
+            return {
+                "username": username,
+                "collection_type": ctype,
+                "collection_label": {1: "想看", 2: "看过", 3: "在看", 4: "搁置", 5: "抛弃"}.get(ctype, "更新过"),
+                "rate": int(row.get("rate") or 0),
+                "ep_status": int(row.get("ep_status") or 0),
+            }
+
+        rows = await asyncio.gather(*(one(username) for username in self.friend_usernames[:8]))
+        return sorted((row for row in rows if row), key=lambda row: (-int(row.get("rate") or 0), row["username"]))[:6]
+
+    async def _subject_relations(self, subject_id: int) -> list[dict[str, Any]]:
+        cache_key = f"anime-hub:relations:{subject_id}:v1"
+        if self.artifact_cache:
+            cached = self.artifact_cache.get(cache_key)
+            if isinstance(cached, dict) and isinstance(cached.get("rows"), list):
+                return [row for row in cached["rows"] if isinstance(row, dict)]
+        getter = getattr(self.client, "get_subject_relations", None)
+        if not callable(getter):
+            return []
+        rows = await getter(subject_id)
+        normalized = [row for row in rows or [] if isinstance(row, dict)]
+        if self.artifact_cache:
+            self.artifact_cache.set(cache_key, {"rows": normalized}, kind="anime_hub_relations")
+        return normalized
+
+    def _overview_payload(
+        self,
+        subject: dict[str, Any],
+        review: dict[str, Any],
+        viewer_state: dict[str, Any],
+        friend_feedback: list[dict[str, Any]],
+        mem: Any | None,
+    ) -> dict[str, Any]:
+        tags = [str(tag) for tag in subject.get("tags") or []]
+        searchable = " ".join([str(subject.get("name") or ""), str(subject.get("summary") or ""), *tags]).lower()
+        likes = [item.value for item in (mem.likes if mem else []) if item.value.lower() in searchable]
+        dislikes = [item.value for item in (mem.dislikes if mem else []) if item.value.lower() in searchable]
+        feedback = [item for item in (mem.feedback if mem else []) if item.subject_id == subject.get("id")]
+        if any(item.signal in {"dislike", "less"} for item in feedback):
+            dislikes.append("你曾明确减少或拒绝这部作品")
+        if any(item.signal in {"like", "more"} for item in feedback):
+            likes.append("你曾明确喜欢或希望多来这类作品")
+        aspect_rows = {str(row.get("aspect")): row for row in review.get("aspect_summary") or []}
+        profile = (mem.aspect_profiles.get("anime") if mem else None)
+        if profile:
+            for pref in profile.likes:
+                row = aspect_rows.get(pref.aspect)
+                if row and row.get("dominant_sentiment") == "positive":
+                    likes.append(f"你偏好的{pref.label}口碑较好")
+                elif row and row.get("dominant_sentiment") == "negative":
+                    dislikes.append(f"你重视{pref.label}，但这方面存在负面口碑")
+            for pref in profile.dislikes:
+                row = aspect_rows.get(pref.aspect)
+                if row and row.get("dominant_sentiment") == "negative":
+                    dislikes.append(f"触及你的{pref.label}雷区")
+        friend_rates = [int(row.get("rate") or 0) for row in friend_feedback if row.get("rate")]
+        if friend_rates and sum(friend_rates) / len(friend_rates) >= 8:
+            likes.append(f"{len(friend_rates)} 位关注好友的平均评分较高")
+        likes = list(dict.fromkeys(likes))[:5]
+        dislikes = list(dict.fromkeys(dislikes))[:5]
+        if dislikes and not likes:
+            verdict = "谨慎考虑"
+            fit = "可能触及你的明确雷区，建议先看无剧透评价或试播一集。"
+        elif likes:
+            verdict = "值得优先了解"
+            fit = "与你的显式偏好或好友反馈存在可靠交集。"
+        else:
+            verdict = "需要你自己判断"
+            fit = "目前只有通用口碑，缺少足够个性化证据，不会强行断言适合你。"
+        return {
+            "verdict": verdict,
+            "fit_summary": fit,
+            "why_for_me": likes,
+            "risk_for_me": dislikes,
+            "general_consensus": str(review.get("consensus") or "暂无稳定的无剧透共识。"),
+            "review_confidence": str(review.get("confidence") or "low"),
+            "friend_feedback": friend_feedback,
+            "viewer_state": viewer_state,
+            "spoiler_level": str(review.get("spoiler_level") or "none"),
+        }
+
+
     async def run(self, args: AnimeWatchHubArgs) -> ToolResult[AnimeWatchHubResult]:
-        raw = await _resolve_subject(self.client, args)
-        if not raw:
-            return ToolResult(ok=False, error="需要 subject_id 或可解析的动画标题")
+        identity_started = time.monotonic()
+        identity_cache_hit = False
+        raw: dict[str, Any] | None = None
+        resolution: AnimeResolution
+        identity_cache_key = f"anime-hub:identity:{args.subject_id}:v2" if args.subject_id else ""
+        cached_identity = self.artifact_cache.get(identity_cache_key) if self.artifact_cache and identity_cache_key else None
+        if isinstance(cached_identity, dict) and isinstance(cached_identity.get("subject"), dict):
+            raw = cached_identity["subject"]
+            identity_cache_hit = True
+            resolution = AnimeResolution(
+                status="resolved",
+                matched_by="subject_id",
+                query=str(args.subject_id),
+                reason="命中跨请求作品身份缓存",
+            )
+        else:
+            raw, resolution = await _resolve_anime_subject(self.client, args)
+            if raw is not None and self.artifact_cache and identity_cache_key:
+                self.artifact_cache.set(identity_cache_key, {"subject": raw}, kind="anime_hub_identity")
+        generated_at = now_iso()
+        if raw is None:
+            status = "empty" if resolution.status == "not_found" else "degraded"
+            return ToolResult(
+                ok=True,
+                data=AnimeWatchHubResult(
+                    resolution=resolution,
+                    modules={
+                        "identity": HubModuleState(
+                            status=status,
+                            duration_ms=round((time.monotonic() - identity_started) * 1000),
+                            error=resolution.reason,
+                            updated_at=generated_at,
+                        )
+                    },
+                    generated_at=generated_at,
+                    caveats=[resolution.reason],
+                ),
+            )
         subject = _subject_payload(raw)
         if subject.get("type_name") != "anime":
+            if args.stage == "identity":
+                return ToolResult(
+                    ok=True,
+                    data=AnimeWatchHubResult(
+                        subject=subject,
+                        resolution=resolution,
+                        modules={
+                            "identity": HubModuleState(
+                                status="ready",
+                                duration_ms=round((time.monotonic() - identity_started) * 1000),
+                                cache_hit=identity_cache_hit,
+                                updated_at=generated_at,
+                            )
+                        },
+                        generated_at=generated_at,
+                        caveats=["该条目不是动画，前端应继续使用通用作品档案。"],
+                    ),
+                    sources=[Citation(
+                        title=str(subject.get("name") or subject.get("id") or "作品"),
+                        url=f"https://bgm.tv/subject/{subject.get('id')}",
+                        source="bangumi",
+                        image=subject.get("image"),
+                    )],
+                )
             return ToolResult(ok=False, error="动画观看枢纽只处理 anime 条目")
         sid = int(subject["id"])
+        identity = media_identity_from_subject(raw, fallback_title=str(subject.get("name") or ""))
         lifecycle = _anime_lifecycle(raw)
-        aliases = [str(subject.get("name") or ""), str(subject.get("name_jp") or "")]
-        production_text = _infobox_text(raw, ("动画制作", "動畫製作", "アニメーション制作", "制作"))
-        production_names = [
-            name.strip() for name in re.split(r"\s*[/、,，]\s*", production_text)
-            if name.strip()
-        ][:12]
-        runtime_text = _infobox_text(raw, ("片长", "片長", "单集片长", "單集片長", "每话时长", "每話時長", "时长", "時長"))
-        expected_episode_minutes = _duration_minutes(runtime_text)
-
-        want_online = args.stage in {"all", "core"}
-        want_release = args.include_release and args.stage in {"all", "releases"}
-        want_videos = args.include_videos and args.stage in {"all", "videos"}
-        staff_task = (
-            asyncio.create_task(asyncio.wait_for(self._staff_signals(sid), timeout=8))
-            if args.stage in {"all", "core"} else None
-        )
-        tasks: dict[str, asyncio.Task] = {}
-        if want_online:
-            tasks["watch"] = asyncio.create_task(asyncio.wait_for(self.watch.run(WhereToWatchArgs(
-                subject_id=sid,
-                title=str(subject.get("name") or ""),
-            )), timeout=20))
-            tasks["series"] = asyncio.create_task(asyncio.wait_for(self.series.build(SeriesProgressArgs(
-                subject_id=sid,
-                username=args.username,
-                max_members=18,
-            )), timeout=25))
-        if want_release:
-            tasks["release"] = asyncio.create_task(asyncio.wait_for(self.release.run(AnimeReleaseFeedsArgs(
-                subject_id=sid,
-                title=str(subject.get("name") or ""),
-                prefer="archive" if lifecycle.state == "archive" else "auto",
-                limit=10,
-            )), timeout=35))
-        if expected_episode_minutes is None and want_videos:
-            try:
-                expected_episode_minutes = await asyncio.wait_for(
-                    self._episode_runtime_minutes(sid), timeout=6,
-                )
-            except (TimeoutError, asyncio.CancelledError):
-                expected_episode_minutes = None
-        if want_videos:
-            tasks["videos"] = asyncio.create_task(asyncio.wait_for(self.videos.run(BiliSubjectVideosArgs(
-                query=str(subject.get("name") or ""),
-                aliases=aliases,
-                # 身份只作附加说明，不再阻塞或决定“公开视频可看”的判定。
-                staff_names=production_names,
-                expected_episode_minutes=expected_episode_minutes,
-                subject_platform=str(subject.get("platform") or ""),
-                lifecycle=lifecycle.state,
-                limit=args.video_limit,
-            )), timeout=30))
-            if hasattr(self.client, "get_subject_relations"):
-                tasks["relations"] = asyncio.create_task(asyncio.wait_for(
-                    self.client.get_subject_relations(sid), timeout=8,
-                ))
-        keys = list(tasks)
-        values = await asyncio.gather(*(tasks[key] for key in keys), return_exceptions=True)
-        resolved = dict(zip(keys, values, strict=True))
-        if staff_task is not None:
-            try:
-                person_staff = await staff_task
-            except (TimeoutError, asyncio.CancelledError):
-                person_staff = []
-        else:
-            person_staff = []
-        staff_names = list(dict.fromkeys([*production_names, *person_staff]))[:24]
-
-        watch_res = resolved.get("watch")
-        release_res = resolved.get("release")
-        video_res = resolved.get("videos")
-        relation_res = resolved.get("relations")
-        series_res = resolved.get("series")
-        online: dict[str, Any] = {}
-        releases: dict[str, Any] = {}
-        bilibili: BiliSubjectVideosResult | None = None
-        series_progress = series_res if isinstance(series_res, SeriesProgressResult) else None
-        sources = [Citation(
+        preferences, mem = self._preferences(sid, args.username)
+        viewer_state = await self._viewer_state(sid, args.username) if args.include_viewer_state else {}
+        modules: dict[str, HubModuleState] = {
+            "identity": HubModuleState(
+                status="degraded" if viewer_state.get("error") else "ready",
+                duration_ms=round((time.monotonic() - identity_started) * 1000),
+                error=str(viewer_state.get("error") or ""),
+                cache_hit=identity_cache_hit,
+                updated_at=generated_at,
+            )
+        }
+        base_result = {
+            "subject": subject,
+            "identity": identity,
+            "resolution": resolution,
+            "lifecycle": lifecycle,
+            "viewer_state": viewer_state,
+            "preferences": preferences,
+            "generated_at": generated_at,
+        }
+        base_sources = [Citation(
             title=str(subject.get("name") or sid),
             url=f"https://bgm.tv/subject/{sid}",
             source="bangumi",
             image=subject.get("image"),
         )]
-        if not isinstance(watch_res, BaseException) and getattr(watch_res, "ok", False) and watch_res.data:
-            online = watch_res.data.model_dump(mode="json", exclude_none=True)
-            sources.extend(watch_res.sources)
-        if not isinstance(release_res, BaseException) and getattr(release_res, "ok", False) and release_res.data:
-            releases = release_res.data.model_dump(mode="json", exclude_none=True)
-            sources.extend(release_res.sources)
-        if not isinstance(video_res, BaseException) and getattr(video_res, "ok", False) and video_res.data:
-            bilibili = video_res.data
+        if args.stage == "identity":
+            return ToolResult(
+                ok=True,
+                data=AnimeWatchHubResult(**base_result, modules=modules),
+                sources=base_sources,
+            )
+
+        aliases = identity.aliases or [str(subject.get("name") or ""), str(subject.get("name_jp") or "")]
+        production_text = _infobox_text(raw, ("动画制作", "動畫製作", "アニメーション制作", "制作"))
+        production_names = [
+            name.strip() for name in re.split(r"\s*[/、,，]\s*", production_text) if name.strip()
+        ][:12]
+        runtime_text = _infobox_text(raw, ("片长", "片長", "单集片长", "單集片長", "每话时长", "每話時長", "时长", "時長"))
+        expected_episode_minutes = _duration_minutes(runtime_text)
+        task_modules: dict[str, HubModuleState] = {}
+
+        async def timed(name: str, awaitable: Any, timeout: float) -> Any:
+            started = time.monotonic()
+            try:
+                result = await asyncio.wait_for(awaitable, timeout=timeout)
+                ok = bool(getattr(result, "ok", True))
+                error = str(getattr(result, "error", "") or "")
+                cache_hit = getattr(getattr(result, "data", None), "cache_hit", None)
+                task_modules[name] = HubModuleState(
+                    status="ready" if ok else "failed",
+                    duration_ms=round((time.monotonic() - started) * 1000),
+                    error=error,
+                    cache_hit=cache_hit if isinstance(cache_hit, bool) else None,
+                    updated_at=now_iso(),
+                )
+                return result
+            except Exception as exc:  # noqa: BLE001 - each hub module degrades independently
+                task_modules[name] = HubModuleState(
+                    status="failed",
+                    duration_ms=round((time.monotonic() - started) * 1000),
+                    error=f"{type(exc).__name__}: {str(exc)[:180]}",
+                    updated_at=now_iso(),
+                )
+                return exc
+
+        want_overview = args.stage in {"all", "overview"}
+        want_core = args.stage in {"all", "core", "follow"}
+        want_videos = args.include_videos and args.stage in {"all", "videos", "follow"}
+        want_releases = args.include_release and args.stage in {"all", "releases", "follow"}
+        want_music = args.stage in {"all", "music"}
+        tasks: dict[str, asyncio.Task[Any]] = {}
+
+        if want_core:
+            tasks["online"] = asyncio.create_task(timed(
+                "online",
+                self.watch.run(WhereToWatchArgs(subject_id=sid, title=str(subject.get("name") or ""))),
+                20,
+            ))
+            tasks["series"] = asyncio.create_task(timed(
+                "series",
+                self.series.build(SeriesProgressArgs(subject_id=sid, username=args.username, max_members=24)),
+                25,
+            ))
+            tasks["staff"] = asyncio.create_task(timed("staff", self._staff_signals(sid), 8))
+        if want_overview:
+            tasks["review"] = asyncio.create_task(timed(
+                "review",
+                self.reviewer.run(ReviewSubjectArgs(
+                    subject_id=sid,
+                    title_hint=str(subject.get("name") or ""),
+                    include_comments=True,
+                    spoiler_level=args.spoiler_level,
+                )),
+                30,
+            ))
+            tasks["radar"] = asyncio.create_task(timed(
+                "radar", self.radar.run(EpisodeRadarArgs(subject_id=sid, top=6, with_summary=False)), 15,
+            ))
+            tasks["friends"] = asyncio.create_task(timed("friends", self._friend_feedback(sid), 12))
+            from ..netabare.tool import SubjectTrendArgs, SubjectTrendTool
+
+            tasks["trend"] = asyncio.create_task(timed(
+                "trend", SubjectTrendTool(self.client).run(SubjectTrendArgs(subject_id=sid, days=365)), 18,
+            ))
+        if want_music:
+            tasks["music"] = asyncio.create_task(timed(
+                "music",
+                self.music_tool.run(AnimeMusicThemesArgs(subject_id=sid, title=str(subject.get("name") or ""), limit=12)),
+                25,
+            ))
+        if want_releases:
+            release_prefer: Literal["auto", "mikan", "bt", "bd", "archive"] = (
+                "bd" if identity.media_kind in {"movie", "ova"}
+                else "archive" if lifecycle.state == "archive"
+                else "auto"
+            )
+            preferred_subgroups = preferences.get("preferred_subgroups") or []
+            tasks["releases"] = asyncio.create_task(timed(
+                "releases",
+                self.release.run(AnimeReleaseFeedsArgs(
+                    subject_id=sid,
+                    title=str(subject.get("name") or ""),
+                    prefer=release_prefer,
+                    preferred_subgroups=list(preferred_subgroups),
+                    quality_filter=str(preferences.get("preferred_quality") or ""),
+                    subtitle_filter=str(preferences.get("preferred_subtitle") or ""),
+                    disabled_sources=list(preferences.get("disabled_sources") or []),
+                    limit=12,
+                )),
+                35,
+            ))
+        if want_videos:
+            if expected_episode_minutes is None:
+                try:
+                    expected_episode_minutes = await asyncio.wait_for(self._episode_runtime_minutes(sid), timeout=4)
+                except Exception:  # noqa: BLE001 - metadata enrichment is optional
+                    expected_episode_minutes = None
+            tasks["videos"] = asyncio.create_task(timed(
+                "videos",
+                self.videos.run(BiliSubjectVideosArgs(
+                    query=str(subject.get("name") or ""),
+                    aliases=aliases,
+                    staff_names=production_names,
+                    expected_episode_minutes=expected_episode_minutes,
+                    subject_platform=str(subject.get("platform") or ""),
+                    lifecycle=lifecycle.state,
+                    lifecycle_phase=lifecycle.phase,
+                    media_kind=identity.media_kind,
+                    preferred_uploaders=list(preferences.get("liked_uploaders") or []),
+                    muted_uploaders=list(preferences.get("muted_uploaders") or []),
+                    hidden_video_ids=list(preferences.get("hidden_video_ids") or []),
+                    limit=args.video_limit,
+                )),
+                32,
+            ))
+        if want_overview or want_videos:
+            tasks["relations"] = asyncio.create_task(timed("relations", self._subject_relations(sid), 10))
+
+        values = await asyncio.gather(*tasks.values()) if tasks else []
+        resolved = dict(zip(tasks.keys(), values, strict=True))
+        modules.update(task_modules)
+
+        def tool_payload(name: str) -> tuple[dict[str, Any], list[Citation]]:
+            result = resolved.get(name)
+            if isinstance(result, BaseException) or not getattr(result, "ok", False) or not result.data:
+                return {}, []
+            return result.data.model_dump(mode="json", exclude_none=True), list(result.sources)
+
+        sources = list(base_sources)
+        online, online_sources = tool_payload("online")
+        releases, release_sources = tool_payload("releases")
+        review, review_sources = tool_payload("review")
+        radar, radar_sources = tool_payload("radar")
+        trend, trend_sources = tool_payload("trend")
+        music, music_sources = tool_payload("music")
+        sources.extend([*online_sources, *release_sources, *review_sources, *radar_sources, *trend_sources, *music_sources])
+        series_res = resolved.get("series")
+        series_progress = series_res if isinstance(series_res, SeriesProgressResult) else None
+        video_res = resolved.get("videos")
+        bilibili = (
+            video_res.data
+            if not isinstance(video_res, BaseException) and getattr(video_res, "ok", False) and video_res.data
+            else None
+        )
+        if bilibili and not isinstance(video_res, BaseException):
             sources.extend(video_res.sources)
-        if bilibili and bilibili.version_conflicts and isinstance(relation_res, list):
-            related_anime = [
-                row for row in relation_res
-                if isinstance(row, dict) and row.get("id") and row.get("type") == SUBJECT_TYPE["anime"]
-            ]
+        relation_res = resolved.get("relations")
+        relations = [row for row in relation_res if isinstance(row, dict)] if isinstance(relation_res, list) else []
+        friend_feedback = resolved.get("friends") if isinstance(resolved.get("friends"), list) else []
+        overview = self._overview_payload(subject, review, viewer_state, friend_feedback, mem) if want_overview else {}
+        staff_signals = resolved.get("staff") if isinstance(resolved.get("staff"), list) else []
+
+        if bilibili and bilibili.version_conflicts and relations:
+            related_anime = [row for row in relations if row.get("id") and row.get("type") == SUBJECT_TYPE["anime"]]
             for conflict in bilibili.version_conflicts:
                 matches: list[tuple[int, dict[str, Any]]] = []
                 for row in related_anime:
@@ -769,84 +1239,96 @@ class AnimeWatchHubTool(Tool):
                     if score:
                         matches.append((score, row))
                 matches.sort(key=lambda pair: (-pair[0], int(pair[1].get("id") or 0)))
-                related: dict[str, Any] | None = None
-                if matches and (len(matches) == 1 or matches[0][0] > matches[1][0]):
-                    related = matches[0][1]
-                elif "季" in conflict.reason:
+                related = matches[0][1] if matches and (len(matches) == 1 or matches[0][0] > matches[1][0]) else None
+                if related is None and "季" in conflict.reason:
                     sequel_rows = [
                         row for row in related_anime
                         if any(token in str(row.get("relation") or "").lower() for token in ("续集", "续作", "続編", "sequel"))
                     ]
-                    if len(sequel_rows) == 1:
-                        related = sequel_rows[0]
+                    related = sequel_rows[0] if len(sequel_rows) == 1 else None
                 if related is not None:
                     conflict.suggested_subject_id = int(related["id"])
                     conflict.suggested_subject_title = str(related.get("name_cn") or related.get("name") or related["id"])
                     conflict.suggested_relation = str(related.get("relation") or "关联篇章")
                     if series_progress:
-                        progress_item = next(
-                            (
-                                item for item in (
-                                    series_progress.mainline + series_progress.optional + series_progress.alternates
-                                ) if item.id == conflict.suggested_subject_id
-                            ),
-                            None,
-                        )
-                        if progress_item is not None:
+                        progress_item = next((
+                            item for item in series_progress.mainline + series_progress.optional + series_progress.alternates
+                            if item.id == conflict.suggested_subject_id
+                        ), None)
+                        if progress_item:
                             conflict.suggested_collection_state = progress_item.collection_state
                             conflict.suggested_collection_label = progress_item.collection_label
                             conflict.suggested_completed = progress_item.completed
 
-        official_count = len(online.get("official_sources") or [])
-        fallback_count = len(online.get("search_fallbacks") or [])
-        release_groups = len(releases.get("groups") or [])
-        release_items = len(releases.get("fallback_items") or [])
-        public_uploads = len(bilibili.watch_candidates) if bilibili else 0
-        video_count = len(bilibili.videos) if bilibili else 0
-        summary: list[str] = []
-        if want_online:
-            summary.append(f"正版/官方平台：{official_count} 个已核验候选" if official_count else (
-                f"正版平台暂不可核验；保留 {fallback_count} 个搜索入口" if fallback_count else "暂未找到可靠正版平台入口"
-            ))
-            if series_progress:
-                summary.insert(0, series_progress.summary)
+        def aggregate(name: str, keys: list[str]) -> None:
+            states = [modules[key] for key in keys if key in modules]
+            if not states:
+                return
+            failed = [state for state in states if state.status == "failed"]
+            cache_marks = [state.cache_hit for state in states if state.cache_hit is not None]
+            modules[name] = HubModuleState(
+                status="failed" if len(failed) == len(states) else "degraded" if failed else "ready",
+                duration_ms=max(state.duration_ms for state in states),
+                error="；".join(state.error for state in failed if state.error)[:500],
+                cache_hit=all(cache_marks) if cache_marks else None,
+                updated_at=max((state.updated_at for state in states), default=generated_at),
+            )
+
+        aggregate("core", ["online", "series"])
+        aggregate("overview", ["review", "radar", "trend", "friends", "relations"])
+        status_summary: list[str] = []
+        if series_progress:
+            status_summary.append(series_progress.summary)
+        if want_core:
+            official_count = len(online.get("official_sources") or [])
+            fallback_count = len(online.get("search_fallbacks") or [])
+            status_summary.append(
+                f"正版/官方平台：{official_count} 个候选"
+                if official_count else f"正版平台暂不可核验；保留 {fallback_count} 个搜索入口"
+                if fallback_count else "暂未找到可靠正版平台入口"
+            )
         if want_videos:
-            summary.extend([
-                f"B站普通投稿可看正片候选：{public_uploads} 个（非正版入口）" if public_uploads else "未发现通过时长、分P与作品一致性核验的B站普通投稿正片",
-                f"B站延伸内容：{video_count} 个已分类具体视频" if bilibili else "本轮未返回B站延伸内容",
-            ])
-        if want_release:
-            summary.append(f"离线入口：{release_groups} 个 RSS 组 / {release_items} 条 BT/BD 兜底" if releases else "本轮未返回离线入口")
+            public_uploads = len(bilibili.watch_candidates) if bilibili else 0
+            status_summary.append(
+                f"B站普通投稿可看正片候选：{public_uploads} 个（非正版入口）"
+                if public_uploads else "未发现通过身份、时长与内容核验的B站普通投稿正片"
+            )
+        if want_releases:
+            status_summary.append(
+                f"离线入口：{len(releases.get('groups') or [])} 个 RSS/收藏组 · {len(releases.get('fallback_items') or [])} 条兜底"
+                if releases else "本轮未返回离线入口"
+            )
         caveats = [
-            "B站番剧库页是平台正版入口；普通投稿即使包含完整动画内容，也只作为公开可看候选，版权与上传授权未核验。",
-            "RSS、BT 与 BD 结果只聚合公开标题和外链；Otomo 不代理、不托管、不自动下载内容。",
-            "推送 qBittorrent 必须由用户从具体发布项发起，并在确认界面再次确认。",
+            "B站番剧库页是平台正版入口；普通投稿即使包含完整动画，也只作为公开可看候选，版权与上传授权未核验。",
+            "RSS、BT 与 BD 只聚合公开元数据和外链；Otomo 不代理、不托管、不自动下载。",
+            "Bangumi 与下载器写操作都需要用户明确发起；Bangumi写回仍会进入二次确认。",
         ]
-        if isinstance(watch_res, TimeoutError):
-            caveats.append("正版入口冷查询超过 20 秒，本轮已停止等待；缓存或稍后刷新可继续补齐。")
-        if isinstance(release_res, TimeoutError):
-            caveats.append("离线/RSS 冷查询超过 35 秒，本轮已停止等待；不会让慢源阻塞整个作品页。")
-        if isinstance(video_res, TimeoutError):
-            caveats.append("B站具体视频核验超过 30 秒，本轮已停止等待；搜索导航仍可使用。")
-        if isinstance(series_res, TimeoutError):
-            caveats.append("系列进度冷查询超过 25 秒，本轮只展示当前条目的观看入口；不会猜测你是否看过前作。")
+        for name, state in modules.items():
+            if state.status == "failed" and name not in {"identity", "core", "overview"}:
+                caveats.append(f"{name} 模块加载失败，可单独重试：{state.error}")
         if bilibili:
             caveats.extend(bilibili.warnings[:3])
         return ToolResult(
             ok=True,
             data=AnimeWatchHubResult(
-                subject=subject,
-                lifecycle=lifecycle,
+                **base_result,
+                overview=overview,
+                reputation=review,
+                relations=relations,
+                episode_radar=radar,
+                trend=trend,
+                music=music,
                 online=online,
                 releases=releases,
                 bilibili=bilibili,
                 series_progress=series_progress,
-                staff_signals=staff_names[:8],
-                status_summary=summary,
-                quick_actions=["继续下一部主线", "打开正版入口", "选择 RSS/字幕组", "查看具体视频", "准备下载器推送"],
+                staff_signals=staff_signals[:8],
+                status_summary=status_summary,
+                quick_actions=["更新分集进度", "加入本地计划", "打开正版入口", "选择字幕组", "关注作品更新"],
+                modules=modules,
                 caveats=list(dict.fromkeys(caveats)),
             ),
-            sources=sources[:14],
+            sources=list({source.url: source for source in sources if source.url}.values())[:20],
         )
 
 

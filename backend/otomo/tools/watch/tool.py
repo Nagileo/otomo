@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Literal
 from urllib.parse import quote
 
@@ -28,6 +28,10 @@ _EM_TAG_RE = re.compile(r"</?em[^>]*>")
 _TITLE_NOISE_RE = re.compile(r"[\s!！?？。．.,，、·:：;；~～\-—_～『』「」《》()（）\[\]【】'\"…]+")
 
 _buvid_cache: dict[str, str] = {}
+
+
+def _checked_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _norm_bili_title(s: str) -> str:
@@ -142,6 +146,10 @@ async def _bili_verified_sources(title: str, title_jp: str) -> tuple[list[WatchS
                 official=True,
                 confidence=conf,
                 note=f"{why}{'；' + badges if badges else ''}{score_txt}",
+                availability_status="verified",
+                availability_label="番剧库实时核验",
+                last_verified=_checked_now(),
+                availability_note="已通过 B站番剧库实时检索与当前 Bangumi 标题/季数校验。",
             )
         )
     sources.sort(key=lambda x: -x.confidence)
@@ -158,6 +166,12 @@ class WatchSource(BaseModel):
     official: bool = True
     confidence: float = 1.0
     note: str = ""
+    availability_status: Literal[
+        "verified", "catalog_match", "possible", "search_only", "not_found", "unavailable"
+    ] = "possible"
+    availability_label: str = "可能可用"
+    last_verified: str = ""
+    availability_note: str = ""
 
 
 class WhereToWatchArgs(BaseModel):
@@ -179,6 +193,12 @@ class WhereToWatchResult(BaseModel):
     offline_hint: bool = True
     mapping_notes: list[str] = Field(default_factory=list)
     caveats: list[str] = Field(default_factory=list)
+    availability_status: Literal[
+        "verified", "catalog_match", "possible", "search_only", "not_found", "unavailable"
+    ] = "possible"
+    availability_label: str = "可用性待确认"
+    last_verified: str = ""
+    availability_note: str = ""
 
 
 def _quarter_month(value: str | None) -> int | None:
@@ -303,6 +323,9 @@ class WhereToWatchTool(Tool):
                 official=True,
                 confidence=confidence,
                 note=f"yuc 匹配：{matched_by}；标题 {yuc.title_cn}",
+                availability_status="catalog_match",
+                availability_label="配信目录命中",
+                availability_note="来自 yuc 季番配信目录；不等同于此刻探测播放页可用性。",
             )
             for stream in yuc.stream_urls
         ]
@@ -359,6 +382,9 @@ class WhereToWatchTool(Tool):
                             official=site.official,
                             confidence=1.0 if matched_by == "bangumi_id" else 0.72,
                             note="bangumi-data onair 官方入口",
+                            availability_status="catalog_match",
+                            availability_label="官方目录命中",
+                            availability_note="来自 bangumi-data onair 目录；平台地区版权和下架状态可能变化。",
                         )
                     )
         except Exception as e:  # noqa: BLE001
@@ -399,9 +425,41 @@ class WhereToWatchTool(Tool):
                     official=False,
                     confidence=0.35,
                     note="B站检索接口暂不可用，此为站内搜索入口；请自行确认是否为正版番剧页。",
+                    availability_status="search_only",
+                    availability_label="仅搜索入口",
+                    availability_note="实时番剧库检索不可用，不能把这个入口视为正版命中。",
                 )
             )
+        status_order = {"verified": 0, "catalog_match": 1, "possible": 2}
+        official_sources.sort(key=lambda source: (
+            status_order.get(source.availability_status, 9),
+            0 if any(region.upper() in {preferred.upper() for preferred in args.region_preference} for region in source.regions) else 1,
+            -source.confidence,
+            source.label,
+        ))
         await emit_tool_progress(tool=self.name, summary=f"观看入口完成：{len(official_sources)} 个官方候选", current=4, total=4)
+        verified_sources = [source for source in official_sources if source.availability_status == "verified"]
+        catalog_sources = [source for source in official_sources if source.availability_status == "catalog_match"]
+        if verified_sources:
+            availability_status = "verified"
+            availability_label = "已实时核验正版入口"
+            availability_note = "至少一个入口通过平台番剧库实时标题与季数校验。"
+        elif catalog_sources:
+            availability_status = "catalog_match"
+            availability_label = "正版目录有记录"
+            availability_note = "目录能够对齐该作品；未对播放页做 HEAD 探测，以避免平台风控和误判。"
+        elif official_sources:
+            availability_status = "possible"
+            availability_label = "存在官方候选"
+            availability_note = "入口性质可靠，但当前作品映射或实时可用性仍需打开确认。"
+        elif search_fallbacks:
+            availability_status = "unavailable"
+            availability_label = "实时核验暂不可用"
+            availability_note = "只保留明确标注的搜索导航，不会把它写成正版入口。"
+        else:
+            availability_status = "not_found"
+            availability_label = "未找到正版入口"
+            availability_note = "当前目录和实时番剧库均未返回可靠入口；可能未引进、地区受限或已经下架。"
         result = WhereToWatchResult(
             subject_id=subject.id,
             title=title,
@@ -418,6 +476,10 @@ class WhereToWatchTool(Tool):
                 "Otomo 只提供正版入口，不代理播放、不抓取视频内容。",
                 "找不到正版入口时，可询问离线 RSS/BD 资源聚合；那会作为 link aggregation 单独处理。",
             ],
+            availability_status=availability_status,
+            availability_label=availability_label,
+            last_verified=_checked_now(),
+            availability_note=availability_note,
         )
         sources = [Citation(title=title, url=f"https://bgm.tv/subject/{subject.id}", source="bangumi", image=subject.image)]
         sources.extend(Citation(title=s.label, url=s.url, source=s.source) for s in official_sources[:4])

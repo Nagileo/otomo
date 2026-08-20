@@ -15,6 +15,7 @@ const KINDS = [
   ["daily_airing", "每日追番"],
   ["monthly_report", "月报"],
   ["rss_release", "RSS 新资源"],
+  ["anime_follow", "动画作品长期关注"],
   ["birthday", "生日提醒"],
   ["rating_alert", "口碑哨兵（在看/想看的番评分异动）"],
   ["friends_activity", "好友动态（他们在看什么、打了几分）"],
@@ -383,7 +384,7 @@ export default function SubscriptionSettingsPage() {
               <label className="setting-field">
                 <span>类型</span>
                 <select value={draft.kind} onChange={(e) => setDraft((p) => ({ ...p, kind: e.target.value }))}>
-                  {KINDS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                  {KINDS.filter(([value]) => value !== "anime_follow").map(([value, label]) => <option key={value} value={value}>{label}</option>)}
                 </select>
               </label>
               <label className="setting-field">

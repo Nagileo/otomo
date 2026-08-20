@@ -30,7 +30,12 @@ from .tools._concurrency import gather_limited
 from .tools.bangumi.client import BangumiClient
 from .today import TodayCockpitService, TodayPreferenceStore
 from .tools.discovery.tool import BirthdayArgs, EpisodeBuzzRadarTool, EpisodeRadarArgs, GetCharacterBirthdaysTool
-from .tools.product_loop.tool import MonthlyWatchReportArgs, MonthlyWatchReportTool
+from .tools.product_loop.tool import (
+    AnimeWatchHubArgs,
+    AnimeWatchHubTool,
+    MonthlyWatchReportArgs,
+    MonthlyWatchReportTool,
+)
 from .tools.release.tool import fetch_release_items_from_url
 from .tools.videos.tool import BiliGuideSearchArgs, SearchBiliGuideVideosTool
 from .tools.watchorder.tool import WeeklyDigestArgs, WeeklyDigestTool, _digest_inbox_item
@@ -40,6 +45,7 @@ SubscriptionKind = Literal[
     "daily_airing",
     "monthly_report",
     "rss_release",
+    "anime_follow",
     "birthday",
     "bili_up_video",
     "rating_alert",
@@ -414,6 +420,10 @@ class SubscriptionStore:
                 continue
             if key == "channels":
                 value = _normalize_channels(value)
+            elif key == "schedule":
+                value = SubscriptionSchedule.model_validate(value)
+            elif key == "quiet_hours":
+                value = QuietHours.model_validate(value)
             elif isinstance(value, str):
                 value = value.strip()
             setattr(rule, key, value)
@@ -549,6 +559,25 @@ class SubscriptionService:
                 if not test:
                     self.store.touch_run(rule, hit_key)
                 return self._record(rule, hit_key, "skipped", title=rule.title, payload={"reason": "empty payload", **payload})
+            if not test and rule.kind in {"rss_release", "bili_up_video", "anime_follow"}:
+                fingerprint = _content_fingerprint(payload)
+                previous = next((
+                    record for record in self.store.list_deliveries(rule.owner_key, rule.id, limit=20)
+                    if record.status == "sent"
+                ), None)
+                if previous and previous.payload.get("_content_fingerprint") == fingerprint:
+                    self.store.touch_run(rule, hit_key)
+                    return self._record(
+                        rule,
+                        hit_key,
+                        "skipped",
+                        title=rule.title,
+                        payload={
+                            "reason": "content unchanged",
+                            "_content_fingerprint": fingerprint,
+                        },
+                    )
+                payload["_content_fingerprint"] = fingerprint
             default_title = default_subscription_title(rule.kind)
             configured_title = rule.title or default_title
             suggested_title = str(payload.get("notification_title") or "").strip()
@@ -675,6 +704,8 @@ class SubscriptionService:
                 return await self._daily_airing_payload(rule, client, mutate=not test)
             if rule.kind == "rss_release":
                 return await self._rss_payload(rule)
+            if rule.kind == "anime_follow":
+                return await self._anime_follow_payload(rule, client)
             if rule.kind == "bili_up_video":
                 return await self._bili_payload(rule)
             if rule.kind == "rating_alert":
@@ -985,6 +1016,131 @@ class SubscriptionService:
             "notes": ["讨论数是话题度，不等于质量；已按你的当前进度过滤后续集。"],
         }
 
+    async def _anime_follow_payload(self, rule: SubscriptionRule, client: BangumiClient) -> dict[str, Any]:
+        subject_id = int(rule.filters.get("subject_id") or 0)
+        if subject_id <= 0:
+            return {"sections": [], "caveats": ["作品关注缺少 Bangumi subject_id"]}
+        events = {
+            str(value) for value in rule.filters.get("events") or [
+                "official", "release", "sequel", "video", "progress",
+            ]
+        }
+        result = await AnimeWatchHubTool(client, self.ltm).run(AnimeWatchHubArgs(
+            subject_id=subject_id,
+            stage="follow",
+            username=rule.username or None,
+            include_release="release" in events,
+            include_videos="video" in events,
+            video_limit=min(max(int(rule.filters.get("video_limit") or 3), 1), 5),
+        ))
+        if not result.ok or result.data is None:
+            return {"sections": [], "caveats": [result.error or "作品中心暂不可用"]}
+        hub = result.data
+        subject = hub.subject
+        title = str(subject.get("name") or rule.filters.get("title") or f"subject {subject_id}")
+        sections: list[dict[str, Any]] = []
+        online = hub.online or {}
+        if "official" in events:
+            official = list(online.get("official_sources") or [])
+            sections.append({
+                "title": "正版平台状态",
+                "items": [{
+                    "subject_id": subject_id,
+                    "name": title,
+                    "availability_status": online.get("availability_status") or "not_found",
+                    "availability_label": online.get("availability_label") or "未找到正版入口",
+                    "availability_note": online.get("availability_note") or "",
+                    "sources": [{
+                        "label": source.get("label"),
+                        "url": source.get("url"),
+                        "site": source.get("site"),
+                        "status": source.get("availability_status"),
+                    } for source in official[:4]],
+                    "url": f"/subject/{subject_id}#watch-online",
+                }],
+                "notes": ["目录命中与实时核验分开显示；搜索页不会被写成正版。"],
+            })
+        releases = hub.releases or {}
+        if "release" in events:
+            release_items: list[dict[str, Any]] = []
+            for group in list(releases.get("groups") or [])[:4]:
+                for item in list(group.get("latest_items") or [])[:2]:
+                    release_items.append({
+                        "title": item.get("title"),
+                        "url": item.get("page_url") or item.get("torrent_url") or "",
+                        "pub_date": item.get("pub_date"),
+                        "subgroup": item.get("subgroup") or group.get("subgroup"),
+                        "resolution": item.get("resolution"),
+                        "subtitle": item.get("subtitle"),
+                        "episode_label": item.get("episode_label"),
+                        "release_kind": item.get("release_kind"),
+                        "source": item.get("source"),
+                    })
+            if not release_items:
+                release_items = [{
+                    "title": item.get("title"),
+                    "url": item.get("page_url") or item.get("torrent_url") or "",
+                    "pub_date": item.get("pub_date"),
+                    "subgroup": item.get("subgroup"),
+                    "resolution": item.get("resolution"),
+                    "subtitle": item.get("subtitle"),
+                    "episode_label": item.get("episode_label"),
+                    "release_kind": item.get("release_kind"),
+                    "source": item.get("source"),
+                } for item in list(releases.get("fallback_items") or [])[:4]]
+            if release_items:
+                sections.append({
+                    "title": "字幕组 / RSS 新发布",
+                    "items": release_items[:6],
+                    "notes": ["仅聚合公开元数据；下载仍需在作品中心单独确认。"],
+                })
+        if "video" in events and hub.bilibili is not None:
+            video_items = [
+                video.model_dump(mode="json", exclude_none=True)
+                for video in hub.bilibili.videos[:3]
+            ]
+            if video_items:
+                sections.append({
+                    "title": "B站新内容",
+                    "items": video_items,
+                    "notes": ["普通投稿与正版番剧页保持分离。"],
+                })
+        if "sequel" in events and hub.series_progress is not None:
+            progress = hub.series_progress
+            next_item = progress.next_unwatched
+            series_items = [next_item.model_dump(mode="json", exclude_none=True)] if next_item else []
+            if series_items:
+                sections.append({
+                    "title": "系列下一部",
+                    "items": series_items,
+                    "notes": [progress.summary],
+                })
+        if "progress" in events and hub.viewer_state.get("authenticated"):
+            sections.append({
+                "title": "你的观看进度",
+                "items": [{
+                    "subject_id": subject_id,
+                    "name": title,
+                    "collection_state": hub.viewer_state.get("collection_state"),
+                    "collection_label": hub.viewer_state.get("collection_label"),
+                    "ep_status": hub.viewer_state.get("ep_status", 0),
+                    "url": f"/subject/{subject_id}",
+                }],
+            })
+        module_errors = [
+            f"{name}: {state.error}"
+            for name, state in hub.modules.items()
+            if state.status == "failed" and state.error
+        ]
+        return {
+            "notification_title": f"《{title}》作品关注有更新",
+            "subject_id": subject_id,
+            "subject_title": title,
+            "hub_url": f"/subject/{subject_id}",
+            "sections": sections,
+            "caveats": module_errors[:4],
+        }
+
     async def _rss_payload(self, rule: SubscriptionRule) -> dict[str, Any]:
         urls = []
         if rule.filters.get("rss_url"):
@@ -1082,6 +1238,7 @@ def default_subscription_title(kind: str) -> str:
         "daily_airing": "每日追番提醒",
         "monthly_report": "每月 ACGN 月报",
         "rss_release": "RSS 新资源提醒",
+        "anime_follow": "动画作品长期关注",
         "birthday": "今日角色生日",
         "bili_up_video": "B站导视/漫评新视频",
         "rating_alert": "口碑哨兵：你的番评分异动",
@@ -1193,6 +1350,35 @@ def _payload_has_content(payload: dict[str, Any]) -> bool:
         if section.get("summary") or section.get("text"):
             return True
     return False
+
+
+def _content_fingerprint(payload: dict[str, Any]) -> str:
+    volatile = {
+        "play", "danmaku", "video_review", "match_confidence", "content_match_confidence",
+        "match_reason", "content_match_reason", "last_verified", "updated_at", "generated_at",
+        "cache_hit", "duration_ms",
+    }
+
+    def stable_value(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: stable_value(item)
+                for key, item in sorted(value.items())
+                if key not in volatile and not key.startswith("_otomo_")
+            }
+        if isinstance(value, list):
+            cleaned = [stable_value(item) for item in value]
+            if all(isinstance(item, dict) for item in cleaned):
+                return sorted(cleaned, key=_dump)
+            return cleaned
+        return value
+
+    stable = {
+        "notification_title": payload.get("notification_title") or "",
+        "subject_id": payload.get("subject_id"),
+        "sections": stable_value(payload.get("sections") or []),
+    }
+    return hashlib.sha256(_dump(stable).encode("utf-8")).hexdigest()
 
 
 def _inbox_kind(kind: str) -> Literal["weekly_digest", "daily_airing", "system"]:

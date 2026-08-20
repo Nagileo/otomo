@@ -132,6 +132,7 @@ export default function AdminPage() {
   }
 
   const evaluation = data?.recommendations?.evaluation?.current || {};
+  const hubMetrics = data?.anime_hub?.metrics || {};
   const moderation = data?.community?.moderation || {};
   const allTasks = useMemo(() => [
     ...(data?.tasks?.chat || []).map((row: AnyRow) => ({ ...row, kind: "对话" })),
@@ -166,6 +167,17 @@ export default function AdminPage() {
         </div>
         <label className="admin-cookie-import"><span>粘贴浏览器插件导出的 Netscape cookies.txt</span><textarea value={biliCookies} onChange={(event) => setBiliCookies(event.target.value)} placeholder="# Netscape HTTP Cookie File…" rows={5} spellCheck={false} /><small>建议使用专门账号；过期后重新导入即可。不要把 cookies.txt 提交进 Git。</small></label>
         <div className="panel-actions"><button className="button-primary" disabled={biliBusy || !biliCookies.trim()} onClick={() => void connectBilibili()}>{biliBusy ? <LoaderCircle className="spin" size={15} /> : <ShieldCheck size={15} />}导入并验证</button>{data.integrations?.bilibili?.configured ? <button className="button-secondary" disabled={biliBusy} onClick={() => void disconnectBilibili()}><Trash2 size={15} />清除登录态</button> : null}</div>
+      </section>
+
+      <section className="admin-section">
+        <header><div><span className="section-kicker">动画作品中心</span><h2>模块速度与可靠性</h2></div><span>{hubMetrics.runs || 0} 次模块请求 · 持久缓存 {data.anime_hub?.artifact_cache?.entries || 0} 条</span></header>
+        <div className="admin-metric-grid">
+          <div><strong>{duration(hubMetrics.p50_ms)}</strong><span>整体 P50</span></div>
+          <div><strong>{duration(hubMetrics.p95_ms)}</strong><span>整体 P95</span></div>
+          <div><strong>{data.anime_hub?.artifact_cache?.hits || 0}</strong><span>跨请求缓存命中</span></div>
+          <div><strong>{Object.keys(hubMetrics.modules || {}).length}</strong><span>有观测的模块</span></div>
+        </div>
+        <div className="admin-table"><div className="admin-table-head"><span>模块</span><span>P50</span><span>P95</span><span>失败 / 缓存</span></div>{Object.entries(hubMetrics.modules || {}).map(([name, module]: [string, any]) => <div key={name}><strong>{name}</strong><span>{duration(module.p50_ms)}</span><span>{duration(module.p95_ms)}</span><span>{pct(module.failure_rate)} / {module.cache_hit_rate == null ? "—" : pct(module.cache_hit_rate)}</span></div>)}</div>
       </section>
 
       <section className="admin-section">

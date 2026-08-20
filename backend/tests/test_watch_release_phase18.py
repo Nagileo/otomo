@@ -111,6 +111,9 @@ def test_where_to_watch_uses_bangumi_data(monkeypatch):
     assert res.data.official_sources
     assert res.data.official_sources[0].label == "哔哩哔哩"
     assert "md28223005" in res.data.official_sources[0].url
+    assert res.data.official_sources[0].availability_status == "catalog_match"
+    assert res.data.availability_status in {"verified", "catalog_match"}
+    assert res.data.last_verified
 
 
 def test_parse_release_rss_extracts_torrent_metadata():
@@ -130,6 +133,15 @@ def test_parse_release_rss_extracts_torrent_metadata():
     assert rows[0].torrent_url.endswith("1.torrent")
     assert rows[0].quality == "hd"
     assert rows[0].size_bytes == 1024
+    assert rows[0].resolution == "1080p"
+    assert rows[0].episode_label == "第 1 集"
+    assert rows[0].release_kind == "episode"
+
+    codec_only = _parse_rss("""
+    <rss><channel><item><title>[VCB-Studio] 测试番 [1080p][x264][10bit]</title>
+    <link>https://example.test/release</link></item></channel></rss>
+    """, "vcb")
+    assert codec_only[0].episode_label == ""
 
 
 def test_release_tool_groups_mikan_items(monkeypatch):
@@ -205,6 +217,8 @@ def test_release_tool_moves_cross_installment_items_out_of_default_groups(monkey
                 "[字幕组] 轻音少女 第一季 01",
                 "轻音少女 S1-S2 + MOVIE + LIVE",
                 "轻音少女 剧场版 BDRip",
+                "轻音少女 第一季 音乐专辑 [FLAC]",
+                "轻音少女 第一季 漫画合集 [EPUB]",
             ), 1)
         ]
 
@@ -222,8 +236,10 @@ def test_release_tool_moves_cross_installment_items_out_of_default_groups(monkey
     assert result.ok and result.data is not None
     default_titles = [item.title for group in result.data.groups for item in group.latest_items]
     assert default_titles == ["[字幕组] 轻音少女 第一季 01"]
-    assert result.data.filtered_count == 2
+    assert result.data.filtered_count == 4
     assert {item.scope_status for item in result.data.related_items} == {"bundle", "conflict"}
+    assert any("音乐" in item.scope_reason for item in result.data.related_items)
+    assert any("漫画" in item.scope_reason for item in result.data.related_items)
 
 
 def test_daily_airing_service_writes_once_and_updates_rss(monkeypatch, tmp_path):

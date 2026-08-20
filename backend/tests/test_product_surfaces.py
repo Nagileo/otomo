@@ -34,6 +34,8 @@ def _configure_stores(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(config.settings, "ltm_store_path", str(tmp_path / "ltm.sqlite3"))
     monkeypatch.setattr(config.settings, "quota_store_path", str(tmp_path / "quota.json"))
     monkeypatch.setattr(config.settings, "recommendation_event_store_path", str(tmp_path / "rec.sqlite3"))
+    monkeypatch.setattr(config.settings, "anime_hub_cache_path", str(tmp_path / "hub-cache.sqlite3"))
+    monkeypatch.setattr(config.settings, "anime_hub_metrics_path", str(tmp_path / "hub-metrics.sqlite3"))
     monkeypatch.setattr(config.settings, "today_store_path", str(tmp_path / "today.sqlite3"))
     monkeypatch.setattr(config.settings, "workspace_store_path", str(tmp_path / "workspace.sqlite3"))
     monkeypatch.setattr(config.settings, "subscription_scheduler_enabled", False)
@@ -206,6 +208,8 @@ def test_watch_hub_surface_forwards_lazy_module_flags(tmp_path, monkeypatch):
             "video_limit": 3,
             "stage": "all",
             "username": None,
+            "spoiler_level": "none",
+            "include_viewer_state": True,
         }
 
         staged = client.get(
@@ -214,6 +218,39 @@ def test_watch_hub_surface_forwards_lazy_module_flags(tmp_path, monkeypatch):
         assert staged.status_code == 200
         assert seen["stage"] == "videos"
         assert seen["video_limit"] == 4
+
+
+def test_anime_follow_endpoint_upserts_and_deletes_one_subject_rule(tmp_path, monkeypatch):
+    _configure_stores(tmp_path, monkeypatch)
+    with TestClient(app) as client:
+        assert client.get("/product/subjects/42/follow").status_code == 401
+        _session_id, csrf = _login(client)
+        created = client.post(
+            "/product/subjects/42/follow",
+            headers={"x-otomo-csrf": csrf},
+            json={
+                "title": "测试动画",
+                "events": ["official", "release", "sequel", "video", "progress"],
+                "interval_minutes": 60,
+                "timezone": "Asia/Shanghai",
+                "channels": ["inbox"],
+            },
+        )
+        assert created.status_code == 200
+        first_id = created.json()["data"]["id"]
+        assert created.json()["data"]["kind"] == "anime_follow"
+        repeated = client.post(
+            "/product/subjects/42/follow",
+            headers={"x-otomo-csrf": csrf},
+            json={"title": "测试动画", "events": ["release"], "interval_minutes": 120},
+        )
+        assert repeated.status_code == 200
+        assert repeated.json()["data"]["id"] == first_id
+        assert client.get("/product/subjects/42/follow").json()["data"]["filters"]["events"] == ["release"]
+        deleted = client.delete("/product/subjects/42/follow", headers={"x-otomo-csrf": csrf})
+        assert deleted.status_code == 200
+        assert deleted.json()["deleted"] is True
+        assert client.get("/product/subjects/42/follow").json()["data"] is None
 
 
 def test_collection_dashboard_reads_feedback_from_full_user_memory(tmp_path):

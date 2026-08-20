@@ -665,10 +665,16 @@ def _anime_watch_hub_embeds(discord, data: dict) -> list:
     subject = data.get("subject") or {}
     lifecycle = data.get("lifecycle") or {}
     title = str(subject.get("name") or "动画观看中心")
+    subject_url = (
+        f"{settings.frontend_base_url.rstrip('/')}/subject/{subject.get('id')}"
+        if subject.get("id") else None
+    )
+    fit_summary = str((data.get("overview") or {}).get("fit_summary") or "").strip()
+    strategy = str(lifecycle.get("strategy") or "").strip()
     overview = discord.Embed(
         title=f"动画观看中心 · {title}"[:256],
-        url=f"https://bgm.tv/subject/{subject.get('id')}" if subject.get("id") else None,
-        description=str(lifecycle.get("strategy") or "")[0:1200] or None,
+        url=subject_url,
+        description="\n\n".join(value for value in (fit_summary, strategy) if value)[:1200] or None,
         color=_EMBED_COLOR,
     )
     overview.add_field(name="当前状态", value=str(lifecycle.get("label") or "待确认")[:1024], inline=True)
@@ -682,7 +688,7 @@ def _anime_watch_hub_embeds(discord, data: dict) -> list:
     online = data.get("online") or {}
     embeds.extend(_watch_embeds(discord, online)[:1])
     bili = data.get("bilibili") or {}
-    videos = (bili.get("videos") or [])[:3]
+    videos = (bili.get("videos") or [])[:2]
     if videos:
         role_labels = {
             "public_full_episode": "B站公开视频正片（非正版入口）",
@@ -748,7 +754,7 @@ def _anime_watch_hub_embeds(discord, data: dict) -> list:
             embeds.append(video_embed)
     releases = data.get("releases") or {}
     embeds.extend(_release_embeds(discord, releases)[:1])
-    return embeds[:8]
+    return embeds[:6]
 
 
 def _series_progress_embeds(discord, data: dict) -> list:
@@ -1185,6 +1191,9 @@ def run() -> None:
                 for item in (season_guide.get("items") or [])[:25]
                 if item.get("subject_id")
             ]
+        anime_hub = next((data for name, data in observations if name == "anime_watch_hub"), None)
+        if anime_hub and (anime_hub.get("subject") or {}).get("id"):
+            interaction_state["anime_subject_id"] = int(anime_hub["subject"]["id"])
         return (
             _clean(result) or "(这次没能整理出回答,换个问法试试?)",
             embeds[:10],
@@ -1385,6 +1394,14 @@ def run() -> None:
                     label="在网页继续",
                     style=discord.ButtonStyle.link,
                     url=web_url,
+                    row=4,
+                ))
+            subject_id = int(state.get("anime_subject_id") or 0)
+            if subject_id:
+                self.add_item(discord.ui.Button(
+                    label="打开完整作品中心",
+                    style=discord.ButtonStyle.link,
+                    url=f"{settings.frontend_base_url.rstrip('/')}/subject/{subject_id}",
                     row=4,
                 ))
 

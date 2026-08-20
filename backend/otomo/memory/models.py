@@ -165,6 +165,25 @@ class SeasonGuidePreferences(BaseModel):
     updated_at: str = ""
 
 
+class AnimeHubPreferences(BaseModel):
+    """Explicit, per-subject choices used by the anime consumption loop.
+
+    These are user-owned controls, not inferred taste claims.  Keeping them
+    separate from recommendation feedback prevents a muted release site or a
+    disliked uploader from becoming a broad genre preference by accident.
+    """
+
+    subject_id: int
+    preferred_subgroups: list[str] = Field(default_factory=list)
+    preferred_quality: str = ""
+    preferred_subtitle: str = ""
+    disabled_sources: list[str] = Field(default_factory=list)
+    liked_uploaders: list[str] = Field(default_factory=list)
+    muted_uploaders: list[str] = Field(default_factory=list)
+    hidden_video_ids: list[str] = Field(default_factory=list)
+    updated_at: str = ""
+
+
 class UserMemory(BaseModel):
     _store_revision: int = PrivateAttr(default=0)
     _store_baseline: dict[str, Any] = PrivateAttr(default_factory=dict)
@@ -178,6 +197,7 @@ class UserMemory(BaseModel):
     profile_snapshot: dict = Field(default_factory=dict)
     aspect_profiles: dict[str, UserAspectProfile] = Field(default_factory=dict)
     season_guide_preferences: SeasonGuidePreferences = Field(default_factory=SeasonGuidePreferences)
+    anime_hub_preferences: dict[str, AnimeHubPreferences] = Field(default_factory=dict)
     pending_write_actions: list[PendingWriteAction] = Field(default_factory=list)
     decision_log: list[DecisionLogItem] = Field(default_factory=list)
     watch_plan: list[WatchPlanItem] = Field(default_factory=list)
@@ -197,6 +217,7 @@ class MemorySummary(BaseModel):
     profile_snapshot: dict = Field(default_factory=dict)
     aspect_profiles: dict[str, UserAspectProfile] = Field(default_factory=dict)
     season_guide_preferences: SeasonGuidePreferences = Field(default_factory=SeasonGuidePreferences)
+    anime_hub_preferences: dict[str, AnimeHubPreferences] = Field(default_factory=dict)
     pending_write_actions: list[PendingWriteAction] = Field(default_factory=list)
     recent_decisions: list[DecisionLogItem] = Field(default_factory=list)
     watch_plan: list[WatchPlanItem] = Field(default_factory=list)
@@ -220,6 +241,7 @@ def memory_summary(mem: UserMemory, feedback_limit: int = 8) -> MemorySummary:
         profile_snapshot=mem.profile_snapshot,
         aspect_profiles=dict(list(mem.aspect_profiles.items())[:8]),
         season_guide_preferences=mem.season_guide_preferences,
+        anime_hub_preferences=dict(list(mem.anime_hub_preferences.items())[:30]),
         pending_write_actions=pending,
         recent_decisions=mem.decision_log[-10:],
         watch_plan=mem.watch_plan[-20:],

@@ -976,6 +976,10 @@ def _safe_watch_sources_payload(data: dict[str, Any]) -> dict[str, Any]:
         "search_fallbacks": _trim_dicts(data.get("search_fallbacks"), limit=6),
         "offline_hint": bool(data.get("offline_hint")),
         "mapping_notes": _trim_strings(data.get("mapping_notes"), limit=8, text_limit=180),
+        "availability_status": data.get("availability_status"),
+        "availability_label": _trim_text(data.get("availability_label"), 120),
+        "last_verified": data.get("last_verified"),
+        "availability_note": _trim_text(data.get("availability_note"), 220),
         "caveats": _trim_strings(data.get("caveats"), limit=8, text_limit=180),
     }
 
@@ -993,6 +997,8 @@ def _safe_release_feed_payload(data: dict[str, Any]) -> dict[str, Any]:
         "mapping_confidence": data.get("mapping_confidence"),
         "groups": groups,
         "fallback_items": _trim_dicts(data.get("fallback_items"), limit=12),
+        "related_items": _trim_dicts(data.get("related_items"), limit=12),
+        "filtered_count": data.get("filtered_count"),
         "search_links": _trim_dicts(data.get("search_links"), limit=8),
         "offline_hint": bool(data.get("offline_hint")),
         "caveats": _trim_strings(data.get("caveats"), limit=8, text_limit=180),
@@ -1138,9 +1144,37 @@ def _safe_anime_watch_hub_payload(data: dict[str, Any]) -> dict[str, Any]:
         str(item.get("bvid") or item.get("aid") or "")
         for item in _trim_dicts(bili_raw.get("watch_candidates"), limit=4)
     }
+    reputation_raw = data.get("reputation") if isinstance(data.get("reputation"), dict) else {}
+    episode_raw = data.get("episode_radar") if isinstance(data.get("episode_radar"), dict) else {}
+    music_raw = data.get("music") if isinstance(data.get("music"), dict) else {}
     return {
         "subject": dict(data.get("subject") or {}),
+        "identity": dict(data.get("identity") or {}),
+        "resolution": dict(data.get("resolution") or {}),
         "lifecycle": dict(data.get("lifecycle") or {}),
+        "viewer_state": dict(data.get("viewer_state") or {}),
+        "overview": dict(data.get("overview") or {}),
+        "reputation": {
+            "subject_id": reputation_raw.get("subject_id"),
+            "title": reputation_raw.get("title"),
+            "consensus": _trim_text(reputation_raw.get("consensus"), 500),
+            "confidence": reputation_raw.get("confidence"),
+            "spoiler_level": reputation_raw.get("spoiler_level"),
+            "ratings": _trim_dicts(reputation_raw.get("ratings"), limit=8),
+            "aspect_summary": _trim_dicts(reputation_raw.get("aspect_summary"), limit=10),
+        } if reputation_raw else {},
+        "episode_radar": {
+            "subject_id": episode_raw.get("subject_id"),
+            "total": episode_raw.get("total"),
+            "peaks": _trim_dicts(episode_raw.get("peaks"), limit=8),
+            "notes": _trim_strings(episode_raw.get("notes"), limit=5, text_limit=180),
+        } if episode_raw else {},
+        "trend": dict(data.get("trend") or {}),
+        "music": {
+            "subject": dict(music_raw.get("subject") or {}),
+            "fused": _trim_dicts(music_raw.get("fused"), limit=12),
+            "caveats": _trim_strings(music_raw.get("caveats"), limit=5, text_limit=180),
+        } if music_raw else {},
         "online": _safe_watch_sources_payload(data.get("online") or {}),
         "releases": _safe_release_feed_payload(data.get("releases") or {}),
         "bilibili": {
@@ -1164,6 +1198,8 @@ def _safe_anime_watch_hub_payload(data: dict[str, Any]) -> dict[str, Any]:
         "staff_signals": _trim_strings(data.get("staff_signals"), limit=8, text_limit=80),
         "status_summary": _trim_strings(data.get("status_summary"), limit=6, text_limit=180),
         "quick_actions": _trim_strings(data.get("quick_actions"), limit=6, text_limit=80),
+        "modules": dict(data.get("modules") or {}),
+        "generated_at": data.get("generated_at"),
         "caveats": _trim_strings(data.get("caveats"), limit=8, text_limit=220),
     }
 def _safe_today_cockpit_payload(data: dict[str, Any]) -> dict[str, Any]:

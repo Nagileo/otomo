@@ -8,6 +8,19 @@
 import { useState } from "react";
 import { Badge, Panel, list, text, type AnyRecord , Meta } from "./shared";
 import { type ShareSnapshotHandler, type PrepareWriteHandler, type PrepareDownloaderHandler, type PrepareRssFollowHandler, fmtScore, clsBySignal, pct, EmptyHint, ShareSnapshotButton } from "./shared";
+import { AnimeMusicThemesPanel } from "./product";
+
+const RELEASE_SOURCE_LABEL: Record<string, string> = {
+  mikan: "Mikan",
+  dmhy: "动漫花园",
+  acgnx: "末日资源库",
+  vcb: "VCB-Studio",
+};
+
+function releaseSourceLabel(value: unknown) {
+  const key = text(value).toLowerCase();
+  return RELEASE_SOURCE_LABEL[key] || text(value, "来源待确认");
+}
 
 export function TrendingPanel({ data }: { data: AnyRecord }) {
   const items = list(data.items);
@@ -621,17 +634,24 @@ export function WhereToWatchPanel({ data }: { data: AnyRecord }) {
         subtitle={`${official.length} 个官方候选 · ${fallbacks.length} 个搜索兜底`}
       >
       <div className="evidence-row">
-        <Badge tone={official.length ? "good" : "warn"}>{official.length ? "official sources" : "no verified platform"}</Badge>
+        <Badge tone={data.availability_status === "verified" ? "good" : data.availability_status === "not_found" || data.availability_status === "unavailable" ? "warn" : "dim"}>
+          {text(data.availability_label, official.length ? "有官方候选" : "未找到可靠正版入口")}
+        </Badge>
+        {data.last_verified ? <Badge tone="dim">核验于 {String(data.last_verified).slice(0, 16).replace("T", " ")}</Badge> : null}
         {data.offline_hint && <Badge tone="dim">可继续查 RSS/BD</Badge>}
       </div>
+      {data.availability_note ? <p className="evidence-copy">{text(data.availability_note)}</p> : null}
       {official.length ? (
         <div className="rating-grid">
           {official.map((src, i) => (
             <a className="rating-card" href={src.url} target="_blank" rel="noreferrer" key={`${src.url}-${i}`}>
               <div className="rating-source">{text(src.label)}</div>
-              <div className="card-meta">{text(src.source)} · {list<string>(src.regions).join("/") || "region unknown"}</div>
-              <Badge tone={src.confidence >= 0.8 ? "good" : "warn"}>{src.confidence >= 0.8 ? "对齐可靠" : "对齐存疑"}</Badge>
-              {src.note && <p className="card-note">{text(src.note)}</p>}
+              <div className="card-meta">{list<string>(src.regions).join("/") || "地区未注明"} · {text(src.availability_label, "可用性待确认")}</div>
+              <Badge tone={src.availability_status === "verified" ? "good" : src.availability_status === "catalog_match" ? "dim" : "warn"}>
+                {src.availability_status === "verified" ? "平台实时核验" : src.availability_status === "catalog_match" ? "官方目录命中" : "打开后确认"}
+              </Badge>
+              {src.note && <p className="card-note">{src.availability_status === "catalog_match" ? "平台官方页面" : text(src.note)}</p>}
+              {src.availability_note ? <p className="card-note">{src.availability_status === "catalog_match" ? "目录信息可能随地区版权或下架状态变化，打开后请再确认。" : text(src.availability_note)}</p> : null}
             </a>
           ))}
         </div>
@@ -650,10 +670,7 @@ export function WhereToWatchPanel({ data }: { data: AnyRecord }) {
           </div>
         </>
       )}
-      {list<string>(data.mapping_notes).length > 0 && (
-        <p className="card-note">{list<string>(data.mapping_notes).join(" · ")}</p>
-      )}
-      <Meta notes={list<string>(data.caveats)} />
+      <Meta notes={[...list<string>(data.mapping_notes), ...list<string>(data.caveats)]} />
     </Panel>
     </div>
   );
@@ -670,12 +687,21 @@ export function ReleaseItemCard({
   subjectName: string;
   onPrepareDownloaderPush?: PrepareDownloaderHandler;
 }) {
+  const sizeBytes = Number(item.size_bytes || 0);
+  const sizeLabel = sizeBytes >= 1024 ** 3
+    ? `${(sizeBytes / 1024 ** 3).toFixed(1)} GB`
+    : sizeBytes >= 1024 ** 2 ? `${Math.round(sizeBytes / 1024 ** 2)} MB` : "";
   return (
     <div className="release-item">
       <div className="release-item-head">
         {item.subgroup && <Badge tone="good">{text(item.subgroup)}</Badge>}
-        <Badge tone="dim">{text(item.source)}</Badge>
-        {item.quality && item.quality !== "tv" && <Badge tone="warn">{text(item.quality)}</Badge>}
+        <Badge tone="dim">{releaseSourceLabel(item.source)}</Badge>
+        {item.resolution ? <Badge tone="dim">{text(item.resolution)}</Badge> : null}
+        {item.subtitle ? <Badge tone="dim">{text(item.subtitle)}</Badge> : null}
+        {item.episode_label ? <Badge tone="good">{text(item.episode_label)}</Badge> : null}
+        {item.release_kind ? <Badge tone="dim">{item.release_kind === "episode" ? "单集" : item.release_kind === "batch" ? "合集" : item.release_kind === "bd" ? "BD" : item.release_kind === "movie" ? "电影" : "类型待确认"}</Badge> : null}
+        {item.quality && item.quality !== "tv" && !item.resolution && <Badge tone="warn">{String(item.quality).toLowerCase() === "bd" ? "BD" : text(item.quality)}</Badge>}
+        {sizeLabel ? <Badge tone="dim">{sizeLabel}</Badge> : null}
         {item.pub_date && <span className="release-date">{String(item.pub_date).slice(0, 10)}</span>}
         {item.scope_status === "exact" && <Badge tone="good">当前篇章</Badge>}
         {item.scope_status === "compatible" && <Badge tone="dim">未发现篇章冲突</Badge>}
@@ -724,7 +750,7 @@ export function ReleaseFeedsPanel({ data, onPrepareDownloaderPush, onCreateRssFo
       >
       <div className="evidence-row">
         <Badge tone={data.mapping_confidence >= 0.8 ? "good" : "warn"}>{data.mapping_confidence >= 0.8 ? "外站对齐可靠" : "外站对齐存疑"}</Badge>
-        <Badge tone="warn">link aggregation only</Badge>
+        <Badge tone="warn">仅提供外部链接</Badge>
       </div>
       {rssNotice ? <div className="inline-notice">{rssNotice}</div> : null}
       {groups.length ? (
@@ -733,8 +759,8 @@ export function ReleaseFeedsPanel({ data, onPrepareDownloaderPush, onCreateRssFo
             <div className="digest-card" key={`${group.source}-${group.subgroup}-${i}`}>
               <div className="release-group-head">
                 <span className="digest-title">{text(group.subgroup)}</span>
-                <Badge tone="dim">{text(group.source)}</Badge>
-                {group.quality && group.quality !== "tv" && <Badge tone="warn">{text(group.quality)}</Badge>}
+                <Badge tone="dim">{releaseSourceLabel(group.source)}</Badge>
+                {group.quality && group.quality !== "tv" && <Badge tone="warn">{String(group.quality).toLowerCase() === "bd" ? "BD" : text(group.quality)}</Badge>}
                 {group.rss_url && (
                   <>
                     <a href={group.rss_url} target="_blank" rel="noreferrer" className="inline-link">RSS</a>
@@ -790,7 +816,7 @@ export function ReleaseFeedsPanel({ data, onPrepareDownloaderPush, onCreateRssFo
       )}
       {fallback.length > 0 && (
         <>
-          <div className="section-title">DMHY / ACGNX 兜底</div>
+          <div className="section-title">资源站候选</div>
           <div className="release-list">
             {fallback.map((item, i) => (
               <ReleaseItemCard
@@ -843,12 +869,22 @@ export function AnimeWatchHubPanel({
   data,
   onPrepareDownloaderPush,
   onPrepareWrite,
+  onPrepareProgress,
   onCreateRssFollow,
+  onUpdatePreferences,
+  onAddWatchPlan,
+  onToggleFollow,
+  isFollowing = false,
 }: {
   data: AnyRecord;
   onPrepareDownloaderPush?: PrepareDownloaderHandler;
   onPrepareWrite?: PrepareWriteHandler;
+  onPrepareProgress?: (subjectId: number, subjectName: string, upToEpisode: number) => void;
   onCreateRssFollow?: PrepareRssFollowHandler;
+  onUpdatePreferences?: (payload: AnyRecord) => Promise<void>;
+  onAddWatchPlan?: () => Promise<void>;
+  onToggleFollow?: () => Promise<void>;
+  isFollowing?: boolean;
 }) {
   const subject = data.subject || {};
   const lifecycle = data.lifecycle || {};
@@ -858,6 +894,32 @@ export function AnimeWatchHubPanel({
   const uncertainVideos = videos.filter((video) => video.role === "episode_candidate");
   const editorialVideos = videos.filter((video) => !video.watch_candidate && video.role !== "episode_candidate");
   const versionConflicts = list(bili.version_conflicts);
+  const [activeTab, setActiveTab] = useState(() => {
+    if (typeof window === "undefined") return "overview";
+    return ({
+      "#watch-online": "online",
+      "#watch-bilibili": "videos",
+      "#watch-release": "releases",
+    } as Record<string, string>)[window.location.hash] || "overview";
+  });
+  const [hubNotice, setHubNotice] = useState("");
+  const viewer = data.viewer_state || {};
+  const overview = data.overview || {};
+  const preferences = data.preferences || {};
+  const selectTab = (value: string) => {
+    setActiveTab(value);
+    const hash = value === "online" ? "#watch-online" : value === "videos" ? "#watch-bilibili" : value === "releases" ? "#watch-release" : "";
+    window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${hash}`);
+  };
+  const applyPreference = async (payload: AnyRecord, success: string) => {
+    if (!onUpdatePreferences) return;
+    try {
+      await onUpdatePreferences(payload);
+      setHubNotice(success);
+    } catch (error) {
+      setHubNotice(`偏好保存失败：${String(error)}`);
+    }
+  };
   const roleLabel: Record<string, string> = {
     public_full_episode: "公开视频正片",
     episode_candidate: "疑似正片",
@@ -916,6 +978,20 @@ export function AnimeWatchHubPanel({
             {video.danmaku ? <span>弹幕 {formatCount(video.danmaku)}</span> : null}
             <span>作品匹配 {pct(video.match_confidence)}</span>
           </div>
+          {onUpdatePreferences ? (
+            <div className="panel-actions compact-actions">
+              <button type="button" className="inline-action" onClick={async () => {
+                setHubNotice("正在隐藏这条不相关视频…");
+                await applyPreference({ video_id: String(video.bvid || video.aid || ""), video_action: "hide" }, "已隐藏；视频模块会按新偏好重新筛选。");
+              }}>不相关</button>
+              {video.author ? <button type="button" className="inline-action" onClick={async () => {
+                await applyPreference({ uploader: String(video.author), uploader_action: "like" }, `已记录：多推荐 ${String(video.author)} 的可靠内容。`);
+              }}>多来这个 UP</button> : null}
+              {video.author ? <button type="button" className="inline-action" onClick={async () => {
+                await applyPreference({ uploader: String(video.author), uploader_action: "mute" }, `已记录：减少 ${String(video.author)} 的内容。`);
+              }}>少来这个 UP</button> : null}
+            </div>
+          ) : null}
           {pageLinks.length ? (
             <details className="bili-video-pages">
               <summary>按分P打开具体集 · {pageLinks.length}</summary>
@@ -954,10 +1030,36 @@ export function AnimeWatchHubPanel({
         <div className="watch-hub-summary">
           {list<string>(data.status_summary).map((row, i) => <span key={i}>{row}</span>)}
         </div>
+        {hubNotice ? <div className="inline-notice">{hubNotice}</div> : null}
+        <div className="panel-actions subject-hub-actions">
+          {onPrepareWrite ? <>
+            <button type="button" className={viewer.collection_type === 1 ? "button-primary" : "button-secondary"} onClick={() => onPrepareWrite(Number(subject.id), text(subject.name), 1)}>想看</button>
+            <button type="button" className={viewer.collection_type === 3 ? "button-primary" : "button-secondary"} onClick={() => onPrepareWrite(Number(subject.id), text(subject.name), 3)}>在看</button>
+            <button type="button" className={viewer.collection_type === 2 ? "button-primary" : "button-secondary"} onClick={() => onPrepareWrite(Number(subject.id), text(subject.name), 2)}>看过</button>
+          </> : null}
+          {onPrepareProgress && Number(viewer.ep_status || 0) < Number(subject.eps || Infinity) ? <button type="button" className="button-secondary" onClick={() => onPrepareProgress(Number(subject.id), text(subject.name), Number(viewer.ep_status || 0) + 1)}>看到第 {Number(viewer.ep_status || 0) + 1} 集</button> : null}
+          {onAddWatchPlan ? <button type="button" className="button-secondary" onClick={async () => { try { await onAddWatchPlan(); setHubNotice("已加入 Otomo 本地计划板。"); } catch (error) { setHubNotice(`加入计划失败：${String(error)}`); } }}>加入本地计划</button> : null}
+          {onToggleFollow ? <button type="button" className={isFollowing ? "button-primary" : "button-secondary"} onClick={async () => { try { await onToggleFollow(); setHubNotice(isFollowing ? "已停止整部作品的长期提醒。" : "已关注正版、RSS、续作、视频和进度变化。"); } catch (error) { setHubNotice(`关注设置失败：${String(error)}`); } }}>{isFollowing ? "已关注作品 · 点击取消" : "关注整部作品"}</button> : null}
+        </div>
       </Panel>
-      {data.series_progress ? <SeriesProgressPanel data={data.series_progress} onPrepareWrite={onPrepareWrite} /> : null}
-      {data.online?.title ? <WhereToWatchPanel data={data.online} /> : null}
-      {data.bilibili ? <div id="watch-bilibili" className="watch-hub-anchor">
+      <nav className="dossier-tabs anime-hub-tabs" aria-label="动画作品中心模块">
+        {[
+          ["overview", "概览"], ["online", "在线观看"], ["releases", "RSS / 离线"],
+          ["videos", "视频与漫评"], ["series", "系列顺序"], ["reputation", "口碑与分集"], ["music", "音乐"],
+        ].map(([value, label]) => <button type="button" className={activeTab === value ? "active" : ""} onClick={() => selectTab(value)} key={value}>{label}</button>)}
+      </nav>
+      {activeTab === "overview" ? <Panel title={`${text(overview.verdict, "适合度仍待判断")} · ${text(subject.name)}`} subtitle="无剧透个性化判断">
+        <p className="evidence-copy">{text(overview.fit_summary, "个性化证据仍在加载；不会用通用热度强行断言适合你。")}</p>
+        <div className="fit-evidence-grid">
+          <div><strong>可能适合你的地方</strong>{list<string>(overview.why_for_me).length ? list<string>(overview.why_for_me).map((row, i) => <span key={i}>{row}</span>) : <span>还没有足够的明确偏好证据</span>}</div>
+          <div><strong>需要留意</strong>{list<string>(overview.risk_for_me).length ? list<string>(overview.risk_for_me).map((row, i) => <span key={i}>{row}</span>) : <span>暂未命中你的明确雷区</span>}</div>
+        </div>
+        {overview.general_consensus ? <p className="card-note">通用口碑：{text(overview.general_consensus)}</p> : null}
+        {list(overview.friend_feedback).length ? <div className="compact-list inline">{list(overview.friend_feedback).map((row, i) => <span key={`${row.username}-${i}`}>@{text(row.username)} · {text(row.collection_label)}{row.rate ? ` · ${row.rate}分` : ""}</span>)}</div> : null}
+      </Panel> : null}
+      {activeTab === "series" && data.series_progress ? <SeriesProgressPanel data={data.series_progress} onPrepareWrite={onPrepareWrite} /> : null}
+      {activeTab === "online" && data.online?.title ? <WhereToWatchPanel data={data.online} /> : null}
+      {activeTab === "videos" && data.bilibili ? <div id="watch-bilibili" className="watch-hub-anchor">
         <Panel
           title={`B站普通投稿与延伸内容 · ${text(subject.name)}`}
           subtitle={`${playableVideos.length} 个可看正片候选 · ${editorialVideos.length} 个PV/漫评/回顾 · ${uncertainVideos.length} 个疑似候选`}
@@ -1015,7 +1117,23 @@ export function AnimeWatchHubPanel({
         <Meta notes={list<string>(bili.warnings)} />
         </Panel>
       </div> : null}
-      {data.releases?.title ? <ReleaseFeedsPanel data={data.releases} onPrepareDownloaderPush={onPrepareDownloaderPush} onCreateRssFollow={onCreateRssFollow} /> : null}
+      {activeTab === "releases" && data.releases?.title ? <>
+        {onUpdatePreferences ? <Panel title="资源偏好" subtitle="只影响这部作品，不会擅自泛化成你的全局口味">
+          <div className="settings-grid">
+            <label className="setting-field wide"><span>优先字幕组（逗号分隔）</span><input defaultValue={list<string>(preferences.preferred_subgroups).join("，")} placeholder="例如：喵萌奶茶屋，北宇治字幕组" onBlur={(event) => void applyPreference({ preferred_subgroups: event.target.value.split(/[，,]/).map((value) => value.trim()).filter(Boolean) }, "字幕组优先级已保存。") } /></label>
+            <label className="setting-field"><span>优先画质</span><select defaultValue={text(preferences.preferred_quality, "")} onChange={(event) => void applyPreference({ preferred_quality: event.target.value }, "画质偏好已保存。") }><option value="">不过滤</option><option value="2160p">2160p</option><option value="1080p">1080p</option><option value="720p">720p</option></select></label>
+            <label className="setting-field"><span>字幕偏好</span><select defaultValue={text(preferences.preferred_subtitle, "")} onChange={(event) => void applyPreference({ preferred_subtitle: event.target.value }, "字幕偏好已保存。") }><option value="">不过滤</option><option value="简中">简中</option><option value="繁中">繁中</option><option value="简繁">简繁双语</option></select></label>
+          </div>
+          <div className="settings-options">{["mikan", "dmhy", "acgnx", "vcb"].map((source) => <label className="settings-check" key={source}><input type="checkbox" checked={!list<string>(preferences.disabled_sources).includes(source)} onChange={(event) => { const disabled = new Set(list<string>(preferences.disabled_sources)); if (event.target.checked) disabled.delete(source); else disabled.add(source); void applyPreference({ disabled_sources: Array.from(disabled) }, "资源来源设置已保存。"); }} /><span>显示 {source.toUpperCase()}</span></label>)}</div>
+        </Panel> : null}
+        <ReleaseFeedsPanel data={data.releases} onPrepareDownloaderPush={onPrepareDownloaderPush} onCreateRssFollow={onCreateRssFollow} />
+      </> : null}
+      {activeTab === "reputation" ? <>
+        {data.reputation?.title ? <ReviewEvidencePanel data={data.reputation} /> : null}
+        {data.episode_radar?.subject_id ? <EpisodeRadarPanel data={data.episode_radar} /> : null}
+        {data.trend?.subject_id ? <SubjectTrendPanel data={data.trend} /> : null}
+      </> : null}
+      {activeTab === "music" && data.music?.subject ? <AnimeMusicThemesPanel data={data.music} /> : null}
       <Meta notes={list<string>(data.caveats)} />
     </>
   );
@@ -1173,6 +1291,22 @@ export function SeasonGuidePanel({
     : null;
   if (anchorKey && !anchoredItem) return null;
   const visibleItems = anchoredItem ? [anchoredItem] : items;
+  const rememberIdentity = (item: AnyRecord) => {
+    if (!item.subject_id || typeof window === "undefined") return;
+    sessionStorage.setItem(`otomo:subject:${item.subject_id}`, JSON.stringify({
+      subject: {
+        id: item.subject_id,
+        name: item.title,
+        name_jp: item.title_jp,
+        image: item.image,
+        date: item.air_date || item.broadcast,
+        platform: item.platform || "TV",
+        type_name: "anime",
+      },
+      identity: { subject_id: item.subject_id, canonical_title: item.title, aliases: [item.title, item.title_jp].filter(Boolean) },
+      resolution: { status: "resolved", matched_by: "subject_id", reason: "复用新番导视已确认的作品身份" },
+    }));
+  };
   const fitLabel: Record<string, string> = {
     strong: "适合度：很匹配",
     maybe: "适合度：值得试试",
@@ -1274,7 +1408,7 @@ export function SeasonGuidePanel({
           <div className="season-card" key={`${item.subject_id}-${i}`}>
             {item.image ? <img src={item.image} alt="" /> : <div className="season-noimg" />}
             <div className="season-main">
-              <a className="card-title title-link" href={`/subject/${item.subject_id}`}>{text(item.title)}</a>
+              <a className="card-title title-link" href={`/subject/${item.subject_id}`} onClick={() => rememberIdentity(item)}>{text(item.title)}</a>
               <div className="card-meta">
                 {item.bangumi_score ? `Bangumi ${item.bangumi_score}` : "暂无评分"}
                 {item.broadcast ? ` · ${item.broadcast}` : ""}
@@ -1324,10 +1458,10 @@ export function SeasonGuidePanel({
                 </div>
               )}
               <div className="link-row">
-                {item.subject_id && <a href={`/subject/${item.subject_id}`}>作品中心</a>}
-                {item.subject_id && <a href={`/subject/${item.subject_id}#watch-online`}>在线观看</a>}
-                {item.subject_id && <a href={`/subject/${item.subject_id}#watch-bilibili`}>B站内容</a>}
-                {item.subject_id && <a href={`/subject/${item.subject_id}#watch-release`}>RSS/下载</a>}
+                {item.subject_id && <a href={`/subject/${item.subject_id}`} onClick={() => rememberIdentity(item)}>作品中心</a>}
+                {item.subject_id && <a href={`/subject/${item.subject_id}#watch-online`} onClick={() => rememberIdentity(item)}>在线观看</a>}
+                {item.subject_id && <a href={`/subject/${item.subject_id}#watch-bilibili`} onClick={() => rememberIdentity(item)}>B站内容</a>}
+                {item.subject_id && <a href={`/subject/${item.subject_id}#watch-release`} onClick={() => rememberIdentity(item)}>RSS/下载</a>}
                 {item.subject_id && onPrepareWrite && (!item.series_status || item.series_status.prerequisites_satisfied) && !["watched", "watching"].includes(String(item.series_status?.collection_state || "")) && (
                   <button
                     type="button"

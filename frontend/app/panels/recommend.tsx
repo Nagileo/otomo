@@ -179,6 +179,22 @@ export function RecommendPanel({
     if (next) { setCurrent(next); setDismissed([]); setExpanded(false); setLastAction(null); }
     setLoadingNext(false);
   }
+  function openItem(item: AnyRecord) {
+    if (item.id && typeof window !== "undefined") {
+      sessionStorage.setItem(`otomo:subject:${item.id}`, JSON.stringify({
+        subject: {
+          id: item.id,
+          name: item.name,
+          image: item.image,
+          date: item.release_date,
+          eps: item.episodes,
+          type_name: String(current.subject_type || "anime"),
+        },
+        resolution: { status: "resolved", matched_by: "subject_id", reason: "复用推荐卡已确认的 Bangumi 条目" },
+      }));
+    }
+    void feedback(item, "open");
+  }
   return (
     <Panel
       title="为你推荐"
@@ -220,11 +236,11 @@ export function RecommendPanel({
           const choiceOpen = feedbackChoice?.id === Number(item.id);
           return (
             <article className="rec-card rec-card-explained" key={`${item.id}-${i}`} data-recommendation-id={Number(item.id)}>
-              <a href={`/subject/${item.id}`} onClick={() => void feedback(item, "open")}>
+              <a href={`/subject/${item.id}`} onClick={() => openItem(item)}>
                 {item.image ? <img src={item.image} alt="" /> : <div className="rec-noimg" />}
               </a>
               <div className="rec-body">
-                <a className="card-title" href={`/subject/${item.id}`} onClick={() => void feedback(item, "open")}>{text(item.name)}</a>
+                <a className="card-title" href={`/subject/${item.id}`} onClick={() => openItem(item)}>{text(item.name)}</a>
                 <div className="card-meta">
                   {item.bangumi_score ? `Bangumi ${item.bangumi_score}` : "评分暂无"}
                   {item.rank ? ` · 全站 #${item.rank}` : ""}

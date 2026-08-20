@@ -226,3 +226,43 @@ def test_bili_subscription_uses_specific_video_notification_title(monkeypatch, t
     assert record.status == "sent"
     assert record.title == "泛式：2026年7月新番导视"
     assert ltm.load_user("alice").inbox[-1].title == record.title
+
+
+def test_content_subscriptions_skip_unchanged_payload_across_intervals(monkeypatch, tmp_path):
+    store = SubscriptionStore(str(tmp_path / "subs.sqlite3"))
+    ltm = LongTermMemory(tmp_path / "ltm")
+    rule = store.create(
+        CreateSubscriptionRuleRequest(
+            kind="anime_follow",
+            title="测试番作品更新",
+            schedule=SubscriptionSchedule(timezone="Asia/Shanghai", interval_minutes=15),
+            channels=["inbox"],
+            filters={"subject_id": 42},
+        ),
+        owner_key="user:alice",
+        username="alice",
+    )
+    service = SubscriptionService(store, ltm, AuthStore(tmp_path / "auth"))
+    version = {"value": 1}
+
+    async def fake_materialize(_rule, *, test=False):
+        return {
+            "notification_title": "测试番作品更新",
+            "subject_id": 42,
+            "sections": [{"title": "新发布", "items": [{"id": version["value"], "title": "第1集"}]}],
+        }
+
+    monkeypatch.setattr(service, "_materialize", fake_materialize)
+    first = asyncio.run(service.run_rule(rule, now=datetime(2026, 7, 6, 9, 0)))
+    stored = store.get(rule.id, "user:alice")
+    assert stored is not None
+    second = asyncio.run(service.run_rule(stored, now=datetime(2026, 7, 6, 9, 15)))
+    version["value"] = 2
+    stored = store.get(rule.id, "user:alice")
+    assert stored is not None
+    third = asyncio.run(service.run_rule(stored, now=datetime(2026, 7, 6, 9, 30)))
+    assert first.status == "sent"
+    assert second.status == "skipped"
+    assert second.payload["reason"] == "content unchanged"
+    assert third.status == "sent"
+    assert len(ltm.load_user("alice").inbox) == 2

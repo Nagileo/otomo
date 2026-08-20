@@ -40,6 +40,7 @@ from ..config import settings
 from ..memory import LongTermMemory
 from ..memory.consolidate import now_iso
 from ..memory.models import (
+    AnimeHubPreferences,
     FeedbackItem,
     MemoryItem,
     ProgressItem,
@@ -63,6 +64,7 @@ from ..quota import (
     estimate_tokens,
 )
 from ..recommendation_cache import RecommendationArtifactCache
+from ..anime_hub_metrics import AnimeHubMetricStore
 from ..recommendation_events import (
     RecommendationEventStore,
     RecommendationFeedbackRequest,
@@ -99,6 +101,7 @@ from ..tools.product_loop.tool import (
     SubjectDossierArgs,
     SubjectDossierTool,
 )
+from ..tools.writeback.tool import UpsertWatchPlanArgs, UpsertWatchPlanTool
 from ..tools.profile.tool import CollectionDashboardArgs, CollectionDashboardTool
 from ..tools.season.tool import SeasonGuideBriefArgs, SeasonGuideBriefTool
 from ..tools.videos.tool import guide_source_catalog
@@ -133,6 +136,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.today_store = TodayPreferenceStore()
     app.state.recommendation_event_store = RecommendationEventStore()
     app.state.recommendation_artifact_cache = RecommendationArtifactCache()
+    app.state.anime_hub_cache = RecommendationArtifactCache(
+        path=settings.anime_hub_cache_path,
+        ttl=settings.anime_hub_cache_ttl,
+    )
+    app.state.anime_hub_metrics = AnimeHubMetricStore()
     app.state.workspace_store = WorkspaceStore()
     app.state.community_store = CommunityStore()
     app.state.subscription_service = SubscriptionService(
@@ -291,6 +299,39 @@ class PrepareDownloaderPushRequest(BaseModel):
     save_path: str = ""
     paused: bool = False
     reason: str = "从 release 面板准备推送到下载器"
+
+
+class AnimeHubPreferencesUpdate(BaseModel):
+    preferred_subgroups: list[str] | None = Field(None, max_length=12)
+    preferred_quality: str | None = Field(None, max_length=40)
+    preferred_subtitle: str | None = Field(None, max_length=40)
+    disabled_sources: list[str] | None = Field(None, max_length=12)
+    video_id: str = Field("", max_length=80)
+    video_action: Literal["hide", "restore", ""] = ""
+    uploader: str = Field("", max_length=100)
+    uploader_action: Literal["like", "mute", "clear", ""] = ""
+
+
+class AnimeWatchPlanRequest(BaseModel):
+    name: str = Field("", max_length=160)
+    status: Literal["wishlist", "watching", "backlog", "on_hold", "revive", "completed", "rejected"] = "backlog"
+    priority: int = Field(3, ge=1, le=5)
+    reason: str = Field("", max_length=300)
+    rss_url: str = Field("", max_length=2048)
+    subgroup: str = Field("", max_length=120)
+
+
+class AnimeFollowRequest(BaseModel):
+    title: str = Field("", max_length=160)
+    events: list[Literal["official", "release", "sequel", "video", "progress"]] = Field(
+        default_factory=lambda: ["official", "release", "sequel", "video", "progress"],
+        max_length=5,
+    )
+    interval_minutes: int = Field(60, ge=15, le=10080)
+    timezone: str = Field("Asia/Shanghai", min_length=1, max_length=64)
+    channels: list[Literal["inbox", "email", "webhook", "discord_dm", "webpush"]] = Field(
+        default_factory=lambda: ["inbox"], max_length=5,
+    )
 
 
 class VisualFeedbackRequest(BaseModel):
@@ -815,6 +856,13 @@ async def create_subscription_rule(
     _require_csrf(request, session.auth_session_id)
     owner, username = _subscription_owner(session.auth_session_id)
     _check_subscription_limits(request, username)
+    if req.kind == "anime_follow":
+        try:
+            follow_subject_id = int(req.filters.get("subject_id") or 0)
+        except (TypeError, ValueError):
+            follow_subject_id = 0
+        if follow_subject_id <= 0:
+            raise HTTPException(status_code=422, detail="动画作品关注需要有效的 Bangumi subject_id；请从作品中心创建")
     if "webpush" in req.channels and not _webpush_ready():
         raise HTTPException(status_code=400, detail="启用浏览器推送前必须先配置 VAPID")
     if req.webhook_url:
@@ -2143,6 +2191,7 @@ async def product_subject_dossier(
     request: Request,
     response: Response,
     spoiler_level: Literal["none", "mild", "full"] = "none",
+    include_viewer_state: bool = True,
     include_watch: bool = True,
     include_release: bool = True,
 ) -> dict[str, Any]:
@@ -2154,6 +2203,7 @@ async def product_subject_dossier(
         args = SubjectDossierArgs(
             subject_id=subject_id,
             spoiler_level=spoiler_level,
+            include_viewer_state=include_viewer_state,
             include_watch=include_watch,
             include_release=include_release,
         )
@@ -2172,8 +2222,10 @@ async def product_anime_watch_hub(
     include_release: bool = True,
     include_videos: bool = True,
     video_limit: int = 5,
-    stage: Literal["all", "core", "videos", "releases"] = "all",
+    stage: Literal["all", "identity", "overview", "core", "videos", "releases", "music", "follow"] = "all",
+    spoiler_level: Literal["none", "mild", "full"] = "none",
 ) -> dict[str, Any]:
+    started = time.monotonic()
     session = _ensure_auth_session(request, response)
     _product_rate_limit(request, session.auth_session_id, "subject_watch_hub")
     identity = app.state.auth.identity(session.auth_session_id)
@@ -2186,12 +2238,210 @@ async def product_anime_watch_hub(
             video_limit=min(max(video_limit, 1), 10),
             stage=stage,
             username=identity.username if identity.authenticated else None,
+            spoiler_level=spoiler_level,
         )
+        friend_usernames = [
+            row.username for row in app.state.workspace_store.list_friends(
+                f"user:{identity.username or identity.user_id}"
+            )
+        ] if identity.authenticated else []
         with tenant_scope(identity.username, authenticated=identity.authenticated):
-            result = await AnimeWatchHubTool(client).run(args)
+            result = await AnimeWatchHubTool(
+                client,
+                app.state.ltm if identity.authenticated else None,
+                friend_usernames,
+                app.state.anime_hub_cache,
+            ).run(args)
+        if result.data is not None:
+            app.state.anime_hub_metrics.record(
+                subject_id=int(result.data.subject.get("id") or subject_id),
+                stage=stage,
+                total_ms=round((time.monotonic() - started) * 1000),
+                modules=result.data.modules,
+            )
         return result.model_dump(mode="json", exclude_none=True)
     finally:
         await client.aclose()
+
+
+@app.get("/product/subjects/{subject_id}/preferences")
+async def product_anime_preferences(
+    subject_id: int, request: Request, response: Response,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    identity = app.state.auth.identity(session.auth_session_id)
+    if not identity.authenticated:
+        return {"ok": True, "data": AnimeHubPreferences(subject_id=subject_id).model_dump(mode="json")}
+    with tenant_scope(identity.username, authenticated=True):
+        mem = app.state.ltm.load_user(identity.username)
+        prefs = mem.anime_hub_preferences.get(str(subject_id)) or AnimeHubPreferences(subject_id=subject_id)
+    return {"ok": True, "data": prefs.model_dump(mode="json", exclude_none=True)}
+
+
+@app.patch("/product/subjects/{subject_id}/preferences")
+async def update_product_anime_preferences(
+    subject_id: int,
+    req: AnimeHubPreferencesUpdate,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    identity = _authenticated_identity(session.auth_session_id)
+    with tenant_scope(identity.username, authenticated=True):
+        mem = app.state.ltm.load_user(identity.username)
+        prefs = mem.anime_hub_preferences.get(str(subject_id)) or AnimeHubPreferences(subject_id=subject_id)
+        if req.preferred_subgroups is not None:
+            prefs.preferred_subgroups = list(dict.fromkeys(value.strip() for value in req.preferred_subgroups if value.strip()))[:12]
+        if req.preferred_quality is not None:
+            prefs.preferred_quality = req.preferred_quality.strip()
+        if req.preferred_subtitle is not None:
+            prefs.preferred_subtitle = req.preferred_subtitle.strip()
+        if req.disabled_sources is not None:
+            prefs.disabled_sources = list(dict.fromkeys(value.strip().lower() for value in req.disabled_sources if value.strip()))[:12]
+        video_id = req.video_id.strip()
+        if video_id and req.video_action:
+            hidden = set(prefs.hidden_video_ids)
+            if req.video_action == "hide":
+                hidden.add(video_id)
+            else:
+                hidden.discard(video_id)
+            prefs.hidden_video_ids = sorted(hidden)[:200]
+        uploader = req.uploader.strip()
+        if uploader and req.uploader_action:
+            liked = set(prefs.liked_uploaders)
+            muted = set(prefs.muted_uploaders)
+            if req.uploader_action == "like":
+                liked.add(uploader)
+                muted.discard(uploader)
+            elif req.uploader_action == "mute":
+                muted.add(uploader)
+                liked.discard(uploader)
+            else:
+                liked.discard(uploader)
+                muted.discard(uploader)
+            prefs.liked_uploaders = sorted(liked)[:60]
+            prefs.muted_uploaders = sorted(muted)[:60]
+        prefs.updated_at = now_iso()
+        mem.anime_hub_preferences[str(subject_id)] = prefs
+        app.state.ltm.save_user(mem)
+    return {"ok": True, "data": prefs.model_dump(mode="json", exclude_none=True)}
+
+
+@app.post("/product/subjects/{subject_id}/watch-plan")
+async def upsert_product_anime_watch_plan(
+    subject_id: int,
+    req: AnimeWatchPlanRequest,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    identity = _authenticated_identity(session.auth_session_id)
+    client = await _request_client(app, session.auth_session_id)
+    try:
+        with tenant_scope(identity.username, authenticated=True):
+            result = await UpsertWatchPlanTool(client, app.state.ltm).run(UpsertWatchPlanArgs(
+                username=identity.username,
+                subject_id=subject_id,
+                name=req.name or f"subject {subject_id}",
+                subject_type="anime",
+                status=req.status,
+                priority=req.priority,
+                reason=req.reason or "从动画作品中心加入本地计划",
+                rss_url=req.rss_url,
+                subgroup=req.subgroup,
+                source="web:anime_hub",
+            ))
+        return result.model_dump(mode="json", exclude_none=True)
+    finally:
+        await client.aclose()
+
+
+def _anime_follow_rule(owner: str, subject_id: int):
+    for rule in app.state.subscription_store.list_rules(owner):
+        if rule.kind != "anime_follow":
+            continue
+        try:
+            candidate_id = int(rule.filters.get("subject_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if candidate_id == subject_id:
+            return rule
+    return None
+
+
+@app.get("/product/subjects/{subject_id}/follow")
+async def get_product_anime_follow(
+    subject_id: int, request: Request, response: Response,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    owner, _ = _subscription_owner(session.auth_session_id)
+    rule = _anime_follow_rule(owner, subject_id)
+    return {
+        "ok": True,
+        "data": rule.model_dump(mode="json", exclude={"owner_key"}) if rule else None,
+    }
+
+
+@app.post("/product/subjects/{subject_id}/follow")
+async def upsert_product_anime_follow(
+    subject_id: int,
+    req: AnimeFollowRequest,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    owner, username = _subscription_owner(session.auth_session_id)
+    _check_subscription_limits(request, username)
+    if "webpush" in req.channels and not _webpush_ready():
+        raise HTTPException(status_code=400, detail="启用浏览器推送前必须先配置 VAPID")
+    filters = {
+        "subject_id": subject_id,
+        "title": req.title or f"subject {subject_id}",
+        "events": list(dict.fromkeys(req.events)),
+        "video_limit": 3,
+    }
+    schedule = {
+        "timezone": req.timezone,
+        "hour": 9,
+        "minute": 0,
+        "interval_minutes": req.interval_minutes,
+    }
+    existing = _anime_follow_rule(owner, subject_id)
+    if existing:
+        rule = app.state.subscription_store.update(existing.id, owner, UpdateSubscriptionRuleRequest(
+            enabled=True,
+            title=f"《{req.title or subject_id}》作品更新",
+            filters=filters,
+            schedule=schedule,
+            channels=req.channels,
+        ))
+    else:
+        rule = app.state.subscription_store.create(CreateSubscriptionRuleRequest(
+            kind="anime_follow",
+            title=f"《{req.title or subject_id}》作品更新",
+            filters=filters,
+            schedule=schedule,
+            channels=req.channels,
+            template="normal",
+        ), owner_key=owner, username=username)
+    return {"ok": True, "data": rule.model_dump(mode="json", exclude={"owner_key"}) if rule else None}
+
+
+@app.delete("/product/subjects/{subject_id}/follow")
+async def delete_product_anime_follow(
+    subject_id: int, request: Request, response: Response,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    owner, username = _subscription_owner(session.auth_session_id)
+    _check_subscription_limits(request, username)
+    rule = _anime_follow_rule(owner, subject_id)
+    if not rule:
+        return {"ok": True, "deleted": False}
+    return {"ok": True, "deleted": app.state.subscription_store.delete(rule.id, owner)}
 
 
 @app.get("/product/search")

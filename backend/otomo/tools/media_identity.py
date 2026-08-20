@@ -23,9 +23,13 @@ class MediaIdentity(BaseModel):
     title: str
     aliases: list[str] = Field(default_factory=list)
     platform: str = ""
+    air_date: str = ""
+    end_date: str = ""
+    year: int | None = None
     installment: int | None = None
     media_kind: MediaKind = "unknown"
     episode_count: int | None = None
+    version_markers: list[str] = Field(default_factory=list)
 
 
 class MediaScopeAssessment(BaseModel):
@@ -51,6 +55,37 @@ _ANCILLARY_ASCII_TOKENS = (
     "live event", "concert", "live cd", "music history", "soundtrack", "original soundtrack",
     "ost", "drama cd", "booklet", "scan", "game soundtrack", "game",
 )
+
+
+def _infobox_value(raw: dict[str, Any], keys: set[str]) -> str:
+    for row in raw.get("infobox") or []:
+        if not isinstance(row, dict) or str(row.get("key") or "").strip() not in keys:
+            continue
+        value = row.get("value")
+        if isinstance(value, list):
+            values = [str(item.get("v") if isinstance(item, dict) else item).strip() for item in value]
+            return " / ".join(item for item in values if item)
+        return str(value or "").strip()
+    return ""
+
+
+def _year(value: str) -> int | None:
+    match = re.search(r"(?:19|20)\d{2}", value or "")
+    return int(match.group(0)) if match else None
+
+
+def _version_markers(values: list[str], year: int | None) -> list[str]:
+    text = " ".join(values).lower()
+    markers: list[str] = []
+    if any(token in text for token in ("重制", "リメイク", "remake", "新版", "新作版")):
+        markers.append("remake")
+    if any(token in text for token in ("总集篇", "總集篇", "総集編", "recap")):
+        markers.append("recap")
+    if any(token in text for token in ("part 2", "part2", "后篇", "後篇", "下篇")):
+        markers.append("part_2")
+    if year:
+        markers.append(str(year))
+    return list(dict.fromkeys(markers))
 
 
 def _chinese_number(value: str) -> int | None:
@@ -141,6 +176,9 @@ def media_identity_from_subject(raw: dict[str, Any], *, fallback_title: str = ""
     if title and title not in aliases:
         aliases.insert(0, title)
     platform = str(raw.get("platform") or "")
+    air_date = str(raw.get("date") or "")
+    end_date = _infobox_value(raw, {"播放结束", "放送结束", "上映结束", "发售日", "発売日"})
+    year = _year(air_date)
     installments = _installments(" ".join([*aliases, platform]))
     try:
         episode_count = int(raw.get("eps") or 0) or None
@@ -151,9 +189,13 @@ def media_identity_from_subject(raw: dict[str, Any], *, fallback_title: str = ""
         title=title,
         aliases=aliases,
         platform=platform,
+        air_date=air_date,
+        end_date=end_date,
+        year=year,
         installment=installments[0] if len(installments) == 1 else None,
         media_kind=_media_kind(" ".join(aliases), platform),
         episode_count=episode_count,
+        version_markers=_version_markers([*aliases, platform], year),
     )
 
 
@@ -163,6 +205,8 @@ def build_media_identity(
     aliases: list[str] | None = None,
     subject_id: int | None = None,
     platform: str = "",
+    air_date: str = "",
+    end_date: str = "",
     episode_count: int | None = None,
 ) -> MediaIdentity:
     values = list(dict.fromkeys(x.strip() for x in [title, *(aliases or [])] if x.strip()))
@@ -172,9 +216,13 @@ def build_media_identity(
         title=title,
         aliases=values,
         platform=platform,
+        air_date=air_date,
+        end_date=end_date,
+        year=_year(air_date),
         installment=installments[0] if len(installments) == 1 else None,
         media_kind=_media_kind(" ".join(values), platform),
         episode_count=episode_count,
+        version_markers=_version_markers([*values, platform], _year(air_date)),
     )
 
 
@@ -194,6 +242,7 @@ def assess_media_scope(
     )
     installments = _installments(candidate)
     kind = _media_kind(candidate)
+    candidate_year = _year(candidate)
     lower = candidate.lower()
     has_bundle_token = any(token in lower for token in _BUNDLE_TOKENS)
     collection_word = any(token in lower for token in ("合集", "合輯", "collection"))
@@ -231,6 +280,14 @@ def assess_media_scope(
         return MediaScopeAssessment(
             status="unknown",
             reason="标题未与当前条目的任一别名可靠对齐",
+            candidate_installments=installments,
+            candidate_kind=kind,
+        )
+    if identity.year and candidate_year and identity.year != candidate_year:
+        return MediaScopeAssessment(
+            status="conflict",
+            reason=f"候选标注 {candidate_year} 年，与当前 {identity.year} 年版本不一致",
+            title_matched=True,
             candidate_installments=installments,
             candidate_kind=kind,
         )

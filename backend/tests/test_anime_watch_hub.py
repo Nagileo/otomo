@@ -4,6 +4,7 @@ import pytest
 
 from otomo.agent._common import _safe_anime_watch_hub_payload
 from otomo.agent.contracts import ToolResult
+from otomo.recommendation_cache import RecommendationArtifactCache
 from otomo.tools.product_loop.tool import AnimeWatchHubArgs, AnimeWatchHubTool, _duration_minutes
 from otomo.tools.release.tool import AnimeReleaseFeedsResult
 from otomo.tools.videos.tool import (
@@ -19,6 +20,51 @@ from otomo.tools.videos.tool import (
     classify_subject_video,
 )
 from otomo.tools.watch.tool import WatchSource, WhereToWatchResult
+
+
+@pytest.mark.asyncio
+async def test_watch_hub_identity_cache_is_reused_across_tool_instances(tmp_path) -> None:
+    class FakeClient:
+        calls = 0
+
+        async def get_subject(self, subject_id: int):
+            self.calls += 1
+            return {
+                "id": subject_id,
+                "type": 2,
+                "name": "Test Anime",
+                "name_cn": "测试动画",
+                "date": "2026-07-01",
+                "platform": "TV",
+                "images": {},
+            }
+
+    client = FakeClient()
+    cache = RecommendationArtifactCache(str(tmp_path / "hub-cache.sqlite3"), ttl=3600)
+    first = await AnimeWatchHubTool(client, artifact_cache=cache).run(
+        AnimeWatchHubArgs(subject_id=42, stage="identity")
+    )
+    second = await AnimeWatchHubTool(client, artifact_cache=cache).run(
+        AnimeWatchHubArgs(subject_id=42, stage="identity")
+    )
+    assert first.ok and second.ok
+    assert client.calls == 1
+    assert second.data is not None
+    assert second.data.modules["identity"].cache_hit is True
+
+
+@pytest.mark.asyncio
+async def test_identity_stage_returns_non_anime_subject_for_frontend_routing() -> None:
+    class FakeClient:
+        async def get_subject(self, subject_id: int):
+            return {"id": subject_id, "type": 1, "name": "Test Book", "name_cn": "测试漫画"}
+
+    result = await AnimeWatchHubTool(FakeClient()).run(
+        AnimeWatchHubArgs(subject_id=7, stage="identity")
+    )
+    assert result.ok and result.data is not None
+    assert result.data.subject["type_name"] == "book"
+    assert result.data.modules["identity"].status == "ready"
 
 
 def test_long_public_episode_is_watchable_without_staff_name_match() -> None:

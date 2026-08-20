@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     today_store_path: str = "cache/today_preferences.sqlite3"
     recommendation_event_store_path: str = "cache/recommendation_events.sqlite3"
     recommendation_artifact_cache_path: str = "cache/recommendation_artifacts.sqlite3"
+    anime_hub_cache_path: str = "cache/anime_hub_artifacts.sqlite3"
+    anime_hub_cache_ttl: float = 60 * 60 * 24 * 3
+    anime_hub_metrics_path: str = "cache/anime_hub_metrics.sqlite3"
     recommendation_review_cache_ttl: float = 60 * 60 * 24 * 7
     # 推荐排序实验按“用户 + 媒介”稳定分桶；关闭时所有请求都走 control。
     recommendation_experiment_enabled: bool = True

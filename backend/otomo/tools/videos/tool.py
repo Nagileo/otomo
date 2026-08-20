@@ -78,6 +78,11 @@ class BiliSubjectVideosArgs(BaseModel):
     expected_episode_minutes: float | None = Field(None, gt=0, le=300, description="Bangumi 条目给出的单集/影片时长，用于识别短篇与排除残缺正片")
     subject_platform: str = Field("", description="Bangumi 条目的媒介形态，如 TV/Web/剧场版；用于排除跨篇章误配")
     lifecycle: Literal["upcoming", "airing", "recent", "archive", "unknown"] = "unknown"
+    lifecycle_phase: str = Field("", description="更细的媒介生命周期，如 theatrical/awaiting_bd")
+    media_kind: Literal["tv", "web", "movie", "ova", "unknown"] = "unknown"
+    preferred_uploaders: list[str] = Field(default_factory=list, description="用户明确偏好的 UP")
+    muted_uploaders: list[str] = Field(default_factory=list, description="用户明确减少推荐的 UP")
+    hidden_video_ids: list[str] = Field(default_factory=list, description="用户标记不相关的视频")
     limit: int = Field(5, ge=1, le=10)
 
 
@@ -232,6 +237,10 @@ class BiliSubjectVideoMeta(BiliVideoMeta):
     episode_coverage: str = ""
     copyright_declaration: Literal["original", "repost", "unknown"] = "unknown"
     rights_status: Literal["uploader_rights_unknown"] = "uploader_rights_unknown"
+    editorial_role: Literal[
+        "watch", "official", "no_spoiler_review", "review", "deep_analysis", "recap", "fan", "related"
+    ] = "related"
+    spoiler_risk: Literal["none", "low", "medium", "high", "unknown"] = "unknown"
     caution: str = ""
 
 
@@ -901,6 +910,30 @@ def classify_subject_video(
     if fan:
         return "fan_creation", "creator" if uploader_class == "unknown" else uploader_class, False, identity_evidence, content_evidence, "二创内容不是正片播放入口。"
     return "related", uploader_class, False, identity_evidence, content_evidence, "相关性依据标题和稿件详情，打开后仍应核对内容。"
+
+
+def _editorial_role(
+    title: str, role: str,
+) -> tuple[
+    Literal["watch", "official", "no_spoiler_review", "review", "deep_analysis", "recap", "fan", "related"],
+    Literal["none", "low", "medium", "high", "unknown"],
+]:
+    lower = title.lower()
+    if role in {"public_full_episode", "episode_candidate"}:
+        return "watch", "high"
+    if role == "official_pv":
+        return "official", "none"
+    if role == "fan_creation":
+        return "fan", "unknown"
+    if role == "retrospective":
+        return "recap", "high"
+    if role == "review":
+        if any(token in lower for token in ("无剧透", "無劇透", "不剧透", "不劇透", "初印象", "值不值得", "是否值得", "追不追")):
+            return "no_spoiler_review", "low"
+        if any(token in lower for token in ("作画", "作畫", "制作", "製作", "演出", "分镜", "分鏡", "脚本", "劇本", "深度", "考据", "考據", "解析")):
+            return "deep_analysis", "medium"
+        return "review", "medium"
+    return "related", "unknown"
 
 
 def _season_end(start: datetime) -> datetime:
@@ -2115,7 +2148,16 @@ class SearchBiliSubjectVideosTool(Tool):
         version_conflicts: list[BiliVersionConflict] = []
         search_failures: list[str] = []
 
-        if args.lifecycle == "upcoming":
+        if args.media_kind == "movie":
+            if args.lifecycle == "upcoming":
+                suffixes = ("正式 PV", "上映 前瞻", "制作情报", "无剧透")
+            elif args.lifecycle_phase in {"theatrical", "awaiting_streaming", "awaiting_bd"}:
+                suffixes = ("上映", "无剧透 影评", "制作解析", "流媒体", "BD")
+            else:
+                suffixes = ("完整版", "回顾", "制作解析", "影评")
+        elif args.media_kind == "ova":
+            suffixes = ("正片", "OVA", "制作解析", "回顾")
+        elif args.lifecycle == "upcoming":
             suffixes = ("官方 PV", "预告", "前瞻", "漫评")
         elif args.lifecycle == "airing":
             suffixes = ("正片", "第1话", "首集 漫评", "PV")
@@ -2150,12 +2192,17 @@ class SearchBiliSubjectVideosTool(Tool):
         search_partial = len([payload for payload in payloads if payload]) < len(variants)
         seen: set[str] = set()
         candidates: list[tuple[float, str, dict]] = []
+        hidden_ids = {str(value).lower() for value in args.hidden_video_ids if str(value).strip()}
+        muted_uploaders = {value.strip().lower() for value in args.muted_uploaders if value.strip()}
+        preferred_uploaders = {value.strip().lower() for value in args.preferred_uploaders if value.strip()}
         for payload in payloads:
             if not payload:
                 continue
             for raw in ((payload.get("data") or {}).get("result") or []):
                 key = str(raw.get("bvid") or raw.get("aid") or raw.get("id") or raw.get("arcurl") or "")
                 if not key or key in seen:
+                    continue
+                if key.lower() in hidden_ids or str(raw.get("author") or "").strip().lower() in muted_uploaders:
                     continue
                 seen.add(key)
                 confidence, reason = _hit_relevance(
@@ -2329,6 +2376,7 @@ class SearchBiliSubjectVideosTool(Tool):
                     "duration_seconds": max(int(page.get("duration") or 0), 0) or None,
                 })
             content_type, content_type_reason = classify_season_video(title, raw.get("pubdate"), query)
+            editorial_role, spoiler_risk = _editorial_role(title, role)
             item = BiliSubjectVideoMeta(
                 title=title,
                 url=url,
@@ -2358,9 +2406,12 @@ class SearchBiliSubjectVideosTool(Tool):
                 page_links=page_links[:100],
                 episode_coverage=_episode_coverage(title, page_titles),
                 copyright_declaration="repost" if copyright_code == 2 else "original" if copyright_code == 1 else "unknown",
+                editorial_role=editorial_role,
+                spoiler_risk=spoiler_risk,
                 caution=caution,
             )
-            ranked.append((confidence + role_bonus[role], item))
+            preference_bonus = 0.18 if author.strip().lower() in preferred_uploaders else 0.0
+            ranked.append((confidence + role_bonus[role] + preference_bonus, item))
         ranked.sort(key=lambda row: (-row[0], -(row[1].pubdate or 0)))
 
         # Transcript/ASR is intentionally reserved for at most two top boundary
@@ -2404,6 +2455,8 @@ class SearchBiliSubjectVideosTool(Tool):
             item.transcript_source = "subtitle" if subtitle_result.data.source == "bili_public_subtitle" else "asr"
             if len(narration_signals) >= 2:
                 item.role = "retrospective"
+                item.editorial_role = "recap"
+                item.spoiler_risk = "high"
                 item.watch_candidate = False
                 if item.uploader_class == "unknown":
                     item.uploader_class = "creator"
@@ -2426,7 +2479,9 @@ class SearchBiliSubjectVideosTool(Tool):
             if downgraded_count:
                 warnings.append(f"其中 {downgraded_count} 个命中连续UP口播/剧情讲解信号，已从正片入口降级。")
 
-        # Prefer several editorial roles over five near-identical review videos.
+        # Build an editorial set rather than returning five near-identical
+        # reviews. One item per useful role is chosen first; remaining slots
+        # are filled by score under per-role safety limits.
         role_limits = {
             "public_full_episode": 3,
             "official_pv": 1,
@@ -2437,7 +2492,32 @@ class SearchBiliSubjectVideosTool(Tool):
         }
         selected: list[BiliSubjectVideoMeta] = []
         role_counts: dict[str, int] = {}
+        editorial_order = (
+            ["official", "no_spoiler_review", "deep_analysis", "review", "fan"]
+            if args.lifecycle == "upcoming"
+            else ["watch", "no_spoiler_review", "deep_analysis", "official", "recap", "review"]
+            if args.lifecycle == "airing"
+            else ["watch", "recap", "deep_analysis", "no_spoiler_review", "official", "review"]
+        )
+        for wanted in editorial_order:
+            match = next(
+                (
+                    item for _score, item in ranked
+                    if item.editorial_role == wanted
+                    and item not in selected
+                    and role_counts.get(item.role, 0) < role_limits.get(item.role, 0)
+                ),
+                None,
+            )
+            if match is None:
+                continue
+            selected.append(match)
+            role_counts[match.role] = role_counts.get(match.role, 0) + 1
+            if len(selected) >= args.limit:
+                break
         for _score, item in ranked:
+            if item in selected:
+                continue
             if role_counts.get(item.role, 0) >= role_limits.get(item.role, 0):
                 continue
             selected.append(item)

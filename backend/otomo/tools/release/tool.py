@@ -6,6 +6,7 @@ download, host, seed, or play any release content.
 from __future__ import annotations
 
 import asyncio
+from datetime import date
 from difflib import SequenceMatcher
 from email.utils import parsedate_to_datetime
 import html as html_lib
@@ -74,6 +75,10 @@ class ReleaseItem(BaseModel):
     pub_date: str = ""
     subgroup: str = ""
     quality: str = "tv"
+    resolution: str = ""
+    subtitle: str = ""
+    episode_label: str = ""
+    release_kind: Literal["episode", "batch", "bd", "movie", "unknown"] = "unknown"
     note: str = ""
     scope_status: Literal["exact", "compatible", "bundle", "conflict", "unknown"] = "unknown"
     scope_reason: str = ""
@@ -102,6 +107,10 @@ class AnimeReleaseFeedsArgs(BaseModel):
         description="auto/mikan/bt/bd/archive；老番补番用 archive，同时查番组 RSS、BT 合集与 BD 入口",
     )
     subgroup_filter: str = Field("", description="可选字幕组过滤，如 喵萌")
+    preferred_subgroups: list[str] = Field(default_factory=list, description="优先排序的字幕组，不会隐藏其他结果")
+    quality_filter: str = Field("", description="可选画质过滤，如 1080p/2160p/BD")
+    subtitle_filter: str = Field("", description="可选字幕过滤，如 简中/繁中/双语")
+    disabled_sources: list[str] = Field(default_factory=list, description="用户明确关闭的资源来源")
     limit: int = Field(12, ge=1, le=30)
 
 
@@ -319,6 +328,72 @@ def _quality(title: str) -> str:
     return "tv"
 
 
+def _resolution(title: str) -> str:
+    lower = title.lower()
+    if "2160" in lower or "4k" in lower:
+        return "2160p"
+    if "1080" in lower:
+        return "1080p"
+    if "720" in lower:
+        return "720p"
+    return ""
+
+
+def _subtitle(title: str) -> str:
+    lower = title.lower()
+    simple = any(token in lower for token in ("简中", "简体")) or bool(
+        re.search(r"(?<![a-z])(?:chs|sc)(?![a-z])", lower)
+    )
+    traditional = any(token in lower for token in ("繁中", "繁体")) or bool(
+        re.search(r"(?<![a-z])(?:cht|tc)(?![a-z])", lower)
+    )
+    bilingual = any(token in lower for token in ("双语", "雙語", "bilingual"))
+    if bilingual or (simple and traditional):
+        return "简繁/双语"
+    if simple:
+        return "简中"
+    if traditional:
+        return "繁中"
+    return ""
+
+
+def _episode_label(title: str) -> str:
+    lower = title.lower()
+    if any(token in lower for token in ("全集", "合集", "complete", "batch")):
+        return "全集/合集"
+    range_match = re.search(r"(?<!\d)(\d{1,3})\s*[-~～–—]\s*(\d{1,3})(?!\d)", title)
+    if range_match:
+        start, end = int(range_match.group(1)), int(range_match.group(2))
+        if 0 < start <= end <= 200:
+            return f"第 {start}–{end} 集"
+    explicit = re.search(
+        r"(?:\b(?:ep(?:isode)?|e)\s*|第\s*)(\d{1,3}(?:\.\d)?)(?:\s*[话話集])?",
+        lower,
+    )
+    if explicit and 0 < float(explicit.group(1)) <= 200:
+        return f"第 {explicit.group(1)} 集"
+    separator = re.search(r"\s[-–—]\s*0*(\d{1,3})(?:v\d+)?(?=\s|\[|\(|$)", lower)
+    if separator and 0 < int(separator.group(1)) <= 200:
+        return f"第 {separator.group(1)} 集"
+    bracket = re.search(r"[\[(【]\s*0*(\d{1,3})(?:v\d+)?\s*[\])】]", lower)
+    if bracket and 0 < int(bracket.group(1)) <= 200:
+        return f"第 {bracket.group(1)} 集"
+    return ""
+
+
+def _release_kind(title: str, quality: str) -> Literal["episode", "batch", "bd", "movie", "unknown"]:
+    lower = title.lower()
+    if quality == "bd":
+        return "bd"
+    if any(token in lower for token in ("剧场版", "劇場版", "movie", "电影版", "電影版")):
+        return "movie"
+    if any(token in lower for token in ("全集", "合集", "complete", "batch")):
+        return "batch"
+    if _episode_label(title):
+        return "episode"
+    return "unknown"
+
+
 def _iso_pub(value: str | None) -> str:
     text = str(value or "").strip()
     if not text:
@@ -363,6 +438,7 @@ def _parse_rss(xml: str, source: str) -> list[ReleaseItem]:
                 size = None
         if not torrent_url:
             torrent_url = item.findtext("torrent:link", namespaces=_TORRENT_NS) or ""
+        quality = _quality(title)
         rows.append(
             ReleaseItem(
                 title=title,
@@ -373,7 +449,11 @@ def _parse_rss(xml: str, source: str) -> list[ReleaseItem]:
                 size_bytes=size,
                 pub_date=pub,
                 subgroup=_subgroup(title),
-                quality=_quality(title),
+                quality=quality,
+                resolution=_resolution(title),
+                subtitle=_subtitle(title),
+                episode_label=_episode_label(title),
+                release_kind=_release_kind(title, quality),
             )
         )
     return rows
@@ -389,6 +469,18 @@ def _filter_items(items: list[ReleaseItem], subgroup_filter: str, limit: int) ->
         items = [x for x in items if key in x.subgroup.lower() or key in x.title.lower()]
     items.sort(key=lambda x: x.pub_date, reverse=True)
     return items[:limit]
+
+
+def _apply_user_filters(
+    items: list[ReleaseItem], *, quality: str = "", subtitle: str = "",
+) -> list[ReleaseItem]:
+    quality_key = quality.strip().lower()
+    subtitle_key = subtitle.strip().lower()
+    if quality_key:
+        items = [item for item in items if quality_key in f"{item.quality} {item.resolution} {item.title}".lower()]
+    if subtitle_key:
+        items = [item for item in items if subtitle_key in f"{item.subtitle} {item.title}".lower()]
+    return items
 
 
 def _group_items(items: list[ReleaseItem], source: str, rss_url: str) -> list[ReleaseGroup]:
@@ -497,6 +589,12 @@ def _scope_release_items(
     primary: list[ReleaseItem] = []
     related: list[ReleaseItem] = []
     for item in items:
+        content_mismatch = _release_content_mismatch(item.title, identity)
+        if content_mismatch:
+            item.scope_status = "conflict"
+            item.scope_reason = content_mismatch
+            related.append(item)
+            continue
         scope = assess_media_scope(identity, item.title)
         item.scope_status = scope.status
         item.scope_reason = scope.reason
@@ -505,6 +603,55 @@ def _scope_release_items(
         else:
             related.append(item)
     return primary, related
+
+
+def _release_content_mismatch(title: str, identity: MediaIdentity) -> str:
+    """Reject same-title releases that are clearly not the anime itself.
+
+    BT/RSS search engines match title tokens only, so an exact anime title can
+    still return manga collections, OSTs, drama CDs or concerts. Remove known
+    work aliases first so canonical titles containing a media word are safe.
+    """
+    payload = title.lower()
+    aliases = {identity.title, *identity.aliases}
+    for alias in sorted((value.strip() for value in aliases if value.strip()), key=len, reverse=True):
+        payload = re.sub(re.escape(alias.lower()), " ", payload, flags=re.IGNORECASE)
+
+    comic_markers = (
+        "漫画合集", "漫畫合集", "漫画版", "漫畫版", "电子书", "電子書",
+        "manga", "comic collection", "digital comic", "epub", "mobi",
+    )
+    if any(marker in payload for marker in comic_markers):
+        return "标题指向漫画或电子书，不是这部动画的正片资源。"
+
+    audio_markers = (
+        "音乐合集", "音樂合集", "音乐专辑", "音樂專輯", "音乐集", "音樂集",
+        "原声集", "原聲集", "原声带", "原聲帶", "角色歌", "广播剧", "廣播劇",
+        "drama cd", "character song", "soundtrack", "discography", "ost collection",
+        "cd合集", "cd 合集", "专辑", "專輯",
+    )
+    if any(marker in payload for marker in audio_markers):
+        return "标题指向音乐、原声或广播剧，不是这部动画的正片资源。"
+
+    live_markers = ("演唱会", "演唱會", "live event", "concert")
+    if any(marker in payload for marker in live_markers):
+        return "标题指向演唱会或现场活动，不是这部动画的正片资源。"
+
+    # Codec/resolution tokens are positive video evidence. Lossless-audio
+    # tokens alone otherwise indicate a CD rip rather than an anime encode.
+    video_evidence = any(
+        marker in payload
+        for marker in (
+            "1080", "2160", "720p", "bdrip", "bdmv", "webrip", "web-dl",
+            "x264", "x265", "h264", "h265", "hevc", "avc", ".mkv", ".mp4",
+        )
+    )
+    audio_only_evidence = any(
+        marker in payload for marker in ("无损", "無損", "flac", " ape", "wav", "mp3", "hi-res", "hires")
+    )
+    if audio_only_evidence and not video_evidence:
+        return "标题只提供无损音频信息，无法确认包含动画正片。"
+    return ""
 
 
 class GetAnimeReleaseFeedsTool(Tool):
@@ -530,9 +677,17 @@ class GetAnimeReleaseFeedsTool(Tool):
         related_items: list[ReleaseItem] = []
         mikan_ids: list[int] = []
         mapping_confidence = 0.0
+        disabled_sources = {source.strip().lower() for source in args.disabled_sources if source.strip()}
+        try:
+            upcoming = bool(identity.air_date and date.fromisoformat(identity.air_date[:10]) > date.today())
+        except ValueError:
+            upcoming = False
+        one_shot = identity.media_kind in {"movie", "ova"}
         await emit_tool_progress(tool=self.name, summary="读取 Mikan 映射与 RSS", current=2, total=4)
         search_matched = ""
-        if args.prefer in {"auto", "mikan", "archive"}:
+        if args.prefer in {"auto", "mikan", "archive"} and "mikan" not in disabled_sources and not (
+            identity.media_kind == "movie"
+        ):
             try:
                 if subject_id:
                     mapping = await load_mikan_mapping()
@@ -553,9 +708,11 @@ class GetAnimeReleaseFeedsTool(Tool):
                     if isinstance(rows, BaseException):
                         continue
                     rss_url = _MIKAN_RSS.format(id=mid)
-                    scoped, related = _scope_release_items(
-                        _filter_items(rows, args.subgroup_filter, min(args.limit * 3, 60)), identity,
+                    filtered = _apply_user_filters(
+                        _filter_items(rows, args.subgroup_filter, min(args.limit * 3, 60)),
+                        quality=args.quality_filter, subtitle=args.subtitle_filter,
                     )
+                    scoped, related = _scope_release_items(filtered, identity)
                     items = scoped[: args.limit]
                     related_items.extend(related)
                     groups.extend(_group_items(items, "mikan", rss_url))
@@ -567,9 +724,11 @@ class GetAnimeReleaseFeedsTool(Tool):
                     # 第三级：番组页还没建（新番常见）但站内已有发布记录 → 搜索 RSS
                     search_rss_url = _MIKAN_SEARCH_RSS.format(q=q)
                     rows = await fetch_release_items_from_url(search_rss_url, "mikan")
-                    scoped, related = _scope_release_items(
-                        _filter_items(rows, args.subgroup_filter, min(args.limit * 3, 60)), identity,
+                    filtered = _apply_user_filters(
+                        _filter_items(rows, args.subgroup_filter, min(args.limit * 3, 60)),
+                        quality=args.quality_filter, subtitle=args.subtitle_filter,
                     )
+                    scoped, related = _scope_release_items(filtered, identity)
                     items = scoped[: args.limit]
                     related_items.extend(related)
                     if items:
@@ -579,7 +738,9 @@ class GetAnimeReleaseFeedsTool(Tool):
             except Exception:  # noqa: BLE001
                 mapping_confidence = mapping_confidence or 0.0
         await emit_tool_progress(tool=self.name, summary="读取 DMHY / ACGNX RSS 兜底", current=3, total=4)
-        if args.prefer in {"auto", "bt", "bd", "archive"} or not groups:
+        if (args.prefer in {"auto", "bt", "bd", "archive"} or not groups) and not (
+            one_shot and upcoming
+        ):
             # BD 收藏意图：VCB-Studio 的发布本来就走 dmhy/acgnx 等 BT 站（2026-07-05 实测
             # acgnx 搜 "VCB K-ON" 直接命中），带前缀检索即可磁力直出；无果再退 BDRip 通用词。
             bt_queries = (
@@ -590,18 +751,22 @@ class GetAnimeReleaseFeedsTool(Tool):
             for bt_query in bt_queries:
                 bt_q = quote(bt_query)
                 for source, url in (("dmhy", _DMHY_RSS.format(q=bt_q)), ("acgnx", _ACGNX_RSS.format(q=bt_q))):
+                    if source in disabled_sources:
+                        continue
                     try:
                         rows = await fetch_release_items_from_url(url, source)
                     except Exception:  # noqa: BLE001
                         continue
-                    scoped, related = _scope_release_items(
-                        _filter_items(rows, args.subgroup_filter, min(args.limit * 3, 60)), identity,
+                    filtered = _apply_user_filters(
+                        _filter_items(rows, args.subgroup_filter, min(args.limit * 3, 60)),
+                        quality=args.quality_filter, subtitle=args.subtitle_filter,
                     )
+                    scoped, related = _scope_release_items(filtered, identity)
                     fallback_items.extend(scoped[: args.limit])
                     related_items.extend(related)
                 if fallback_items:
                     break
-        if args.prefer in {"bd", "archive"}:
+        if args.prefer in {"bd", "archive"} and "vcb" not in disabled_sources and not upcoming:
             vcb_q = quote(f"VCB-Studio {title}")
             groups.append(
                 ReleaseGroup(
@@ -628,6 +793,7 @@ class GetAnimeReleaseFeedsTool(Tool):
             ReleaseSearchLink(label="末日资源库搜索", url=_ACGNX_SEARCH.format(q=q), source="acgnx", note="BT/RSS 兜底"),
             ReleaseSearchLink(label="VCB-Studio 搜索", url=_VCB_SEARCH.format(q=quote(title)), source="vcb", note="BD/收藏版入口"),
         ]
+        search_links = [link for link in search_links if link.source.lower() not in disabled_sources]
         # dmhy 与 acgnx 内容高度重叠（互相搬运），按磁力 btih / 标题去重
         deduped: dict[str, ReleaseItem] = {}
         seen_titles: set[str] = set()
@@ -645,6 +811,15 @@ class GetAnimeReleaseFeedsTool(Tool):
             key = _norm_cmp(item.title) or f"{item.source}:{item.page_url}:{item.magnet}"
             related_deduped.setdefault(key, item)
         related_items = sorted(related_deduped.values(), key=lambda x: x.pub_date, reverse=True)
+        preferred_subgroups = [value.strip().lower() for value in args.preferred_subgroups if value.strip()]
+
+        def subgroup_preference(value: str) -> int:
+            normalized = value.lower()
+            return next((index for index, key in enumerate(preferred_subgroups) if key in normalized), len(preferred_subgroups))
+
+        if preferred_subgroups:
+            groups.sort(key=lambda group: (subgroup_preference(group.subgroup), group.subgroup))
+            fallback_items.sort(key=lambda item: subgroup_preference(f"{item.subgroup} {item.title}"))
         filtered_count = len(related_items)
         await emit_tool_progress(tool=self.name, summary=f"资源聚合完成：{len(groups)} 组 / {len(fallback_items)} 条兜底", current=4, total=4)
         result = AnimeReleaseFeedsResult(
@@ -661,9 +836,12 @@ class GetAnimeReleaseFeedsTool(Tool):
             caveats=[
                 "Otomo 只聚合公开 RSS/搜索链接，不代理、不下载、不托管、不播放任何资源内容。",
                 "字幕组标题和资源质量来自 RSS 标题启发式解析，最终以源站页面为准。",
+                *(["该条目是尚未上映的一次性作品；当前不抓取伪装成可用资源的 RSS/BT 候选。"] if one_shot and upcoming else []),
+                *(["剧场版不按周更番组 RSS 处理；优先展示上映/流媒体状态，BD 发布后再进入离线入口。"] if identity.media_kind == "movie" else []),
+                *([f"已按你的设置关闭来源：{'、'.join(sorted(disabled_sources))}。"] if disabled_sources else []),
                 "BD/VCB-Studio 入口默认只给搜索链接；用户自行确认版权、地区和个人使用合规性。",
                 *(
-                    [f"已把 {filtered_count} 条跨季、剧场版、合集或身份不明的资源移到“相关篇章/需确认”，不会混入当前条目默认下载区。"]
+                    [f"已把 {filtered_count} 条跨季、剧场版、非动画内容、合集或身份不明的资源移到“相关篇章/需确认”，不会混入当前条目默认下载区。"]
                     if filtered_count else []
                 ),
                 *(
