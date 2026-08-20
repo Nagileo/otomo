@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     anime_hub_cache_path: str = "cache/anime_hub_artifacts.sqlite3"
     anime_hub_cache_ttl: float = 60 * 60 * 24 * 3
     anime_hub_metrics_path: str = "cache/anime_hub_metrics.sqlite3"
+    series_overrides_path: str = "cache/series_overrides.json"
     recommendation_review_cache_ttl: float = 60 * 60 * 24 * 7
     # 推荐排序实验按“用户 + 媒介”稳定分桶；关闭时所有请求都走 control。
     recommendation_experiment_enabled: bool = True
@@ -108,6 +109,12 @@ class Settings(BaseSettings):
     weekly_webhook_timeout: float = 8.0
     subscription_scheduler_enabled: bool = False
     subscription_scheduler_interval_seconds: int = 900
+    subscription_scheduler_max_concurrency: int = 4
+    subscription_lease_seconds: int = 3600
+    subscription_lease_heartbeat_seconds: int = 30
+    subscription_worker_stale_seconds: int = 120
+    subscription_failure_backoff_base_seconds: int = 60
+    subscription_failure_backoff_max_seconds: int = 6 * 60 * 60
     rate_limit_enabled: bool = True
     rate_limit_chat_per_minute: int = 10
     rate_limit_chat_per_hour: int = 30

@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import asyncio
 from calendar import monthrange
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 import hashlib
 import json
+import os
 import secrets
 import sqlite3
 from pathlib import Path
+import socket
 from typing import Any, Callable, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -89,6 +91,10 @@ class SubscriptionRule(BaseModel):
     quiet_hours: QuietHours = Field(default_factory=QuietHours)
     last_run_at: str = ""
     last_hit_key: str = ""
+    consecutive_failures: int = 0
+    retry_after: str = ""
+    last_error: str = ""
+    last_success_at: str = ""
     created_at: str = ""
     updated_at: str = ""
 
@@ -203,11 +209,27 @@ class SubscriptionStore:
                     quiet_hours_json TEXT NOT NULL DEFAULT '{}',
                     last_run_at TEXT NOT NULL DEFAULT '',
                     last_hit_key TEXT NOT NULL DEFAULT '',
+                    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                    retry_after TEXT NOT NULL DEFAULT '',
+                    last_error TEXT NOT NULL DEFAULT '',
+                    last_success_at TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
                 """
             )
+            columns = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(subscription_rules)").fetchall()
+            }
+            migrations = {
+                "consecutive_failures": "INTEGER NOT NULL DEFAULT 0",
+                "retry_after": "TEXT NOT NULL DEFAULT ''",
+                "last_error": "TEXT NOT NULL DEFAULT ''",
+                "last_success_at": "TEXT NOT NULL DEFAULT ''",
+            }
+            for name, declaration in migrations.items():
+                if name not in columns:
+                    conn.execute(f"ALTER TABLE subscription_rules ADD COLUMN {name} {declaration}")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS webpush_subscriptions (
@@ -220,6 +242,33 @@ class SubscriptionStore:
                     user_agent TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS subscription_leases (
+                    rule_id TEXT NOT NULL,
+                    hit_key TEXT NOT NULL,
+                    owner_key TEXT NOT NULL,
+                    worker_id TEXT NOT NULL,
+                    leased_until TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(rule_id, hit_key)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS subscription_scheduler_state (
+                    worker_id TEXT PRIMARY KEY,
+                    started_at TEXT NOT NULL,
+                    heartbeat_at TEXT NOT NULL,
+                    last_cycle_at TEXT NOT NULL DEFAULT '',
+                    last_error TEXT NOT NULL DEFAULT '',
+                    processed_count INTEGER NOT NULL DEFAULT 0,
+                    active_rules INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
@@ -244,6 +293,7 @@ class SubscriptionStore:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_sub_rules_enabled ON subscription_rules(enabled, kind)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_sub_deliveries_rule ON subscription_deliveries(rule_id, created_at DESC)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_webpush_owner ON webpush_subscriptions(owner_key, updated_at DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_sub_leases_expiry ON subscription_leases(leased_until)")
 
     def upsert_webpush(
         self,
@@ -380,8 +430,8 @@ class SubscriptionStore:
                 INSERT INTO subscription_rules(
                     id,owner_key,username,kind,enabled,title,filters_json,schedule_json,channels_json,
                     template,webhook_format,webhook_url,email,quiet_hours_json,last_run_at,last_hit_key,
-                    created_at,updated_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    consecutive_failures,retry_after,last_error,last_success_at,created_at,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 _rule_values(rule),
             )
@@ -463,15 +513,183 @@ class SubscriptionStore:
         return bool(cur.rowcount)
 
     def touch_run(self, rule: SubscriptionRule, hit_key: str) -> SubscriptionRule:
+        return self.mark_success(rule, hit_key)
+
+    def mark_success(self, rule: SubscriptionRule, hit_key: str) -> SubscriptionRule:
         rule.last_run_at = now_iso()
         rule.last_hit_key = hit_key
+        rule.last_success_at = rule.last_run_at
+        rule.consecutive_failures = 0
+        rule.retry_after = ""
+        rule.last_error = ""
         rule.updated_at = rule.last_run_at
         with self._connect() as conn:
             conn.execute(
-                "UPDATE subscription_rules SET last_run_at=?, last_hit_key=?, updated_at=? WHERE id=?",
-                (rule.last_run_at, rule.last_hit_key, rule.updated_at, rule.id),
+                """
+                UPDATE subscription_rules SET
+                    last_run_at=?, last_hit_key=?, last_success_at=?, consecutive_failures=0,
+                    retry_after='', last_error='', updated_at=?
+                WHERE id=?
+                """,
+                (
+                    rule.last_run_at,
+                    rule.last_hit_key,
+                    rule.last_success_at,
+                    rule.updated_at,
+                    rule.id,
+                ),
             )
         return rule
+
+    def mark_failure(self, rule: SubscriptionRule, error: str) -> SubscriptionRule:
+        now = now_iso()
+        clean_error = error[:500]
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT consecutive_failures FROM subscription_rules WHERE id=?",
+                (rule.id,),
+            ).fetchone()
+            previous = int(row["consecutive_failures"] or 0) if row else rule.consecutive_failures
+            failures = min(previous + 1, 30)
+            delay = min(
+                max(1, settings.subscription_failure_backoff_base_seconds) * (2 ** (failures - 1)),
+                max(1, settings.subscription_failure_backoff_max_seconds),
+            )
+            retry_after = (
+                datetime.now(UTC) + timedelta(seconds=delay)
+            ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            conn.execute(
+                """
+                UPDATE subscription_rules SET
+                    consecutive_failures=?, retry_after=?, last_error=?, updated_at=?
+                WHERE id=?
+                """,
+                (failures, retry_after, clean_error, now, rule.id),
+            )
+        rule.consecutive_failures = failures
+        rule.retry_after = retry_after
+        rule.last_error = clean_error
+        rule.updated_at = now
+        return rule
+
+    def claim_lease(
+        self,
+        rule: SubscriptionRule,
+        hit_key: str,
+        worker_id: str,
+        *,
+        lease_seconds: int | None = None,
+    ) -> bool:
+        now = now_iso()
+        leased_until = (
+            datetime.now(UTC) + timedelta(seconds=max(30, lease_seconds or settings.subscription_lease_seconds))
+        ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("DELETE FROM subscription_leases WHERE leased_until<=?", (now,))
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO subscription_leases(
+                        rule_id,hit_key,owner_key,worker_id,leased_until,created_at,updated_at
+                    ) VALUES(?,?,?,?,?,?,?)
+                    """,
+                    (rule.id, hit_key, rule.owner_key, worker_id, leased_until, now, now),
+                )
+            except sqlite3.IntegrityError:
+                return False
+        return True
+
+    def renew_lease(self, rule_id: str, hit_key: str, worker_id: str) -> bool:
+        now = now_iso()
+        leased_until = (
+            datetime.now(UTC) + timedelta(seconds=max(30, settings.subscription_lease_seconds))
+        ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                UPDATE subscription_leases SET leased_until=?,updated_at=?
+                WHERE rule_id=? AND hit_key=? AND worker_id=?
+                """,
+                (leased_until, now, rule_id, hit_key, worker_id),
+            )
+        return bool(cur.rowcount)
+
+    def release_lease(self, rule_id: str, hit_key: str, worker_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM subscription_leases WHERE rule_id=? AND hit_key=? AND worker_id=?",
+                (rule_id, hit_key, worker_id),
+            )
+
+    def scheduler_heartbeat(
+        self,
+        worker_id: str,
+        *,
+        started_at: str,
+        last_cycle_at: str = "",
+        last_error: str = "",
+        processed_count: int = 0,
+        active_rules: int = 0,
+    ) -> None:
+        heartbeat = now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO subscription_scheduler_state(
+                    worker_id,started_at,heartbeat_at,last_cycle_at,last_error,processed_count,active_rules
+                ) VALUES(?,?,?,?,?,?,?)
+                ON CONFLICT(worker_id) DO UPDATE SET
+                    heartbeat_at=excluded.heartbeat_at,
+                    last_cycle_at=excluded.last_cycle_at,
+                    last_error=excluded.last_error,
+                    processed_count=excluded.processed_count,
+                    active_rules=excluded.active_rules
+                """,
+                (
+                    worker_id,
+                    started_at,
+                    heartbeat,
+                    last_cycle_at,
+                    last_error[:500],
+                    processed_count,
+                    active_rules,
+                ),
+            )
+
+    def scheduler_status(self) -> dict[str, Any]:
+        now = datetime.now(UTC)
+        with self._connect() as conn:
+            workers = [dict(row) for row in conn.execute(
+                "SELECT * FROM subscription_scheduler_state ORDER BY heartbeat_at DESC LIMIT 20"
+            ).fetchall()]
+            leases = [dict(row) for row in conn.execute(
+                "SELECT rule_id,hit_key,worker_id,leased_until FROM subscription_leases WHERE leased_until>?",
+                (now_iso(),),
+            ).fetchall()]
+            failed = [dict(row) for row in conn.execute(
+                """
+                SELECT id,title,kind,consecutive_failures,retry_after,last_error,last_success_at
+                FROM subscription_rules WHERE consecutive_failures>0
+                ORDER BY consecutive_failures DESC,updated_at DESC LIMIT 40
+                """
+            ).fetchall()]
+        stale_after = max(30, settings.subscription_worker_stale_seconds)
+        for worker in workers:
+            heartbeat = _parse_datetime(str(worker.get("heartbeat_at") or ""))
+            age = (now - heartbeat.astimezone(UTC)).total_seconds() if heartbeat else float("inf")
+            worker["heartbeat_age_seconds"] = round(age) if age != float("inf") else None
+            worker["healthy"] = age <= stale_after
+        return {
+            "enabled": settings.subscription_scheduler_enabled,
+            "healthy": bool(workers) and any(bool(row.get("healthy")) for row in workers)
+            if settings.subscription_scheduler_enabled else True,
+            "workers": workers,
+            "active_leases": leases,
+            "failed_rules": failed,
+            "max_concurrency": max(1, settings.subscription_scheduler_max_concurrency),
+        }
 
     def add_delivery(self, record: DeliveryRecord) -> DeliveryRecord:
         with self._connect() as conn:
@@ -523,19 +741,51 @@ class SubscriptionService:
         self.auth = auth
         self.client_factory = client_factory
         self._stop = asyncio.Event()
+        self.worker_id = (
+            f"{socket.gethostname()[:32]}:{os.getpid()}:{secrets.token_hex(4)}"
+        )
+        self.started_at = now_iso()
+        self._processed_count = 0
+        self._active_rules = 0
+        self._last_cycle_at = ""
+        self._last_error = ""
+
+    def _heartbeat(self) -> None:
+        self.store.scheduler_heartbeat(
+            self.worker_id,
+            started_at=self.started_at,
+            last_cycle_at=self._last_cycle_at,
+            last_error=self._last_error,
+            processed_count=self._processed_count,
+            active_rules=self._active_rules,
+        )
 
     async def stop(self) -> None:
         self._stop.set()
 
     async def run_due_once(self, now: datetime | None = None) -> int:
-        count = 0
-        for rule in self.store.list_enabled_rules():
-            if not is_rule_due(rule, now=now):
-                continue
-            record = await self.run_rule(rule, test=False, now=now)
-            if record.status == "sent":
-                count += 1
-        return count
+        due = [rule for rule in self.store.list_enabled_rules() if is_rule_due(rule, now=now)]
+        limit = max(1, settings.subscription_scheduler_max_concurrency)
+        semaphore = asyncio.Semaphore(limit)
+
+        async def run_one(rule: SubscriptionRule) -> DeliveryRecord:
+            async with semaphore:
+                return await self.run_rule(rule, test=False, now=now)
+
+        self._heartbeat()
+        results = await asyncio.gather(*(run_one(rule) for rule in due), return_exceptions=True)
+        self._processed_count += len(results)
+        self._last_cycle_at = now_iso()
+        errors = [result for result in results if isinstance(result, BaseException)]
+        self._last_error = (
+            "; ".join(f"{type(error).__name__}: {str(error)[:120]}" for error in errors[:4])
+            if errors else ""
+        )
+        self._heartbeat()
+        return sum(
+            1 for result in results
+            if isinstance(result, DeliveryRecord) and result.status == "sent"
+        )
 
     async def run_rule(
         self,
@@ -543,6 +793,7 @@ class SubscriptionService:
         *,
         test: bool = False,
         now: datetime | None = None,
+        force: bool = False,
     ) -> DeliveryRecord:
         if not test:
             rule = self.store.get(rule.id, rule.owner_key) or rule
@@ -551,13 +802,38 @@ class SubscriptionService:
         else:
             local_now = _localize(now, rule.schedule.timezone)
             hit_key = due_hit_key(rule, now=local_now) or f"manual-{rule.kind}-{local_now.date().isoformat()}"
-        if not test and hit_key and rule.last_hit_key == hit_key:
+        if not test and not force and hit_key and rule.last_hit_key == hit_key:
             return self._record(rule, hit_key, "skipped", title=rule.title, payload={"reason": "duplicate hit_key"})
+        if not test and not force and _retry_pending(rule, now=now):
+            return self._record(
+                rule,
+                hit_key,
+                "skipped",
+                title=rule.title,
+                payload={"reason": "failure backoff", "retry_after": rule.retry_after},
+            )
+        lease_stop: asyncio.Event | None = None
+        lease_task: asyncio.Task[None] | None = None
+        lease_claimed = False
+        if not test:
+            lease_claimed = self.store.claim_lease(rule, hit_key, self.worker_id)
+            if not lease_claimed:
+                return self._record(
+                    rule,
+                    hit_key,
+                    "skipped",
+                    title=rule.title,
+                    payload={"reason": "claimed by another worker"},
+                )
+            lease_stop = asyncio.Event()
+            lease_task = asyncio.create_task(self._keep_lease(rule.id, hit_key, lease_stop))
+            self._active_rules += 1
+            self._heartbeat()
         try:
             payload = await self._materialize(rule, test=test)
             if not _payload_has_content(payload):
                 if not test:
-                    self.store.touch_run(rule, hit_key)
+                    self.store.mark_success(rule, hit_key)
                 return self._record(rule, hit_key, "skipped", title=rule.title, payload={"reason": "empty payload", **payload})
             if not test and rule.kind in {"rss_release", "bili_up_video", "anime_follow"}:
                 fingerprint = _content_fingerprint(payload)
@@ -566,7 +842,7 @@ class SubscriptionService:
                     if record.status == "sent"
                 ), None)
                 if previous and previous.payload.get("_content_fingerprint") == fingerprint:
-                    self.store.touch_run(rule, hit_key)
+                    self.store.mark_success(rule, hit_key)
                     return self._record(
                         rule,
                         hit_key,
@@ -631,30 +907,76 @@ class SubscriptionService:
             failed = [row for row in deliveries if not row.get("ok")]
             if not succeeded:
                 detail = "; ".join(str(row.get("error") or row.get("channel")) for row in failed[:4])
+                if not test:
+                    self.store.mark_failure(rule, detail or "所有推送渠道均失败")
                 return self._record(
                     rule, hit_key, "failed", title=item.title, payload=item.payload,
                     deliveries=deliveries, error=detail or "所有推送渠道均失败",
                 )
             if not test:
-                self.store.touch_run(rule, hit_key)
+                self.store.mark_success(rule, hit_key)
             return self._record(
                 rule, hit_key, "sent", title=item.title, payload=item.payload,
                 deliveries=deliveries,
                 error=("部分渠道失败：" + "; ".join(str(x.get("channel")) for x in failed)) if failed else "",
             )
+        except asyncio.CancelledError:
+            raise
         except Exception as e:  # noqa: BLE001
-            return self._record(rule, hit_key, "failed", title=rule.title, error=f"{type(e).__name__}: {str(e)[:240]}")
+            error = f"{type(e).__name__}: {str(e)[:240]}"
+            if not test:
+                self.store.mark_failure(rule, error)
+            return self._record(rule, hit_key, "failed", title=rule.title, error=error)
+        finally:
+            if lease_claimed:
+                assert lease_stop is not None
+                lease_stop.set()
+                if lease_task is not None:
+                    try:
+                        await lease_task
+                    except asyncio.CancelledError:
+                        pass
+                self.store.release_lease(rule.id, hit_key, self.worker_id)
+                self._active_rules = max(0, self._active_rules - 1)
+                self._heartbeat()
+
+    async def _keep_lease(self, rule_id: str, hit_key: str, stop: asyncio.Event) -> None:
+        interval = max(5, min(
+            settings.subscription_lease_heartbeat_seconds,
+            max(10, settings.subscription_lease_seconds // 3),
+        ))
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=interval)
+            except TimeoutError:
+                if not self.store.renew_lease(rule_id, hit_key, self.worker_id):
+                    return
 
     async def run_forever(self) -> None:
         while not self._stop.is_set():
             try:
                 await self.run_due_once()
-            except Exception:  # noqa: BLE001
-                pass
-            try:
-                await asyncio.wait_for(self._stop.wait(), timeout=settings.subscription_scheduler_interval_seconds)
-            except TimeoutError:
-                continue
+            except Exception as exc:  # noqa: BLE001
+                self._last_error = f"{type(exc).__name__}: {str(exc)[:240]}"
+                self._last_cycle_at = now_iso()
+                self._heartbeat()
+            deadline = asyncio.get_running_loop().time() + max(
+                5, settings.subscription_scheduler_interval_seconds,
+            )
+            while not self._stop.is_set():
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    break
+                try:
+                    await asyncio.wait_for(
+                        self._stop.wait(),
+                        timeout=min(
+                            remaining,
+                            max(5, settings.subscription_lease_heartbeat_seconds),
+                        ),
+                    )
+                except TimeoutError:
+                    self._heartbeat()
 
     async def _materialize(self, rule: SubscriptionRule, *, test: bool = False) -> dict[str, Any]:
         if rule.kind == "birthday":
@@ -1268,9 +1590,21 @@ def due_hit_key(rule: SubscriptionRule, now: datetime | None = None) -> str:
     return f"scheduled-{scheduled.isoformat()}" if scheduled is not None else ""
 
 
+def _retry_pending(rule: SubscriptionRule, now: datetime | None = None) -> bool:
+    retry_after = _parse_datetime(rule.retry_after)
+    if retry_after is None:
+        return False
+    if retry_after.tzinfo is None:
+        retry_after = retry_after.replace(tzinfo=UTC)
+    current = _localize(now, rule.schedule.timezone).astimezone(UTC)
+    return current < retry_after.astimezone(UTC)
+
+
 def is_rule_due(rule: SubscriptionRule, now: datetime | None = None) -> bool:
     local_now = _localize(now, rule.schedule.timezone)
     if not rule.enabled:
+        return False
+    if _retry_pending(rule, now=local_now):
         return False
     if _inside_quiet_hours(local_now, rule.quiet_hours):
         return False
@@ -1450,6 +1784,10 @@ def _rule_values(rule: SubscriptionRule) -> tuple[Any, ...]:
         _dump(rule.quiet_hours.model_dump(mode="json")),
         rule.last_run_at,
         rule.last_hit_key,
+        rule.consecutive_failures,
+        rule.retry_after,
+        rule.last_error,
+        rule.last_success_at,
         rule.created_at,
         rule.updated_at,
     )
@@ -1473,6 +1811,10 @@ def _row_to_rule(row: sqlite3.Row) -> SubscriptionRule:
         quiet_hours=QuietHours.model_validate(_load(row["quiet_hours_json"], {})),
         last_run_at=row["last_run_at"],
         last_hit_key=row["last_hit_key"],
+        consecutive_failures=int(row["consecutive_failures"] or 0),
+        retry_after=row["retry_after"],
+        last_error=row["last_error"],
+        last_success_at=row["last_success_at"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )

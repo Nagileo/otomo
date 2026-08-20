@@ -650,6 +650,7 @@ export function WhereToWatchPanel({ data }: { data: AnyRecord }) {
               <Badge tone={src.availability_status === "verified" ? "good" : src.availability_status === "catalog_match" ? "dim" : "warn"}>
                 {src.availability_status === "verified" ? "平台实时核验" : src.availability_status === "catalog_match" ? "官方目录命中" : "打开后确认"}
               </Badge>
+              {src.page_status && src.page_status !== "unchecked" ? <Badge tone={src.page_status === "reachable" ? "good" : src.page_status === "unavailable" ? "warn" : "dim"}>{text(src.page_status_label)}</Badge> : null}
               {src.note && <p className="card-note">{src.availability_status === "catalog_match" ? "平台官方页面" : text(src.note)}</p>}
               {src.availability_note ? <p className="card-note">{src.availability_status === "catalog_match" ? "目录信息可能随地区版权或下架状态变化，打开后请再确认。" : text(src.availability_note)}</p> : null}
             </a>
@@ -700,6 +701,7 @@ export function ReleaseItemCard({
         {item.subtitle ? <Badge tone="dim">{text(item.subtitle)}</Badge> : null}
         {item.episode_label ? <Badge tone="good">{text(item.episode_label)}</Badge> : null}
         {item.release_kind ? <Badge tone="dim">{item.release_kind === "episode" ? "单集" : item.release_kind === "batch" ? "合集" : item.release_kind === "bd" ? "BD" : item.release_kind === "movie" ? "电影" : "类型待确认"}</Badge> : null}
+        {item.content_kind ? <Badge tone={item.content_kind === "anime_video" ? "good" : item.content_kind === "unknown" ? "warn" : "dim"}>{item.content_kind === "anime_video" ? "动画视频" : item.content_kind === "audio" ? "音频" : item.content_kind === "comic" ? "漫画" : item.content_kind === "book" ? "小说/书籍" : item.content_kind === "game" ? "游戏" : item.content_kind === "live" ? "现场活动" : "介质待确认"}</Badge> : null}
         {item.quality && item.quality !== "tv" && !item.resolution && <Badge tone="warn">{String(item.quality).toLowerCase() === "bd" ? "BD" : text(item.quality)}</Badge>}
         {sizeLabel ? <Badge tone="dim">{sizeLabel}</Badge> : null}
         {item.pub_date && <span className="release-date">{String(item.pub_date).slice(0, 10)}</span>}
@@ -710,12 +712,13 @@ export function ReleaseItemCard({
         {item.scope_status === "unknown" && <Badge tone="warn">身份待确认</Badge>}
       </div>
       <div className="release-item-title" title={text(item.title)}>{text(item.title)}</div>
+      {item.content_reason && <div className="card-meta">{text(item.content_reason)}</div>}
       {item.scope_reason && <div className="card-meta">{text(item.scope_reason)}</div>}
       <div className="release-item-actions">
         {item.page_url && <a href={item.page_url} target="_blank" rel="noreferrer">页面</a>}
         {item.torrent_url && <a href={item.torrent_url} target="_blank" rel="noreferrer">种子</a>}
         {item.magnet && <a href={item.magnet}>磁力</a>}
-        {onPrepareDownloaderPush && (item.torrent_url || item.magnet) && (
+        {onPrepareDownloaderPush && !["audio", "comic", "book", "game", "live"].includes(text(item.content_kind)) && (item.torrent_url || item.magnet) && (
           <button
             type="button"
             className="inline-action"
@@ -832,8 +835,8 @@ export function ReleaseFeedsPanel({ data, onPrepareDownloaderPush, onCreateRssFo
       )}
       {related.length > 0 && (
         <details className="pending-guide-sources release-related-items">
-          <summary>相关篇章 / 合集 / 身份待确认 {Number(data.filtered_count || related.length)}</summary>
-          <div className="section-copy">这些结果不会混入当前条目的默认下载区。若确实需要系列合集，请先核对标题与源站页面；推送下载器仍需再次确认。</div>
+          <summary>相关篇章 / 非动画介质 / 身份待确认 {Number(data.filtered_count || related.length)}</summary>
+          <div className="section-copy">这些结果不会混入当前条目的默认下载区。音频、漫画、小说、游戏和现场活动不会提供下载器推送；系列合集或介质待确认项请先核对源站页面。</div>
           <div className="release-list">
             {related.map((item, i) => (
               <ReleaseItemCard
@@ -963,6 +966,7 @@ export function AnimeWatchHubPanel({
             {video.watch_candidate ? <Badge tone="warn">非正版入口 · 版权未核验</Badge> : null}
             <Badge tone={video.uploader_class === "staff_or_production" || video.uploader_class === "platform_account" ? "good" : video.uploader_class === "self_claimed_official" ? "warn" : "dim"}>{uploaderLabel[String(video.uploader_class)] || "作者身份未知"}</Badge>
             <Badge tone={video.verified ? "good" : "warn"}>{video.verified ? "稿件元数据已读取" : "仅搜索元数据"}</Badge>
+            {video.deep_check_status && video.deep_check_status !== "not_needed" ? <Badge tone={["subtitle_verified", "asr_verified"].includes(video.deep_check_status) ? "good" : "warn"}>{video.deep_check_status === "subtitle_verified" ? "字幕正文已核验" : video.deep_check_status === "asr_verified" ? "ASR正文已核验" : video.deep_check_status === "timed_out" ? "深度核验超时" : "深度核验暂不可用"}</Badge> : null}
           </div>
           <a className="bili-video-title" href={href} target="_blank" rel="noreferrer">{text(video.title)}</a>
           <div className="bili-video-byline">
@@ -1012,6 +1016,7 @@ export function AnimeWatchHubPanel({
             {list<string>(video.identity_evidence).map((row, j) => <p key={`identity-${j}`}>{row}</p>)}
             <p>{text(video.match_reason, "标题与作品别名通过一致性检查")}</p>
             <p>{text(video.caution, "打开后请核对内容")}</p>
+            {video.deep_check_note ? <p>{text(video.deep_check_note)}</p> : null}
           </details>
         </div>
       </article>
@@ -1067,6 +1072,8 @@ export function AnimeWatchHubPanel({
         <div className="evidence-row">
           <Badge tone={bili.account_mode === "cookie" ? "good" : "dim"}>{bili.account_mode === "cookie" ? "B站登录态已接入" : "B站公开模式"}</Badge>
           {bili.cache_hit ? <Badge tone="good">已复用核验缓存</Badge> : <Badge tone="dim">本轮实时核验</Badge>}
+          <Badge tone={bili.asr_provider === "worker" || bili.asr_provider === "local" ? "good" : "dim"}>{bili.asr_provider === "worker" ? "独立ASR已启用" : bili.asr_provider === "local" ? "本地ASR已启用" : "ASR未启用"}</Badge>
+          {bili.deep_check_issue_count ? <Badge tone="warn">{bili.deep_check_issue_count} 条深度核验待重试</Badge> : null}
           {bili.search_partial ? <Badge tone="warn">部分搜索源降级</Badge> : null}
           {bili.rate_limited ? <Badge tone="warn">B站限流 · 缓存兜底</Badge> : null}
           {bili.last_verified ? <Badge tone="dim">最近核验 {String(bili.last_verified).slice(0, 10)}</Badge> : null}

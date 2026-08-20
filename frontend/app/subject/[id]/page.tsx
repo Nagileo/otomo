@@ -296,7 +296,7 @@ export default function SubjectPage({ params }: { params: { id: string } }) {
         const state = stages[stage];
         const backendState = watchHub?.modules?.[stage];
         const failed = Boolean(state.error || backendState?.status === "failed");
-        return <button type="button" key={stage} className={failed ? "failed" : state.loading ? "loading" : "ready"} onClick={() => failed ? void loadStage(stage) : undefined}>
+        return <button type="button" key={stage} title={failed ? state.error : undefined} className={failed ? "failed" : state.loading ? "loading" : "ready"} onClick={() => failed ? void loadStage(stage) : undefined}>
           {state.loading ? <RefreshCw size={13} className="spin" /> : null}<strong>{STAGE_LABEL[stage]}</strong><span>{failed ? "加载失败 · 点击重试" : state.loading ? "加载中" : backendState?.duration_ms ? `${backendState.duration_ms} ms` : "已就绪"}</span>
         </button>;
       })}</div> : null}

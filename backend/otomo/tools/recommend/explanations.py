@@ -133,3 +133,39 @@ def refresh_item_explanation(item: Any, scenario: str) -> None:
     item.risks = risks
     item.why_recalled = recalled
     item.claims = claims[:12]
+
+
+def audit_item_explanation(item: Any) -> list[str]:
+    """Verify that visible prose is derived from the final item's claims.
+
+    This is deliberately structural rather than model-based: every visible fit
+    or risk sentence must have a matching claim, and every non-provenance claim
+    must name its support.  A recommendation can still be returned when an
+    issue is found, but the issue is persisted for evaluation and the UI can
+    avoid presenting the explanation as fully verified.
+    """
+    issues: list[str] = []
+    claims = list(getattr(item, "claims", []) or [])
+    claim_by_text = {str(getattr(claim, "text", "")): claim for claim in claims}
+    fallback = "这是口味邻近候选，当前没有足够强的个性化命中，建议先看简介或第一集确认。"
+    for sentence in list(getattr(item, "fit_points", []) or []):
+        if sentence == fallback:
+            continue
+        claim = claim_by_text.get(str(sentence))
+        if claim is None or getattr(claim, "kind", "") != "fit":
+            issues.append(f"适配理由没有对应证据声明：{sentence}")
+        elif not list(getattr(claim, "support", []) or []):
+            issues.append(f"适配理由缺少支撑来源：{sentence}")
+    for sentence in list(getattr(item, "risks", []) or []):
+        claim = claim_by_text.get(str(sentence))
+        if claim is None or getattr(claim, "kind", "") != "risk":
+            issues.append(f"风险提示没有对应证据声明：{sentence}")
+        elif not list(getattr(claim, "support", []) or []):
+            issues.append(f"风险提示缺少支撑来源：{sentence}")
+    for claim in claims:
+        if getattr(claim, "kind", "") != "provenance" and not list(getattr(claim, "support", []) or []):
+            issues.append(f"{getattr(claim, 'kind', 'unknown')} 声明缺少支撑来源：{getattr(claim, 'text', '')}")
+    breakdown = dict(getattr(item, "score_breakdown", {}) or {})
+    if breakdown and abs(sum(float(value) for value in breakdown.values()) - float(getattr(item, "score", 0))) > 0.02:
+        issues.append("最终分数与分项加总不一致")
+    return list(dict.fromkeys(issues))[:12]

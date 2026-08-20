@@ -41,7 +41,7 @@ from ..curation import curated_recall_candidates
 from ..erogamescape.tool import EGSRankArgs, RankErogameScapeTool
 from ..review.tool import ReviewFusionResult, ReviewSubjectArgs, ReviewSubjectTool, _ASPECT_HINTS
 from ..series_progress import SeriesRelationMemo, collection_completed, collection_map, collection_state, necessity_for, state_label
-from .explanations import RecommendationClaim, refresh_item_explanation
+from .explanations import RecommendationClaim, audit_item_explanation, refresh_item_explanation
 
 _RECALL_PER_TAG = 50
 _MAX_RECALL_TAGS = 8
@@ -603,6 +603,8 @@ class RecItem(BaseModel):
     series_origin: str | None = None
     series_status: dict[str, Any] = Field(default_factory=dict)
     claims: list[RecommendationClaim] = Field(default_factory=list)
+    integrity_verified: bool = True
+    integrity_issues: list[str] = Field(default_factory=list)
     features: dict[str, float] | None = None  # export_features=True 时填；LTR 训练用
 
 
@@ -1978,6 +1980,8 @@ class RecommendTool(Tool):
         # 可见解释。随后按“最终条目”的最终分数和标签统一重排。
         for item in out:
             refresh_item_explanation(item, scenario)
+            item.integrity_issues = audit_item_explanation(item)
+            item.integrity_verified = not item.integrity_issues
         all_finalists = list(out)
         reranked_items = _mmr_rerank(
             [

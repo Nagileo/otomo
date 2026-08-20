@@ -543,6 +543,7 @@ class RecommendationEventStore:
         checked_claims = 0
         supported_cards = 0
         total_cards = 0
+        integrity_cards = 0
         durations: list[float] = []
         cache_hits = 0
         cache_misses = 0
@@ -580,6 +581,7 @@ class RecommendationEventStore:
             checked_claims += len(claims)
             supported_claims += sum(1 for claim in claims if claim.get("support"))
             supported_cards += int(card_supported)
+            integrity_cards += int(bool(payload.get("integrity_verified", not payload.get("integrity_issues"))))
             batch["total_cards"] += 1
             batch["supported_cards"] += int(card_supported)
             batch["checked_claims"] += len(claims)
@@ -746,6 +748,8 @@ class RecommendationEventStore:
                 "cards": total_cards,
                 "supported_cards": supported_cards,
                 "card_support_coverage": supported_cards / total_cards if total_cards else 0.0,
+                "integrity_verified_cards": integrity_cards,
+                "integrity_rate": integrity_cards / total_cards if total_cards else 0.0,
                 "claims": checked_claims,
                 "supported_claims": supported_claims,
                 "claim_support_coverage": supported_claims / checked_claims if checked_claims else 0.0,

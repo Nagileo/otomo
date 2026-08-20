@@ -266,3 +266,97 @@ def test_content_subscriptions_skip_unchanged_payload_across_intervals(monkeypat
     assert second.payload["reason"] == "content unchanged"
     assert third.status == "sent"
     assert len(ltm.load_user("alice").inbox) == 2
+
+
+def test_two_workers_claim_same_rule_and_deliver_only_once(monkeypatch, tmp_path):
+    database = tmp_path / "subs.sqlite3"
+    store_a = SubscriptionStore(str(database))
+    store_b = SubscriptionStore(str(database))
+    rule = store_a.create(
+        CreateSubscriptionRuleRequest(
+            kind="daily_airing",
+            schedule=SubscriptionSchedule(timezone="Asia/Shanghai", interval_minutes=15),
+            channels=["inbox"],
+        ),
+        owner_key="user:alice",
+        username="alice",
+    )
+    ltm = LongTermMemory(tmp_path / "ltm")
+    service_a = SubscriptionService(store_a, ltm, AuthStore(tmp_path / "auth-a"))
+    service_b = SubscriptionService(store_b, ltm, AuthStore(tmp_path / "auth-b"))
+
+    async def slow_materialize(_rule, *, test=False):
+        await asyncio.sleep(0.05)
+        return {"sections": [{"title": "更新", "items": [{"id": 1}]}]}
+
+    monkeypatch.setattr(service_a, "_materialize", slow_materialize)
+    monkeypatch.setattr(service_b, "_materialize", slow_materialize)
+
+    async def run_both():
+        return await asyncio.gather(service_a.run_rule(rule), service_b.run_rule(rule))
+
+    rows = asyncio.run(run_both())
+    assert sorted(row.status for row in rows) == ["sent", "skipped"]
+    assert next(row for row in rows if row.status == "skipped").payload["reason"] == "claimed by another worker"
+    assert len(ltm.load_user("alice").inbox) == 1
+
+
+def test_failed_rule_uses_exponential_backoff_and_manual_retry_resets_it(monkeypatch, tmp_path):
+    monkeypatch.setattr(config.settings, "subscription_failure_backoff_base_seconds", 60)
+    monkeypatch.setattr(config.settings, "subscription_failure_backoff_max_seconds", 3600)
+    store = SubscriptionStore(str(tmp_path / "subs.sqlite3"))
+    rule = store.create(
+        CreateSubscriptionRuleRequest(
+            kind="daily_airing",
+            schedule=SubscriptionSchedule(timezone="Asia/Shanghai", interval_minutes=15),
+            channels=["inbox"],
+        ),
+        owner_key="user:alice",
+        username="alice",
+    )
+    service = SubscriptionService(store, LongTermMemory(tmp_path / "ltm"), AuthStore(tmp_path / "auth"))
+
+    async def broken(_rule, *, test=False):
+        raise RuntimeError("upstream unavailable")
+
+    monkeypatch.setattr(service, "_materialize", broken)
+    first = asyncio.run(service.run_rule(rule))
+    failed_once = store.get(rule.id, rule.owner_key)
+    assert first.status == "failed"
+    assert failed_once is not None
+    assert failed_once.consecutive_failures == 1
+    assert failed_once.retry_after
+    assert "upstream unavailable" in failed_once.last_error
+    second = asyncio.run(service.run_rule(failed_once))
+    assert second.status == "skipped"
+    assert second.payload["reason"] == "failure backoff"
+
+    async def recovered(_rule, *, test=False):
+        return {"sections": [{"title": "恢复", "items": [{"id": 2}]}]}
+
+    monkeypatch.setattr(service, "_materialize", recovered)
+    retried = asyncio.run(service.run_rule(failed_once, force=True))
+    healthy = store.get(rule.id, rule.owner_key)
+    assert retried.status == "sent"
+    assert healthy is not None
+    assert healthy.consecutive_failures == 0
+    assert healthy.retry_after == ""
+    assert healthy.last_error == ""
+    assert healthy.last_success_at
+
+
+def test_expired_cross_process_lease_can_be_recovered(tmp_path):
+    store = SubscriptionStore(str(tmp_path / "subs.sqlite3"))
+    rule = store.create(
+        CreateSubscriptionRuleRequest(kind="daily_airing"),
+        owner_key="user:alice",
+        username="alice",
+    )
+    assert store.claim_lease(rule, "hit-1", "worker-a")
+    assert not store.claim_lease(rule, "hit-1", "worker-b")
+    with sqlite3.connect(tmp_path / "subs.sqlite3") as conn:
+        conn.execute(
+            "UPDATE subscription_leases SET leased_until='2000-01-01T00:00:00Z' WHERE rule_id=?",
+            (rule.id,),
+        )
+    assert store.claim_lease(rule, "hit-1", "worker-b")

@@ -77,6 +77,7 @@ def test_community_api_requires_login_and_csrf_for_comments(tmp_path, monkeypatc
     monkeypatch.setattr(config.settings, "ltm_store_path", str(tmp_path / "ltm.sqlite3"))
     monkeypatch.setattr(config.settings, "quota_store_path", str(tmp_path / "quota.json"))
     monkeypatch.setattr(config.settings, "bilibili_cookies_file", str(tmp_path / "bilibili-cookies.txt"))
+    monkeypatch.setattr(config.settings, "series_overrides_path", str(tmp_path / "series-overrides.json"))
     monkeypatch.setattr(config.settings, "subscription_scheduler_enabled", False)
     monkeypatch.setattr(config.settings, "rate_limit_enabled", False)
     monkeypatch.setattr(config.settings, "community_admin_usernames", "moderator")
@@ -145,6 +146,31 @@ def test_community_api_requires_login_and_csrf_for_comments(tmp_path, monkeypatc
         ))
         dashboard = client.get("/admin/overview?days=7")
         assert dashboard.status_code == 200
+        assert "subscriptions" in dashboard.json()
+        assert dashboard.json()["series_overrides"]["rules"] == []
+        series_rule = {
+            "id": "test-series",
+            "title": "测试复杂系列",
+            "mainline": [
+                {"subject_id": 1, "name": "第一部", "necessity": "required"},
+                {"subject_id": 2, "name": "总集篇", "necessity": "skip"},
+                {"subject_id": 3, "name": "第二部", "necessity": "required"},
+            ],
+            "optional": [],
+            "alternates": [],
+            "notes": [],
+        }
+        saved_series = client.put(
+            "/admin/series-overrides/test-series",
+            headers={"x-otomo-csrf": moderator_auth["csrf_token"]},
+            json=series_rule,
+        )
+        assert saved_series.status_code == 200
+        assert client.get("/admin/series-overrides").json()["rules"][0]["id"] == "test-series"
+        assert client.delete(
+            "/admin/series-overrides/test-series",
+            headers={"x-otomo-csrf": moderator_auth["csrf_token"]},
+        ).status_code == 200
         cookie_text = (
             "# Netscape HTTP Cookie File\n"
             "#HttpOnly_.bilibili.com\tTRUE\t/\tTRUE\t0\tSESSDATA\tserver-only-secret\n"

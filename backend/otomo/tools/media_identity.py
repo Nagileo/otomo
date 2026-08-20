@@ -70,8 +70,18 @@ def _infobox_value(raw: dict[str, Any], keys: set[str]) -> str:
 
 
 def _year(value: str) -> int | None:
-    match = re.search(r"(?:19|20)\d{2}", value or "")
-    return int(match.group(0)) if match else None
+    text = value or ""
+    for match in re.finditer(r"(?<!\d)(?:19|20)\d{2}(?!\d)", text):
+        # Release titles commonly contain display dimensions such as
+        # ``1920x1080``.  Neither side of a resolution is a production year.
+        before = text[:match.start()]
+        after = text[match.end():]
+        resolution_width = re.match(r"\s*[x\u00d7]\s*\d{3,4}(?!\d)", after, re.I)
+        resolution_height = re.search(r"(?<!\d)\d{3,4}\s*[x\u00d7]\s*$", before, re.I)
+        if resolution_width or resolution_height:
+            continue
+        return int(match.group(0))
+    return None
 
 
 def _version_markers(values: list[str], year: int | None) -> list[str]:

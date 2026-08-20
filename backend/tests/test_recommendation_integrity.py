@@ -6,7 +6,7 @@ import pytest
 
 from otomo.agent.contracts import ToolResult
 from otomo.memory.models import AspectPreference, UserAspectProfile
-from otomo.tools.recommend.explanations import refresh_item_explanation
+from otomo.tools.recommend.explanations import audit_item_explanation, refresh_item_explanation
 from otomo.tools.recommend.tool import (
     RecItem,
     RecommendArgs,
@@ -162,6 +162,23 @@ def test_recent_feedback_never_becomes_an_explicit_claim():
     assert not any("本轮明确" in point for point in item.fit_points)
     feedback_claim = next(claim for claim in item.claims if "近期反馈" in claim.text)
     assert feedback_claim.confidence == "low"
+    assert audit_item_explanation(item) == []
+
+
+def test_explanation_audit_rejects_visible_prose_without_matching_support():
+    item = RecItem(
+        id=21,
+        name="不一致候选",
+        score=1.0,
+        score_breakdown={"base": 0.5},
+        reasons=[],
+        fit_points=["文字声称命中，但没有证据"],
+    )
+
+    issues = audit_item_explanation(item)
+
+    assert any("没有对应证据声明" in issue for issue in issues)
+    assert any("分项加总不一致" in issue for issue in issues)
 
 
 def test_personalization_seeds_exclude_low_ratings_and_non_consumption():

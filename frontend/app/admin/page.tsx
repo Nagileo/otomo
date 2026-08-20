@@ -6,6 +6,7 @@ import {
   ChevronRight, X,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import QRCode from "qrcode";
 
 import { PageHeader } from "../../components/page-header";
 import { productFetch } from "../../lib/api";
@@ -35,6 +36,19 @@ const scoreLabels: Record<string, string> = {
   quality: "社区口碑", evidence_aspect: "评价好球区", evidence_quality: "多源评价",
 };
 
+const EMPTY_SERIES_RULE = JSON.stringify({
+  id: "series-id",
+  title: "系列名称",
+  mainline: [
+    { subject_id: 1, name: "第一部", necessity: "required", note: "" },
+    { subject_id: 2, name: "总集篇", necessity: "skip", note: "不阻塞主线" },
+    { subject_id: 3, name: "第二部", necessity: "required", note: "" },
+  ],
+  optional: [],
+  alternates: [],
+  notes: ["管理员核对后的观看顺序。"],
+}, null, 2);
+
 export default function AdminPage() {
   const exp = useExperience();
   const [data, setData] = useState<AnyRow | null>(null);
@@ -45,6 +59,10 @@ export default function AdminPage() {
   const [batchBusy, setBatchBusy] = useState("");
   const [biliCookies, setBiliCookies] = useState("");
   const [biliBusy, setBiliBusy] = useState(false);
+  const [biliQr, setBiliQr] = useState<AnyRow | null>(null);
+  const [biliQrImage, setBiliQrImage] = useState("");
+  const [adminAction, setAdminAction] = useState("");
+  const [seriesDraft, setSeriesDraft] = useState(EMPTY_SERIES_RULE);
 
   async function load(nextDays = days) {
     setBusy(true); setError("");
@@ -69,6 +87,28 @@ export default function AdminPage() {
     window.addEventListener("keydown", close);
     return () => window.removeEventListener("keydown", close);
   }, [batchDetail]);
+  useEffect(() => {
+    if (!biliQr?.login_id || !["waiting", "scanned"].includes(biliQr.status)) return;
+    let stopped = false;
+    const timer = window.setTimeout(async () => {
+      try {
+        const result = await productFetch("/admin/integrations/bilibili/qr/poll", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-otomo-csrf": exp.csrf },
+          body: JSON.stringify({ login_id: biliQr.login_id }),
+        });
+        if (stopped) return;
+        setBiliQr((current) => current ? ({ ...current, ...result.login }) : result.login);
+        if (result.integration) {
+          setData((current) => current ? ({ ...current, integrations: { ...current.integrations, bilibili: result.integration } }) : current);
+          setBiliQrImage("");
+        }
+      } catch (cause) {
+        if (!stopped) setError(cause instanceof Error ? cause.message : String(cause));
+      }
+    }, 1800);
+    return () => { stopped = true; window.clearTimeout(timer); };
+  }, [biliQr?.login_id, biliQr?.status, exp.csrf]);
 
   async function openBatch(setId: string) {
     setBatchBusy(setId);
@@ -117,6 +157,20 @@ export default function AdminPage() {
     } finally { setBiliBusy(false); }
   }
 
+  async function startBilibiliQr() {
+    setBiliBusy(true); setError("");
+    try {
+      const result = await productFetch("/admin/integrations/bilibili/qr/start", {
+        method: "POST",
+        headers: { "x-otomo-csrf": exp.csrf },
+      });
+      setBiliQrImage(await QRCode.toDataURL(result.login.qr_url, { width: 240, margin: 1 }));
+      setBiliQr(result.login);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally { setBiliBusy(false); }
+  }
+
   async function disconnectBilibili() {
     if (!window.confirm("清除服务器保存的 B站登录态？公开视频搜索仍然可用。")) return;
     setBiliBusy(true); setError("");
@@ -129,6 +183,68 @@ export default function AdminPage() {
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally { setBiliBusy(false); }
+  }
+
+  async function testQbittorrent() {
+    setAdminAction("qbittorrent"); setError("");
+    try {
+      const result = await productFetch("/admin/integrations/qbittorrent/test", {
+        method: "POST",
+        headers: { "x-otomo-csrf": exp.csrf },
+      });
+      setData((current) => current ? ({ ...current, integrations: { ...current.integrations, qbittorrent: result.integration } }) : current);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally { setAdminAction(""); }
+  }
+
+  async function retrySubscription(ruleId: string) {
+    setAdminAction(`retry-${ruleId}`); setError("");
+    try {
+      await productFetch(`/admin/subscriptions/${encodeURIComponent(ruleId)}/retry`, {
+        method: "POST",
+        headers: { "x-otomo-csrf": exp.csrf },
+      });
+      await load();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally { setAdminAction(""); }
+  }
+
+  function editSeriesRule(rule: AnyRow) {
+    setSeriesDraft(JSON.stringify(rule, null, 2));
+    window.setTimeout(() => document.getElementById("series-rule-editor")?.scrollIntoView({ behavior: "smooth", block: "center" }), 0);
+  }
+
+  async function saveSeriesRule() {
+    setAdminAction("series-save"); setError("");
+    try {
+      const parsed = JSON.parse(seriesDraft);
+      if (!parsed?.id) throw new Error("规则必须填写 id。");
+      await productFetch(`/admin/series-overrides/${encodeURIComponent(parsed.id)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", "x-otomo-csrf": exp.csrf },
+        body: JSON.stringify(parsed),
+      });
+      await load();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally { setAdminAction(""); }
+  }
+
+  async function deleteSeriesRule(ruleId: string) {
+    if (!window.confirm(`删除人工系列规则 ${ruleId}？删除后会恢复 Bangumi 关系图。`)) return;
+    setAdminAction(`series-delete-${ruleId}`); setError("");
+    try {
+      await productFetch(`/admin/series-overrides/${encodeURIComponent(ruleId)}`, {
+        method: "DELETE",
+        headers: { "x-otomo-csrf": exp.csrf },
+      });
+      setSeriesDraft(EMPTY_SERIES_RULE);
+      await load();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally { setAdminAction(""); }
   }
 
   const evaluation = data?.recommendations?.evaluation?.current || {};
@@ -165,8 +281,45 @@ export default function AdminPage() {
           <BadgeLike good={Boolean(data.integrations?.bilibili?.authenticated)} label={data.integrations?.bilibili?.authenticated ? "登录态有效" : "未连接"} />
           <p>用于 B站搜索、视频详情、字幕读取和 ASR 音频下载。Cookie 只保存在服务器，不会进入聊天、模型上下文或普通用户 API。</p>
         </div>
-        <label className="admin-cookie-import"><span>粘贴浏览器插件导出的 Netscape cookies.txt</span><textarea value={biliCookies} onChange={(event) => setBiliCookies(event.target.value)} placeholder="# Netscape HTTP Cookie File…" rows={5} spellCheck={false} /><small>建议使用专门账号；过期后重新导入即可。不要把 cookies.txt 提交进 Git。</small></label>
-        <div className="panel-actions"><button className="button-primary" disabled={biliBusy || !biliCookies.trim()} onClick={() => void connectBilibili()}>{biliBusy ? <LoaderCircle className="spin" size={15} /> : <ShieldCheck size={15} />}导入并验证</button>{data.integrations?.bilibili?.configured ? <button className="button-secondary" disabled={biliBusy} onClick={() => void disconnectBilibili()}><Trash2 size={15} />清除登录态</button> : null}</div>
+        <div className="panel-actions"><button className="button-primary" disabled={biliBusy} onClick={() => void startBilibiliQr()}>{biliBusy ? <LoaderCircle className="spin" size={15} /> : <ShieldCheck size={15} />}使用B站App扫码连接</button>{data.integrations?.bilibili?.configured ? <button className="button-secondary" disabled={biliBusy} onClick={() => void disconnectBilibili()}><Trash2 size={15} />清除登录态</button> : null}</div>
+        {biliQrImage ? <div className="admin-bili-qr"><img src={biliQrImage} alt="B站登录二维码" /><div><strong>{biliQr?.message || "等待扫码"}</strong><span>二维码仅在本机管理页显示，通常 3 分钟后过期。</span>{biliQr?.status === "expired" ? <button className="button-secondary" onClick={() => void startBilibiliQr()}>重新生成</button> : null}</div></div> : null}
+        <details className="admin-cookie-fallback"><summary>扫码不可用？改用 cookies.txt</summary><label className="admin-cookie-import"><span>粘贴浏览器插件导出的 Netscape cookies.txt</span><textarea value={biliCookies} onChange={(event) => setBiliCookies(event.target.value)} placeholder="# Netscape HTTP Cookie File…" rows={5} spellCheck={false} /><small>建议使用专门账号；Cookie 只保存在服务器，不会发送给模型。</small></label><button className="button-secondary" disabled={biliBusy || !biliCookies.trim()} onClick={() => void connectBilibili()}>导入并验证</button></details>
+      </section>
+
+      <section className="admin-section">
+        <header><div><span className="section-kicker">运行依赖</span><h2>ASR 与下载器诊断</h2></div><span>只做健康检查，不会创建下载任务。</span></header>
+        <div className="admin-integration-grid">
+          <article>
+            <div><strong>视频语音核验</strong><BadgeLike good={Boolean(data.integrations?.asr?.healthy)} label={data.integrations?.asr?.healthy ? "可用" : data.integrations?.asr?.configured ? "异常" : "未配置"} /></div>
+            <p>当前提供方：{data.integrations?.asr?.provider || "off"} · 最长核验 {data.integrations?.asr?.max_video_seconds || 0} 秒</p>
+            {data.integrations?.asr?.error ? <small>{data.integrations.asr.error}</small> : <small>字幕优先；只有最终边界候选才会进入 ASR。</small>}
+          </article>
+          <article>
+            <div><strong>qBittorrent</strong><BadgeLike good={Boolean(data.integrations?.qbittorrent?.authenticated)} label={data.integrations?.qbittorrent?.authenticated ? "已连通" : data.integrations?.qbittorrent?.configured ? "待检测" : "未配置"} /></div>
+            <p>{data.integrations?.qbittorrent?.host ? `${data.integrations.qbittorrent.scheme}://${data.integrations.qbittorrent.host}` : "尚未填写 WebUI 地址"}{data.integrations?.qbittorrent?.version ? ` · v${data.integrations.qbittorrent.version}` : ""}</p>
+            {data.integrations?.qbittorrent?.error ? <small>{data.integrations.qbittorrent.error}</small> : <small>检测只登录 Web API 并读取版本，不会推送种子。</small>}
+            <button className="button-secondary" disabled={adminAction === "qbittorrent" || !data.integrations?.qbittorrent?.configured} onClick={() => void testQbittorrent()}>{adminAction === "qbittorrent" ? <LoaderCircle className="spin" size={14} /> : <RefreshCw size={14} />}检测连接</button>
+          </article>
+        </div>
+      </section>
+
+      <section className="admin-section">
+        <header><div><span className="section-kicker">长期任务</span><h2>订阅调度健康</h2></div><span>{data.subscriptions?.enabled ? data.subscriptions?.healthy ? "调度器正常" : "调度器心跳异常" : "当前部署未启用调度器"}</span></header>
+        <div className="admin-metric-grid">
+          <div><strong>{(data.subscriptions?.workers || []).filter((row: AnyRow) => row.healthy).length}</strong><span>健康工作进程</span></div>
+          <div><strong>{(data.subscriptions?.active_leases || []).length}</strong><span>正在执行</span></div>
+          <div><strong>{(data.subscriptions?.failed_rules || []).length}</strong><span>退避中的规则</span></div>
+          <div><strong>{data.subscriptions?.max_concurrency || 1}</strong><span>单进程并发上限</span></div>
+        </div>
+        {(data.subscriptions?.workers || []).length ? <div className="admin-task-list admin-scheduler-workers">{data.subscriptions.workers.map((worker: AnyRow) => <p key={worker.worker_id}><span><strong>{worker.worker_id}</strong><small>最近周期 {worker.last_cycle_at || "尚未执行"} · 累计处理 {worker.processed_count || 0}</small></span><b className={`task-status ${worker.healthy ? "done" : "failed"}`}>{worker.healthy ? `${worker.heartbeat_age_seconds || 0}s` : "心跳过期"}</b></p>)}</div> : <div className="inline-notice">若线上需要主动提醒，请启用订阅调度器；仅创建规则但没有常驻 worker 不会自动发送。</div>}
+        {(data.subscriptions?.failed_rules || []).length ? <details className="admin-models admin-scheduler-failures" open><summary>失败与退避队列</summary>{data.subscriptions.failed_rules.map((rule: AnyRow) => <p key={rule.id}><strong>{rule.title}</strong><span>连续失败 {rule.consecutive_failures}</span><small>{rule.last_error || "未知错误"}<br />下次自动重试：{rule.retry_after || "待定"}</small><button className="button-secondary" disabled={adminAction === `retry-${rule.id}`} onClick={() => void retrySubscription(rule.id)}>{adminAction === `retry-${rule.id}` ? "重试中" : "立即重试"}</button></p>)}</details> : null}
+      </section>
+
+      <section className="admin-section">
+        <header><div><span className="section-kicker">系列纠错</span><h2>复杂作品人工顺序</h2></div><span>{data.series_overrides?.status?.rules || 0} 条规则 · {data.series_overrides?.status?.subjects || 0} 个条目</span></header>
+        <p className="card-note">仅为 Bangumi 关系图无法可靠表达的复杂系列维护覆盖规则。required 会阻塞后续；optional 和 skip 不阻塞；alternates 是替代演绎。</p>
+        {(data.series_overrides?.rules || []).length ? <div className="admin-series-list">{data.series_overrides.rules.map((rule: AnyRow) => <article key={rule.id}><span><strong>{rule.title}</strong><small>{rule.id} · 主线 {rule.mainline?.length || 0} · 旁支 {rule.optional?.length || 0} · 替代 {rule.alternates?.length || 0}</small></span><button className="button-secondary" onClick={() => editSeriesRule(rule)}>编辑</button><button className="button-quiet danger" disabled={adminAction === `series-delete-${rule.id}`} onClick={() => void deleteSeriesRule(rule.id)}>删除</button></article>)}</div> : <div className="inline-notice">尚未配置人工规则；所有系列继续使用 Bangumi 关系图。</div>}
+        <details className="admin-series-editor" open id="series-rule-editor"><summary>新增或编辑规则</summary><textarea value={seriesDraft} onChange={(event) => setSeriesDraft(event.target.value)} rows={16} spellCheck={false} /><div className="panel-actions"><button className="button-primary" disabled={adminAction === "series-save"} onClick={() => void saveSeriesRule()}>{adminAction === "series-save" ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />}保存并立即生效</button><button className="button-secondary" onClick={() => setSeriesDraft(EMPTY_SERIES_RULE)}>新建模板</button></div></details>
       </section>
 
       <section className="admin-section">
@@ -186,6 +339,7 @@ export default function AdminPage() {
           <div><strong>{pct(evaluation.acceptance_at_k?.["1"])}</strong><span>Acceptance@1</span></div>
           <div><strong>{pct(evaluation.acceptance_at_k?.["3"])}</strong><span>Acceptance@3</span></div>
           <div><strong>{pct(evaluation.explanations?.claim_support_coverage)}</strong><span>解释有证据支撑</span></div>
+          <div><strong>{pct(evaluation.explanations?.integrity_rate)}</strong><span>理由与证据一致</span></div>
           <div><strong>{pct(evaluation.catalog?.repeat_rate)}</strong><span>跨批次重复率</span></div>
           <div><strong>{duration(evaluation.performance?.average_ms)}</strong><span>平均推荐耗时</span></div>
           <div><strong>{data.recommendations.artifact_cache.entries}</strong><span>持久证据缓存</span></div>

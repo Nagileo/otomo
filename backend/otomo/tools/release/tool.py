@@ -79,6 +79,10 @@ class ReleaseItem(BaseModel):
     subtitle: str = ""
     episode_label: str = ""
     release_kind: Literal["episode", "batch", "bd", "movie", "unknown"] = "unknown"
+    content_kind: Literal[
+        "anime_video", "audio", "comic", "live", "game", "book", "unknown"
+    ] = "unknown"
+    content_reason: str = ""
     note: str = ""
     scope_status: Literal["exact", "compatible", "bundle", "conflict", "unknown"] = "unknown"
     scope_reason: str = ""
@@ -589,10 +593,15 @@ def _scope_release_items(
     primary: list[ReleaseItem] = []
     related: list[ReleaseItem] = []
     for item in items:
-        content_mismatch = _release_content_mismatch(item.title, identity)
-        if content_mismatch:
+        item.content_kind, item.content_reason = _classify_release_content(item.title, identity)
+        if item.content_kind not in {"anime_video", "unknown"}:
             item.scope_status = "conflict"
-            item.scope_reason = content_mismatch
+            item.scope_reason = item.content_reason
+            related.append(item)
+            continue
+        if item.content_kind == "unknown":
+            item.scope_status = "unknown"
+            item.scope_reason = item.content_reason
             related.append(item)
             continue
         scope = assess_media_scope(identity, item.title)
@@ -612,17 +621,55 @@ def _release_content_mismatch(title: str, identity: MediaIdentity) -> str:
     still return manga collections, OSTs, drama CDs or concerts. Remove known
     work aliases first so canonical titles containing a media word are safe.
     """
+    kind, reason = _classify_release_content(title, identity)
+    return reason if kind not in {"anime_video", "unknown"} else ""
+
+
+def _release_payload(title: str, identity: MediaIdentity) -> str:
     payload = title.lower()
     aliases = {identity.title, *identity.aliases}
     for alias in sorted((value.strip() for value in aliases if value.strip()), key=len, reverse=True):
         payload = re.sub(re.escape(alias.lower()), " ", payload, flags=re.IGNORECASE)
+    return payload
+
+
+def _classify_release_content(
+    title: str,
+    identity: MediaIdentity,
+) -> tuple[
+    Literal["anime_video", "audio", "comic", "live", "game", "book", "unknown"],
+    str,
+]:
+    """Classify the release medium after removing canonical work aliases.
+
+    Removing aliases first is important for legitimate anime whose own title
+    contains words such as ``音乐`` or ``漫画``.  The remaining release suffix
+    must contain medium evidence before an item enters the default download
+    area; ambiguous title-only matches stay in the confirmation section.
+    """
+    payload = _release_payload(title, identity)
 
     comic_markers = (
-        "漫画合集", "漫畫合集", "漫画版", "漫畫版", "电子书", "電子書",
-        "manga", "comic collection", "digital comic", "epub", "mobi",
+        "漫画合集", "漫畫合集", "漫画版", "漫畫版", "单行本", "單行本",
+        "manga", "comic collection", "digital comic", "scanlation", "raw comic",
     )
     if any(marker in payload for marker in comic_markers):
-        return "标题指向漫画或电子书，不是这部动画的正片资源。"
+        return "comic", "标题指向漫画或扫描本，不是这部动画的正片资源。"
+
+    game_markers = (
+        "视觉小说", "視覺小說", "游戏版", "遊戲版", "电脑游戏", "電腦遊戲",
+        "visual novel", "video game", "pc game", "galgame", "steam", "nintendo switch",
+        "switch game", "ps4 game", "ps5 game", "game rip",
+    )
+    if any(marker in payload for marker in game_markers):
+        return "game", "标题指向游戏或 Visual Novel，不是这部动画的正片资源。"
+
+    book_markers = (
+        "轻小说", "輕小說", "小说", "小說", "电子书", "電子書", "文库", "文庫",
+        "light novel", "novel", "ebook", "e-book", "epub", "mobi", "azw3", "pdf版",
+    )
+    if any(marker in payload for marker in book_markers):
+        return "book", "标题指向小说或电子书，不是这部动画的正片资源。"
 
     audio_markers = (
         "音乐合集", "音樂合集", "音乐专辑", "音樂專輯", "音乐集", "音樂集",
@@ -631,11 +678,11 @@ def _release_content_mismatch(title: str, identity: MediaIdentity) -> str:
         "cd合集", "cd 合集", "专辑", "專輯",
     )
     if any(marker in payload for marker in audio_markers):
-        return "标题指向音乐、原声或广播剧，不是这部动画的正片资源。"
+        return "audio", "标题指向音乐、原声或广播剧，不是这部动画的正片资源。"
 
     live_markers = ("演唱会", "演唱會", "live event", "concert")
     if any(marker in payload for marker in live_markers):
-        return "标题指向演唱会或现场活动，不是这部动画的正片资源。"
+        return "live", "标题指向演唱会或现场活动，不是这部动画的正片资源。"
 
     # Codec/resolution tokens are positive video evidence. Lossless-audio
     # tokens alone otherwise indicate a CD rip rather than an anime encode.
@@ -650,8 +697,21 @@ def _release_content_mismatch(title: str, identity: MediaIdentity) -> str:
         marker in payload for marker in ("无损", "無損", "flac", " ape", "wav", "mp3", "hi-res", "hires")
     )
     if audio_only_evidence and not video_evidence:
-        return "标题只提供无损音频信息，无法确认包含动画正片。"
-    return ""
+        return "audio", "标题只提供无损音频信息，无法确认包含动画正片。"
+    episode_evidence = bool(
+        _episode_label(title)
+        or re.search(r"(?<!\d)0?[1-9]\d?(?:v\d+)?(?!\d)", payload)
+    )
+    animation_evidence = any(
+        marker in payload
+        for marker in (
+            "剧场版", "劇場版", "movie", "全集", "合集", "complete", "batch",
+            "ncop", "nced", "ova", "oad", "web anime",
+        )
+    )
+    if video_evidence or episode_evidence or animation_evidence:
+        return "anime_video", "标题包含分集、动画形态、编码或分辨率等视频证据。"
+    return "unknown", "只命中作品标题，缺少分集、视频编码或动画形态证据；需打开源站确认介质。"
 
 
 class GetAnimeReleaseFeedsTool(Tool):
@@ -780,6 +840,8 @@ class GetAnimeReleaseFeedsTool(Tool):
                             source="vcb",
                             page_url=_VCB_SEARCH.format(q=vcb_q),
                             quality="bd",
+                            content_kind="unknown",
+                            content_reason="这是搜索入口，不是已核验的具体动画发布项。",
                             note="VCB-Studio 是 BD/BDRip 搜索入口；Otomo 不抓取详情、不下载内容。",
                             scope_status="compatible",
                             scope_reason="这是按当前条目标题生成的搜索入口，不代表具体发布项已核验。",

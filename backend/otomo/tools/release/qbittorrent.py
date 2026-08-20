@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 import httpx
 
@@ -22,9 +23,60 @@ def downloader_enabled() -> bool:
 
 
 def downloader_config_error() -> str:
-    if settings.qbittorrent_url.strip():
-        return ""
-    return "qBittorrent 未配置：需要 QBITTORRENT_URL / QBITTORRENT_USERNAME / QBITTORRENT_PASSWORD。"
+    missing = []
+    if not settings.qbittorrent_url.strip():
+        missing.append("QBITTORRENT_URL")
+    if not settings.qbittorrent_username.strip():
+        missing.append("QBITTORRENT_USERNAME")
+    if not settings.qbittorrent_password:
+        missing.append("QBITTORRENT_PASSWORD")
+    return "qBittorrent 未配置：缺少 " + " / ".join(missing) if missing else ""
+
+
+def downloader_public_status() -> dict:
+    parsed = urlparse(settings.qbittorrent_url.strip())
+    return {
+        "configured": downloader_enabled() and not downloader_config_error(),
+        "host": parsed.hostname or "",
+        "scheme": parsed.scheme or "",
+        "category": settings.qbittorrent_category,
+        "save_path_configured": bool(settings.qbittorrent_save_path),
+        "error": downloader_config_error(),
+    }
+
+
+async def check_qbittorrent() -> dict:
+    """Authenticate and read the Web API version without creating a task."""
+    status = downloader_public_status()
+    if not status["configured"]:
+        return {**status, "reachable": False, "authenticated": False}
+    base = settings.qbittorrent_url.strip().rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=min(settings.release_feed_timeout, 8)) as client:
+            login = await client.post(
+                f"{base}/api/v2/auth/login",
+                data={"username": settings.qbittorrent_username, "password": settings.qbittorrent_password},
+            )
+            login.raise_for_status()
+            authenticated = login.text.strip().lower() in {"ok.", "ok"}
+            if not authenticated:
+                return {**status, "reachable": True, "authenticated": False, "error": "qBittorrent 登录失败"}
+            version = await client.get(f"{base}/api/v2/app/version")
+            version.raise_for_status()
+        return {
+            **status,
+            "reachable": True,
+            "authenticated": True,
+            "version": version.text.strip()[:40],
+            "error": "",
+        }
+    except httpx.HTTPError as exc:
+        return {
+            **status,
+            "reachable": False,
+            "authenticated": False,
+            "error": f"{type(exc).__name__}: {str(exc)[:160]}",
+        }
 
 
 async def push_to_qbittorrent(req: DownloaderPushRequest) -> dict:

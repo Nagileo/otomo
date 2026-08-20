@@ -1408,6 +1408,27 @@ a.card-title:hover { color: var(--accent); }
 .admin-cookie-import span { font-size: 11px; font-weight: 700; }
 .admin-cookie-import textarea { width: 100%; resize: vertical; min-height: 96px; padding: 9px; color: var(--text); background: var(--surface-2); border: 1px solid var(--line); border-radius: 7px; font: 10px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; }
 .admin-cookie-import small { color: var(--dim); font-size: 10px; }
+.admin-bili-qr { display: flex; align-items: center; gap: 18px; margin-top: 14px; padding: 14px; border: 1px solid var(--line); border-radius: 16px; background: var(--surface-2); }
+.admin-bili-qr img { width: 180px; height: 180px; border-radius: 10px; background: #fff; }
+.admin-bili-qr > div { display: grid; gap: 8px; }
+.admin-bili-qr span { color: var(--dim); font-size: 11px; }
+.admin-cookie-fallback { margin-top: 14px; }
+.admin-cookie-fallback > summary { cursor: pointer; color: var(--dim); font-size: 11px; }
+.admin-integration-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.admin-integration-grid article { display: grid; align-content: start; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-soft); }
+.admin-integration-grid article > div { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.admin-integration-grid p, .admin-integration-grid small { margin: 0; color: var(--dim); font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
+.admin-integration-grid button { justify-self: start; }
+.admin-scheduler-workers { margin-top: 12px; }
+.admin-scheduler-failures p { grid-template-columns: minmax(110px, .7fr) 100px minmax(180px, 1fr) auto; align-items: center; }
+.admin-series-list { display: grid; gap: 7px; margin: 12px 0; }
+.admin-series-list article { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 8px; padding: 9px; border-radius: 7px; background: var(--surface-soft); }
+.admin-series-list article > span { display: grid; gap: 3px; min-width: 0; }
+.admin-series-list small { color: var(--dim); font-size: 9px; }
+.admin-series-editor { margin-top: 12px; border-top: 1px solid var(--line); }
+.admin-series-editor summary { padding: 11px 0; color: var(--dim); cursor: pointer; font-size: 11px; }
+.admin-series-editor textarea { width: 100%; min-height: 280px; resize: vertical; padding: 10px; color: var(--text); background: var(--surface-inset); border: 1px solid var(--line); border-radius: 7px; font: 10px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
+@media (max-width: 640px) { .admin-bili-qr { align-items: flex-start; flex-direction: column; } .admin-integration-grid { grid-template-columns: 1fr; } .admin-series-list article { grid-template-columns: 1fr auto; } .admin-series-list article > span { grid-column: 1 / -1; } .admin-scheduler-failures p { grid-template-columns: 1fr; } }
 .release-related-items .release-list { margin-top: 10px; }
 .watch-source-boundary { margin-bottom: 12px; }
 @media (max-width: 620px) {

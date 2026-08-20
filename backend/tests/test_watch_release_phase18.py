@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import httpx
 
 from otomo.auth import AuthStore
 from otomo.memory import LongTermMemory
@@ -8,10 +9,16 @@ from otomo.subscriptions import CreateSubscriptionRuleRequest, SubscriptionSched
 from otomo.tools.release.tool import (
     AnimeReleaseFeedsArgs,
     GetAnimeReleaseFeedsTool,
+    _classify_release_content,
     _parse_rss,
 )
 from otomo.tools.media_identity import assess_media_scope, build_media_identity
-from otomo.tools.watch.tool import WhereToWatchArgs, WhereToWatchTool, _bili_title_match
+from otomo.tools.watch.tool import (
+    WhereToWatchArgs,
+    WhereToWatchTool,
+    _bili_title_match,
+    _probe_official_url,
+)
 from otomo.tools.yuc.tool import _parse as parse_yuc
 
 
@@ -116,6 +123,35 @@ def test_where_to_watch_uses_bangumi_data(monkeypatch):
     assert res.data.last_verified
 
 
+def test_official_page_probe_reports_reachability_without_claiming_playability(monkeypatch):
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def head(self, url):
+            code = 200 if "reachable" in url else 403 if "blocked" in url else 404
+            return httpx.Response(code, request=httpx.Request("HEAD", url))
+
+        async def get(self, url):
+            return await self.head(url)
+
+    monkeypatch.setattr("otomo.tools.watch.tool.httpx.AsyncClient", FakeClient)
+    reachable = asyncio.run(_probe_official_url("https://www.netflix.com/reachable-title-20260820"))
+    blocked = asyncio.run(_probe_official_url("https://www.netflix.com/blocked-title-20260820"))
+    missing = asyncio.run(_probe_official_url("https://www.netflix.com/missing-title-20260820"))
+    assert reachable["status"] == "reachable"
+    assert reachable["label"] == "官方页面可达"
+    assert "播放" not in str(reachable)
+    assert blocked == {"status": "blocked", "label": "平台阻止自动探测", "http_status": 403}
+    assert missing == {"status": "unavailable", "label": "页面疑似下架", "http_status": 404}
+
+
 def test_parse_release_rss_extracts_torrent_metadata():
     xml = """
     <rss xmlns:torrent="https://mikanani.me/0.1/"><channel>
@@ -192,6 +228,23 @@ def test_shared_media_identity_separates_current_installment_bundle_and_movie():
     assert assess_media_scope(lost_identity, "Lost Universe 01 BDRip").status == "compatible"
 
 
+def test_release_resolution_is_not_mistaken_for_a_version_year():
+    identity = build_media_identity(
+        title="轻音少女",
+        aliases=["K-ON!"],
+        platform="TV",
+        air_date="2009-04-03",
+    )
+    resolution_only = assess_media_scope(identity, "K-ON! [BDrip 1920x1080 x264]")
+    assert resolution_only.status == "compatible"
+    unicode_resolution = assess_media_scope(identity, "K-ON! [1920×1080 HEVC]")
+    assert unicode_resolution.status == "compatible"
+
+    explicit_version = assess_media_scope(identity, "K-ON! 2025 [1920x1080]")
+    assert explicit_version.status == "conflict"
+    assert "2025 年" in explicit_version.reason
+
+
 def test_release_tool_moves_cross_installment_items_out_of_default_groups(monkeypatch):
     class FirstSeasonBangumi(FakeBangumi):
         async def get_subject(self, subject_id: int):
@@ -240,6 +293,43 @@ def test_release_tool_moves_cross_installment_items_out_of_default_groups(monkey
     assert {item.scope_status for item in result.data.related_items} == {"bundle", "conflict"}
     assert any("音乐" in item.scope_reason for item in result.data.related_items)
     assert any("漫画" in item.scope_reason for item in result.data.related_items)
+
+
+def test_release_content_kind_rejects_books_games_and_keeps_title_words_safe():
+    identity = build_media_identity(title="音乐少女", aliases=["Music Girls"], platform="TV")
+    assert _classify_release_content(
+        "[字幕组] 音乐少女 - 01 [1080p][HEVC]", identity,
+    )[0] == "anime_video"
+    assert _classify_release_content("音乐少女 原声集 [FLAC]", identity)[0] == "audio"
+    assert _classify_release_content("音乐少女 轻小说合集 [EPUB]", identity)[0] == "book"
+    assert _classify_release_content("音乐少女 Visual Novel PC Game", identity)[0] == "game"
+    assert _classify_release_content("音乐少女 漫画版 Scanlation", identity)[0] == "comic"
+    assert _classify_release_content("音乐少女", identity)[0] == "unknown"
+
+
+def test_ambiguous_title_only_release_stays_out_of_default_area(monkeypatch):
+    async def fake_mapping():
+        return {207195: [123]}
+
+    async def fake_fetch(_url, source):
+        return [_parse_rss("""
+          <rss><channel><item><title>摇曳露营△</title>
+          <link>https://example.test/ambiguous</link></item></channel></rss>
+        """, source)[0]]
+
+    async def fake_subgroups(_mikan_id):
+        return {}
+
+    monkeypatch.setattr("otomo.tools.release.tool.load_mikan_mapping", fake_mapping)
+    monkeypatch.setattr("otomo.tools.release.tool.fetch_release_items_from_url", fake_fetch)
+    monkeypatch.setattr("otomo.tools.release.tool._subgroup_rss_map", fake_subgroups)
+    result = asyncio.run(GetAnimeReleaseFeedsTool(FakeBangumi()).run(
+        AnimeReleaseFeedsArgs(subject_id=207195, prefer="mikan")
+    ))
+    assert result.ok and result.data is not None
+    assert not result.data.groups
+    assert result.data.related_items[0].content_kind == "unknown"
+    assert result.data.related_items[0].scope_status == "unknown"
 
 
 def test_daily_airing_service_writes_once_and_updates_rss(monkeypatch, tmp_path):

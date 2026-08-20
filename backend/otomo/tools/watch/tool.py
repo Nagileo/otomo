@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 from datetime import date, datetime, timezone
 from typing import Literal
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
@@ -13,6 +13,7 @@ from ...agent._common import emit_tool_progress
 from ...agent.contracts import Citation, Tool, ToolResult
 from ...config import settings
 from .._cache import acached
+from .._concurrency import gather_limited
 from ..bangumi.client import SUBJECT_TYPE, BangumiClient
 from ..bangumi.models import SubjectBrief
 from ..season.tool import _match_yuc
@@ -28,10 +29,43 @@ _EM_TAG_RE = re.compile(r"</?em[^>]*>")
 _TITLE_NOISE_RE = re.compile(r"[\s!！?？。．.,，、·:：;；~～\-—_～『』「」《》()（）\[\]【】'\"…]+")
 
 _buvid_cache: dict[str, str] = {}
+_PROBE_HOST_SUFFIXES = (
+    "bilibili.com", "abema.tv", "nicovideo.jp", "unext.jp", "docomo.ne.jp",
+    "gamer.com.tw", "youtube.com", "netflix.com", "amazon.co.jp", "disneyplus.com",
+    "dmm.com", "hulu.jp", "fod.fujitv.co.jp", "tver.jp", "aniplus-asia.com",
+)
 
 
 def _checked_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+@acached(ttl=6 * 3600)
+async def _probe_official_url(url: str) -> dict[str, object]:
+    """Check page reachability without claiming that a title is playable."""
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or not any(host == suffix or host.endswith(f".{suffix}") for suffix in _PROBE_HOST_SUFFIXES):
+        return {"status": "unchecked", "label": "未做页面探测", "http_status": 0}
+    try:
+        async with httpx.AsyncClient(
+            timeout=min(max(settings.http_timeout, 3), 6),
+            follow_redirects=True,
+            headers={"User-Agent": _BROWSER_UA, "Range": "bytes=0-1024"},
+        ) as client:
+            response = await client.head(url)
+            if response.status_code in {405, 501}:
+                response = await client.get(url)
+        code = int(response.status_code)
+    except httpx.HTTPError:
+        return {"status": "unreachable", "label": "页面暂时无法连接", "http_status": 0}
+    if code in {401, 403, 429, 451}:
+        return {"status": "blocked", "label": "平台阻止自动探测", "http_status": code}
+    if code in {404, 410}:
+        return {"status": "unavailable", "label": "页面疑似下架", "http_status": code}
+    if 200 <= code < 400:
+        return {"status": "reachable", "label": "官方页面可达", "http_status": code}
+    return {"status": "unreachable", "label": f"页面返回 HTTP {code}", "http_status": code}
 
 
 def _norm_bili_title(s: str) -> str:
@@ -172,6 +206,10 @@ class WatchSource(BaseModel):
     availability_label: str = "可能可用"
     last_verified: str = ""
     availability_note: str = ""
+    page_status: Literal["unchecked", "reachable", "blocked", "unreachable", "unavailable"] = "unchecked"
+    page_status_label: str = "未做页面探测"
+    page_checked_at: str = ""
+    http_status: int = 0
 
 
 class WhereToWatchArgs(BaseModel):
@@ -430,6 +468,19 @@ class WhereToWatchTool(Tool):
                     availability_note="实时番剧库检索不可用，不能把这个入口视为正版命中。",
                 )
             )
+        probe_sources = [source for source in official_sources if source.availability_status == "catalog_match"][:6]
+        probe_results = await gather_limited(
+            [_probe_official_url(source.url) for source in probe_sources],
+            host="official-watch-probe",
+            return_exceptions=True,
+        )
+        for source, probe in zip(probe_sources, probe_results, strict=False):
+            if isinstance(probe, BaseException):
+                continue
+            source.page_status = str(probe.get("status") or "unchecked")  # type: ignore[assignment]
+            source.page_status_label = str(probe.get("label") or "未做页面探测")
+            source.page_checked_at = _checked_now()
+            source.http_status = int(probe.get("http_status") or 0)
         status_order = {"verified": 0, "catalog_match": 1, "possible": 2}
         official_sources.sort(key=lambda source: (
             status_order.get(source.availability_status, 9),
@@ -447,7 +498,11 @@ class WhereToWatchTool(Tool):
         elif catalog_sources:
             availability_status = "catalog_match"
             availability_label = "正版目录有记录"
-            availability_note = "目录能够对齐该作品；未对播放页做 HEAD 探测，以避免平台风控和误判。"
+            reachable = sum(source.page_status == "reachable" for source in catalog_sources)
+            availability_note = (
+                f"目录能够对齐该作品；其中 {reachable} 个官方页面当前可达。页面可达不等于所在地区一定可播放。"
+                if reachable else "目录能够对齐该作品；平台阻止自动探测或页面暂不可达，打开后请确认地区与版权状态。"
+            )
         elif official_sources:
             availability_status = "possible"
             availability_label = "存在官方候选"

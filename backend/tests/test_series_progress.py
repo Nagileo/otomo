@@ -11,6 +11,11 @@ from otomo.tools.series_progress import (
     inspect_series_candidate,
 )
 from otomo.tools.watchorder.tool import WatchCopilotArgs, WatchCopilotTool
+from otomo.series_overrides import (
+    SeriesOverrideMember,
+    SeriesOverrideRule,
+    SeriesOverrideStore,
+)
 
 
 class FakeSeriesBangumi:
@@ -109,6 +114,61 @@ def test_optional_side_story_does_not_block_mainline():
     assert [item.id for item in result.optional] == [4]
     assert result.next_unwatched is not None
     assert result.next_unwatched.id == 3
+
+
+def test_manual_override_replaces_wrong_relation_edges_and_skips_recap(tmp_path):
+    store = SeriesOverrideStore(tmp_path / "series.json")
+    store.upsert(SeriesOverrideRule(
+        id="complex-test",
+        title="复杂测试系列",
+        mainline=[
+            SeriesOverrideMember(subject_id=1, name="第一季"),
+            SeriesOverrideMember(subject_id=4, name="总集篇", necessity="skip"),
+            SeriesOverrideMember(subject_id=3, name="正确下一部"),
+        ],
+        optional=[SeriesOverrideMember(subject_id=2, name="另一条线", necessity="optional")],
+        notes=["管理员确认第二季关系边不属于这条主线。"],
+    ))
+    client = FakeSeriesBangumi([collection(1, 2, 12)])
+    result = asyncio.run(SeriesProgressService(client, store).build(
+        SeriesProgressArgs(subject_id=3, username="alice")
+    ))
+    assert result is not None
+    assert result.order_source == "manual_override"
+    assert result.override_id == "complex-test"
+    assert [item.id for item in result.mainline] == [1, 4, 3]
+    assert result.mainline[1].necessity == "skip"
+    assert result.next_unwatched is not None
+    assert result.next_unwatched.id == 3
+    assert result.mainline[2].prerequisite_ids == [1]
+    assert [item.id for item in result.optional] == [2]
+
+
+def test_candidate_audit_uses_same_manual_override_as_progress_service(tmp_path):
+    store = SeriesOverrideStore(tmp_path / "series.json")
+    store.upsert(SeriesOverrideRule(
+        id="candidate-test",
+        title="候选校正规则",
+        mainline=[
+            SeriesOverrideMember(subject_id=1, name="必要前作"),
+            SeriesOverrideMember(subject_id=4, name="不阻塞总集篇", necessity="skip"),
+            SeriesOverrideMember(subject_id=3, name="候选续作"),
+        ],
+    ))
+    client = FakeSeriesBangumi([])
+    status = asyncio.run(inspect_series_candidate(
+        client,
+        3,
+        {},
+        collection_available=True,
+        subject_name="候选续作",
+        override_store=store,
+    ))
+    assert status.order_source == "manual_override"
+    assert status.predecessor_ids == [1]
+    assert [item["id"] for item in status.missing_predecessors] == [1]
+    assert status.next_subject_id == 1
+    assert status.prerequisites_satisfied is False
 
 
 def test_lightweight_candidate_audit_requires_every_predecessor():

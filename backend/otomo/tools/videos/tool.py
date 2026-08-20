@@ -192,6 +192,10 @@ class BiliVideoMeta(BaseModel):
     content_match_reason: str = ""
     transcript_source: Literal["subtitle", "asr", "none"] = "none"
     content_mentions: int = 0
+    deep_check_status: Literal[
+        "not_needed", "subtitle_verified", "asr_verified", "unavailable", "timed_out", "failed"
+    ] = "not_needed"
+    deep_check_note: str = ""
 
 
 class BiliRejectedCandidate(BaseModel):
@@ -271,6 +275,9 @@ class BiliSubjectVideosResult(BaseModel):
     rate_limited: bool = False
     last_verified: str = ""
     account_mode: Literal["public", "cookie"] = "public"
+    asr_provider: Literal["off", "local", "worker", "invalid"] = "off"
+    deep_checked_count: int = 0
+    deep_check_issue_count: int = 0
     warnings: list[str] = Field(default_factory=list)
 
 
@@ -2435,11 +2442,19 @@ class SearchBiliSubjectVideosTool(Tool):
                     )),
                     timeout=min(max(settings.http_timeout * 2, 8), 24),
                 )
-            except (TimeoutError, asyncio.CancelledError):
+            except TimeoutError:
+                item.deep_check_status = "timed_out"
+                item.deep_check_note = "字幕/ASR 深度核验超时；保留为疑似候选，可稍后重试。"
                 return item, False, False
-            except Exception:  # noqa: BLE001 - transcript enrichment must never break search
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - transcript enrichment must never break search
+                item.deep_check_status = "failed"
+                item.deep_check_note = f"深度核验失败：{type(exc).__name__}"
                 return item, False, False
             if not subtitle_result.ok or not subtitle_result.data:
+                item.deep_check_status = "unavailable"
+                item.deep_check_note = subtitle_result.error or "没有公开字幕，当前ASR也不可用。"
                 return item, False, False
             transcript = " ".join(segment.text for segment in subtitle_result.data.segments).lower()
             narration_signals = [
@@ -2453,6 +2468,8 @@ class SearchBiliSubjectVideosTool(Tool):
             source_label = "公开字幕" if subtitle_result.data.source == "bili_public_subtitle" else "ASR"
             item.content_verified = True
             item.transcript_source = "subtitle" if subtitle_result.data.source == "bili_public_subtitle" else "asr"
+            item.deep_check_status = "subtitle_verified" if item.transcript_source == "subtitle" else "asr_verified"
+            item.deep_check_note = f"已通过{source_label}抽样核验内容。"
             if len(narration_signals) >= 2:
                 item.role = "retrospective"
                 item.editorial_role = "recap"
@@ -2546,6 +2563,9 @@ class SearchBiliSubjectVideosTool(Tool):
             warnings.append("部分B站搜索变体暂不可用；已用其余变体与缓存继续返回，不把单点失败当成整轮失败。")
         if rate_limited:
             warnings.append("B站本轮触发限流；已尽量使用缓存降级，未缓存部分不会用不可靠结果填充。")
+        asr_provider = (settings.asr_provider or "off").strip().lower()
+        if asr_provider not in {"off", "local", "worker"}:
+            asr_provider = "invalid"
         return ToolResult(
             ok=True,
             data=BiliSubjectVideosResult(
@@ -2560,6 +2580,9 @@ class SearchBiliSubjectVideosTool(Tool):
                 rate_limited=rate_limited,
                 last_verified=max(verified_times, default=""),
                 account_mode=bilibili_account_mode(),
+                asr_provider=asr_provider,
+                deep_checked_count=sum(item.deep_check_status in {"subtitle_verified", "asr_verified"} for item in selected),
+                deep_check_issue_count=sum(item.deep_check_status in {"unavailable", "timed_out", "failed"} for item in selected),
                 warnings=warnings,
             ),
             sources=[Citation(title=f"Bilibili — {item.title}", url=item.url, source="bilibili") for item in selected[:5]],

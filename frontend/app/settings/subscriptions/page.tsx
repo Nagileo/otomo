@@ -325,6 +325,28 @@ export default function SubscriptionSettingsPage() {
     }
   }
 
+  async function retryRule(rule: AnyRecord) {
+    setBusy(true);
+    try {
+      const res = await fetch(`${BACKEND}/subscriptions/rules/${rule.id}/retry`, {
+        method: "POST",
+        credentials: "include",
+        headers: headers({ "Content-Type": "application/json" }),
+        body: JSON.stringify({}),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok || !payload.ok) {
+        setNotice({ tone: "bad", text: payload.detail || payload.error || `重试失败：HTTP ${res.status}` });
+        return;
+      }
+      const status = String(payload.delivery?.status || "pending");
+      setNotice({ tone: status === "sent" ? "good" : "warn", text: status === "sent" ? "重试成功，失败计数已清零。" : `重试完成：${DELIVERY_STATUS[status] || status}` });
+      await loadRules();
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <main className="share-page">
       <header className="share-hero">
@@ -449,10 +471,13 @@ export default function SubscriptionSettingsPage() {
                   <div className="evidence-row tight">
                     {list(rule.channels).map((ch: any) => <span className="badge dim" key={ch}>{CHANNEL_LABEL[ch] || ch}</span>)}
                     <span className="badge dim">{TEMPLATE_LABEL[rule.template] || rule.template}</span>
+                    {Number(rule.consecutive_failures || 0) > 0 ? <span className="badge warn">连续失败 {rule.consecutive_failures}</span> : rule.last_success_at ? <span className="badge good">最近运行正常</span> : null}
                   </div>
+                  {Number(rule.consecutive_failures || 0) > 0 ? <div className="inline-notice">{rule.last_error || "上次执行失败"}<br />自动重试：{rule.retry_after || "等待调度器"}</div> : null}
                   <div className="settings-actions">
                     <button className="inline-action" onClick={() => patchRule(rule, { enabled: !rule.enabled })} disabled={busy}>{rule.enabled ? "暂停" : "启用"}</button>
                     <button className="inline-action" onClick={() => testRule(rule)} disabled={busy}>测试</button>
+                    {Number(rule.consecutive_failures || 0) > 0 ? <button className="inline-action primary" onClick={() => retryRule(rule)} disabled={busy}>立即重试</button> : null}
                     <button className="inline-action" onClick={() => deleteRule(rule)} disabled={busy}>删除</button>
                   </div>
                 </div>

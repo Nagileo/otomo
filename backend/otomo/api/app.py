@@ -73,6 +73,7 @@ from ..recommendation_events import (
 from ..recsys_registry import cf_model_registry
 from ..session_realtime import SessionRealtimeHub
 from ..session_store import SessionStore
+from ..series_overrides import SeriesOverrideStore
 from ..session_trace import step_from_event, trace_item_from_event
 from ..security_context import tenant_scope
 from ..share import CreateShareSnapshotRequest, ShareSnapshot, ShareSnapshotStore
@@ -116,6 +117,7 @@ from ..workspace import (
 )
 from .community import router as community_router
 from .admin import router as admin_router
+from ..bilibili_account import BilibiliQrLoginService
 
 log = logging.getLogger("otomo.api")
 
@@ -141,6 +143,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         ttl=settings.anime_hub_cache_ttl,
     )
     app.state.anime_hub_metrics = AnimeHubMetricStore()
+    app.state.bilibili_qr = BilibiliQrLoginService(settings.bilibili_cookies_file)
+    app.state.series_overrides = SeriesOverrideStore()
     app.state.workspace_store = WorkspaceStore()
     app.state.community_store = CommunityStore()
     app.state.subscription_service = SubscriptionService(
@@ -926,6 +930,21 @@ async def test_subscription_rule(rule_id: str, request: Request, response: Respo
     if not rule:
         raise HTTPException(status_code=404, detail="订阅不存在或无权测试")
     record = await app.state.subscription_service.run_rule(rule, test=True)
+    return {"ok": True, "delivery": record.model_dump(mode="json", exclude={"owner_key"})}
+
+
+@app.post("/subscriptions/rules/{rule_id}/retry")
+async def retry_subscription_rule(rule_id: str, request: Request, response: Response) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    owner, username = _subscription_owner(session.auth_session_id)
+    _check_subscription_limits(request, username)
+    rule = app.state.subscription_store.get(rule_id, owner)
+    if not rule:
+        raise HTTPException(status_code=404, detail="订阅不存在或无权重试")
+    if rule.consecutive_failures <= 0:
+        raise HTTPException(status_code=409, detail="这条订阅当前没有待重试的失败")
+    record = await app.state.subscription_service.run_rule(rule, force=True)
     return {"ok": True, "delivery": record.model_dump(mode="json", exclude={"owner_key"})}
 
 

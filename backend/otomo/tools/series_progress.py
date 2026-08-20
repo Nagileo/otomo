@@ -13,6 +13,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..agent.contracts import Citation, Tool, ToolResult
+from ..series_overrides import SeriesOverrideRule, SeriesOverrideStore
 from ._concurrency import gather_limited
 from .bangumi.client import SUBJECT_TYPE, BangumiClient
 
@@ -117,6 +118,8 @@ class SeriesProgressResult(BaseModel):
     completed_required: int = 0
     total_required: int = 0
     progress_percent: int = 0
+    order_source: Literal["bangumi", "manual_override"] = "bangumi"
+    override_id: str = ""
     summary: str = ""
     notes: list[str] = Field(default_factory=list)
 
@@ -134,6 +137,8 @@ class SeriesCandidateStatus(BaseModel):
     next_subject_name: str = ""
     action: str = ""
     note: str = ""
+    order_source: Literal["bangumi", "manual_override"] = "bangumi"
+    override_id: str = ""
 
 
 def subject_id_from_collection(row: dict[str, Any]) -> int | None:
@@ -275,8 +280,79 @@ async def inspect_series_candidate(
     subject_name: str = "",
     max_hops: int = _MAX_PREDECESSOR_HOPS,
     relation_memo: SeriesRelationMemo | None = None,
+    override_store: SeriesOverrideStore | None = None,
 ) -> SeriesCandidateStatus:
     """Lightweight strict predecessor audit used by guides and recommender."""
+    store = override_store or SeriesOverrideStore()
+    override = store.find_by_subject(subject_id)
+    if override is not None:
+        matched = override.member(subject_id)
+        if matched is not None and matched[0] == "main":
+            current_index = next(
+                index for index, item in enumerate(override.mainline)
+                if item.subject_id == subject_id
+            )
+            preceding = override.mainline[:current_index]
+            required = [item for item in preceding if item.necessity == "required"]
+            completed = [
+                item for item in required
+                if collection_completed(collections.get(item.subject_id))[0]
+            ]
+            completed_ids = {item.subject_id for item in completed}
+            missing = [item for item in required if item.subject_id not in completed_ids]
+            next_member = missing[0] if missing else override.mainline[current_index]
+            next_row = collections.get(next_member.subject_id)
+            next_state = collection_state(next_row, available=collection_available)
+            next_ep, _next_eps = collection_progress(next_row)
+            candidate_row = collections.get(subject_id)
+            candidate_state = collection_state(candidate_row, available=collection_available)
+            if not required:
+                note = "人工规则确认这是系列入口或没有必要前作"
+            elif not collection_available:
+                note = "已采用人工系列顺序；收藏不可见，无法确认必要前作是否完成"
+            elif missing:
+                note = "已采用人工系列顺序；尚有必要前作未完成"
+            else:
+                note = "已采用人工系列顺序；所有必要前作已完成"
+            return SeriesCandidateStatus(
+                subject_id=subject_id,
+                collection_state=candidate_state,
+                collection_label=state_label(candidate_state, *collection_progress(candidate_row)),
+                is_sequel=bool(required),
+                prerequisites_satisfied=not missing if collection_available else not required,
+                predecessor_ids=[item.subject_id for item in required],
+                completed_predecessor_ids=[item.subject_id for item in completed],
+                missing_predecessors=[
+                    {
+                        "id": item.subject_id,
+                        "name": item.name or str(item.subject_id),
+                        "collection_state": collection_state(
+                            collections.get(item.subject_id), available=collection_available,
+                        ),
+                        "collection_label": state_label(
+                            collection_state(
+                                collections.get(item.subject_id), available=collection_available,
+                            ),
+                            *collection_progress(collections.get(item.subject_id)),
+                        ),
+                    }
+                    for item in missing
+                ],
+                next_subject_id=next_member.subject_id,
+                next_subject_name=(
+                    next_member.name
+                    or (subject_name if next_member.subject_id == subject_id else str(next_member.subject_id))
+                ),
+                action=_action_for(
+                    next_state,
+                    next_member.name or str(next_member.subject_id),
+                    next_ep,
+                    personalized=collection_available,
+                ),
+                note=note,
+                order_source="manual_override",
+                override_id=override.id,
+            )
     raw_by_id: dict[int, dict[str, Any]] = {subject_id: {"id": subject_id, "name": subject_name}}
     direct_edges: set[tuple[int, int]] = set()
     queue: list[tuple[int, int]] = [(subject_id, 0)]
@@ -384,8 +460,13 @@ async def inspect_series_candidate(
 
 
 class SeriesProgressService:
-    def __init__(self, client: BangumiClient) -> None:
+    def __init__(
+        self,
+        client: BangumiClient,
+        override_store: SeriesOverrideStore | None = None,
+    ) -> None:
         self.client = client
+        self.override_store = override_store or SeriesOverrideStore()
 
     async def _resolve_subject(self, args: SeriesProgressArgs) -> dict[str, Any] | None:
         if args.subject_id:
@@ -415,6 +496,15 @@ class SeriesProgressService:
         username, available, collections = await load_collection_context(
             self.client, args.username, collection_rows
         )
+        override = self.override_store.find_by_subject(seed_id)
+        if override is not None:
+            return await self._build_override(
+                override,
+                seed,
+                username=username,
+                available=available,
+                collections=collections,
+            )
 
         raw_by_id: dict[int, dict[str, Any]] = {seed_id: seed}
         roles: dict[int, Literal["main", "side", "alternate"]] = {seed_id: "main"}
@@ -611,6 +701,144 @@ class SeriesProgressService:
             completed_required=completed_required,
             total_required=total_required,
             progress_percent=percent,
+            order_source="bangumi",
+            summary=summary,
+            notes=notes,
+        )
+
+    async def _build_override(
+        self,
+        rule: SeriesOverrideRule,
+        seed: dict[str, Any],
+        *,
+        username: str | None,
+        available: bool,
+        collections: dict[int, dict[str, Any]],
+    ) -> SeriesProgressResult:
+        seed_id = int(seed["id"])
+        members = rule.mainline + rule.optional + rule.alternates
+        details = await gather_limited(
+            [self.client.get_subject(item.subject_id) for item in members],
+            host="bangumi",
+            return_exceptions=True,
+        )
+        raw_by_id: dict[int, dict[str, Any]] = {seed_id: seed}
+        member_by_id = {item.subject_id: item for item in members}
+        for member, detail in zip(members, details, strict=False):
+            fallback = {"id": member.subject_id, "name_cn": member.name}
+            raw_by_id[member.subject_id] = (
+                detail if isinstance(detail, dict) else fallback
+            )
+
+        completed_by_id: dict[int, bool] = {}
+        completion_source: dict[int, str] = {}
+        for member in rule.mainline:
+            completed_by_id[member.subject_id], completion_source[member.subject_id] = collection_completed(
+                collections.get(member.subject_id), _eps(raw_by_id.get(member.subject_id, {})),
+            )
+
+        mainline: list[SeriesProgressItem] = []
+        preceding_required: list[int] = []
+        for index, member in enumerate(rule.mainline):
+            sid = member.subject_id
+            raw = raw_by_id.get(sid, {})
+            name = member.name or _name(raw, str(sid))
+            row = collections.get(sid)
+            ep_status, eps = collection_progress(row, _eps(raw))
+            state = collection_state(row, available=available)
+            blocked_by = [pid for pid in preceding_required if not completed_by_id.get(pid, False)]
+            mainline.append(SeriesProgressItem(
+                id=sid,
+                name=name,
+                date=str(raw.get("date") or ""),
+                image=_image(raw),
+                eps=eps,
+                role="entry" if index == 0 else "main",
+                necessity=member.necessity,
+                relation="人工顺序" if index else "人工入口",
+                collection_state=state,
+                collection_label=state_label(state, ep_status, eps),
+                ep_status=ep_status,
+                completed=completed_by_id[sid],
+                completion_source=completion_source[sid],
+                prerequisite_ids=list(preceding_required),
+                blocked_by=blocked_by,
+                prerequisites_satisfied=not blocked_by if available else not preceding_required,
+                is_current=sid == seed_id,
+                action=_action_for(state, name, ep_status, personalized=available),
+            ))
+            if member.necessity == "required":
+                preceding_required.append(sid)
+
+        def peripheral(member_id: int, role: Literal["side", "alternate"]) -> SeriesProgressItem:
+            member = member_by_id[member_id]
+            raw = raw_by_id.get(member_id, {})
+            name = member.name or _name(raw, str(member_id))
+            row = collections.get(member_id)
+            ep_status, eps = collection_progress(row, _eps(raw))
+            state = collection_state(row, available=available)
+            done, source = collection_completed(row, eps)
+            return SeriesProgressItem(
+                id=member_id,
+                name=name,
+                date=str(raw.get("date") or ""),
+                image=_image(raw),
+                eps=eps,
+                role=role,
+                necessity=member.necessity,
+                relation="人工旁支" if role == "side" else "人工替代线",
+                collection_state=state,
+                collection_label=state_label(state, ep_status, eps),
+                ep_status=ep_status,
+                completed=done,
+                completion_source=source,
+                is_current=member_id == seed_id,
+                action=member.note or ("可按兴趣补充" if role == "side" else "替代演绎，不阻塞原主线"),
+            )
+
+        optional = [peripheral(item.subject_id, "side") for item in rule.optional]
+        alternates = [peripheral(item.subject_id, "alternate") for item in rule.alternates]
+        next_item = next(
+            (
+                item for item in mainline
+                if item.necessity not in {"optional", "skip"}
+                and not item.completed
+                and item.prerequisites_satisfied
+            ),
+            None,
+        )
+        if next_item is not None:
+            next_item.is_next = True
+        all_items = mainline + optional + alternates
+        current = next((item for item in all_items if item.id == seed_id), None)
+        required = [item for item in mainline if item.necessity == "required"]
+        completed_required = sum(item.completed for item in required)
+        total_required = len(required)
+        percent = round(completed_required / total_required * 100) if total_required else 100
+        summary = (
+            f"已采用《{rule.title}》人工校正顺序；主线完成 {completed_required}/{total_required}"
+            + (f"；下一步：{next_item.action}" if next_item else "；必要主线已完成")
+        )
+        notes = [
+            f"本系列使用管理员维护的人工顺序（规则 {rule.id}），不再受错误或缺失的 Bangumi 关系边影响。",
+            "标记为 optional/skip 的总集篇、特别篇或旁支不会阻塞后续必要主线。",
+            *rule.notes,
+        ]
+        return SeriesProgressResult(
+            subject_id=seed_id,
+            username=username,
+            personalized=available,
+            collection_available=available,
+            mainline=mainline,
+            optional=optional,
+            alternates=alternates,
+            current=current,
+            next_unwatched=next_item,
+            completed_required=completed_required,
+            total_required=total_required,
+            progress_percent=percent,
+            order_source="manual_override",
+            override_id=rule.id,
             summary=summary,
             notes=notes,
         )
