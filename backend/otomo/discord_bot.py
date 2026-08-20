@@ -659,6 +659,59 @@ def _video_content_embeds(discord, data: dict) -> list:
     return [e]
 
 
+def _anime_watch_hub_embeds(discord, data: dict) -> list:
+    subject = data.get("subject") or {}
+    lifecycle = data.get("lifecycle") or {}
+    title = str(subject.get("name") or "动画观看中心")
+    overview = discord.Embed(
+        title=f"动画观看中心 · {title}"[:256],
+        url=f"https://bgm.tv/subject/{subject.get('id')}" if subject.get("id") else None,
+        description=str(lifecycle.get("strategy") or "")[0:1200] or None,
+        color=_EMBED_COLOR,
+    )
+    overview.add_field(name="当前状态", value=str(lifecycle.get("label") or "待确认")[:1024], inline=True)
+    for index, line in enumerate((data.get("status_summary") or [])[:4]):
+        overview.add_field(name="链路状态" if index == 0 else "\u200b", value=str(line)[:1024], inline=False)
+    if cover := subject.get("image"):
+        overview.set_thumbnail(url=cover)
+    embeds = [overview]
+    online = data.get("online") or {}
+    embeds.extend(_watch_embeds(discord, online)[:1])
+    bili = data.get("bilibili") or {}
+    videos = (bili.get("videos") or [])[:3]
+    if videos:
+        role_labels = {
+            "staff_uploaded_episode": "Staff/制作方直传正片候选",
+            "episode_candidate": "疑似正片（作者待核验）",
+            "official_pv": "官方/PV",
+            "review": "漫评",
+            "retrospective": "回顾/复盘",
+            "fan_creation": "二创",
+            "related": "相关视频",
+        }
+        video_embed = discord.Embed(
+            title=f"B站具体视频 · {title}"[:256],
+            description="普通视频稿件与番剧库正版页分开展示；直传候选仍需打开核对版权和完整性。",
+            color=_EMBED_COLOR,
+        )
+        for video in videos:
+            label = role_labels.get(str(video.get("role")), "相关视频")
+            name = str(video.get("title") or "?")
+            url = str(video.get("url") or "")
+            linked = f"[{name}]({url})" if url.startswith("http") else name
+            author = str(video.get("author") or "未知UP")
+            caution = str(video.get("caution") or "")
+            video_embed.add_field(
+                name=str(label)[:256],
+                value=f"{linked}\nUP：{author}" + (f"\n{caution[:180]}" if caution else ""),
+                inline=False,
+            )
+        embeds.append(video_embed)
+    releases = data.get("releases") or {}
+    embeds.extend(_release_embeds(discord, releases)[:1])
+    return embeds[:4]
+
+
 def _sections_embeds(discord, data: dict) -> list:
     """驾驶舱/档案/IP图谱/报告 这类分区型交付物 → 摘要卡(细节看网页)。"""
     sections = (data.get("sections") or [])[:6]
@@ -712,6 +765,7 @@ def build_embeds(discord, name: str, data: dict | None) -> list:
             "summarize_bilibili_video_content": _video_content_embeds,
             "watch_cockpit": _sections_embeds,
             "subject_dossier": _sections_embeds,
+            "anime_watch_hub": _anime_watch_hub_embeds,
             "franchise_map": _sections_embeds,
             "monthly_watch_report": _sections_embeds,
             "build_weekly_digest": _sections_embeds,

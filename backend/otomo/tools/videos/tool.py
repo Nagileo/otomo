@@ -67,6 +67,14 @@ class BiliGuideSearchArgs(BaseModel):
     limit: int = Field(8, ge=1, le=20)
 
 
+class BiliSubjectVideosArgs(BaseModel):
+    query: str = Field(..., description="动画主标题")
+    aliases: list[str] = Field(default_factory=list, description="中日英别名；用于排除同名、续作和重制版误配")
+    staff_names: list[str] = Field(default_factory=list, description="Bangumi 制作方/Staff 名称；只作为作者身份信号")
+    lifecycle: Literal["upcoming", "airing", "recent", "archive", "unknown"] = "unknown"
+    limit: int = Field(5, ge=1, le=10)
+
+
 class BiliVideoCommentsArgs(BaseModel):
     aid: int = Field(..., description="B站 av/aid；可先用 search_bilibili_guide_videos 获得")
     query: str | None = Field(None, description="可选语义关键词；当前只做轻量词法优先，不做全文 RAG")
@@ -188,6 +196,37 @@ class BiliGuideSearchResult(BaseModel):
     videos: list[BiliVideoMeta] = Field(default_factory=list)
     navigation_url: str = ""
     rejected: list[BiliRejectedCandidate] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class BiliSubjectVideoMeta(BiliVideoMeta):
+    role: Literal[
+        "staff_uploaded_episode",
+        "episode_candidate",
+        "official_pv",
+        "review",
+        "retrospective",
+        "fan_creation",
+        "related",
+    ] = "related"
+    uploader_class: Literal[
+        "platform_account",
+        "staff_or_production",
+        "self_claimed_official",
+        "creator",
+        "unknown",
+    ] = "unknown"
+    watch_candidate: bool = False
+    identity_evidence: list[str] = Field(default_factory=list)
+    caution: str = ""
+
+
+class BiliSubjectVideosResult(BaseModel):
+    query: str
+    count: int
+    watch_candidates: list[BiliSubjectVideoMeta] = Field(default_factory=list)
+    videos: list[BiliSubjectVideoMeta] = Field(default_factory=list)
+    navigation_url: str = ""
     warnings: list[str] = Field(default_factory=list)
 
 
@@ -597,6 +636,118 @@ def classify_season_video(
         if published < _season_end(target):
             return "airing_review", "发布时间位于季度播出期，且标题明确讨论新番"
     return "general", "标题未能明确区分播前导视、热播漫评或季度复盘"
+
+
+_SUBJECT_EPISODE_RE = re.compile(
+    r"(?:第\s*[0-9一二三四五六七八九十百]+\s*[话話集]|(?:episode|ep)\s*[0-9]+)",
+    re.IGNORECASE,
+)
+
+
+def classify_subject_video(
+    title: str,
+    author: str,
+    description: str = "",
+    *,
+    staff_names: list[str] | None = None,
+) -> tuple[
+    Literal[
+        "staff_uploaded_episode", "episode_candidate", "official_pv", "review",
+        "retrospective", "fan_creation", "related",
+    ],
+    Literal[
+        "platform_account", "staff_or_production", "self_claimed_official",
+        "creator", "unknown",
+    ],
+    bool,
+    list[str],
+    str,
+]:
+    """Classify a concrete-work Bilibili video without conflating uploads with bangumi pages.
+
+    In recent years production committees, studios and individual staff sometimes publish
+    full animation content as ordinary Bilibili video submissions.  Those are useful watch
+    candidates, but the video API does not prove licensing.  We therefore surface the
+    identity signals and keep them separate from ``where_to_watch`` verified bangumi pages.
+    """
+    clean_title = _clean_bili_title(title)
+    lower = f"{clean_title} {author} {description}".lower()
+    content_lower = f"{clean_title} {description}".lower()
+    author_key = _norm_video_text(author)
+    staff_hits = [
+        name for name in (staff_names or [])
+        if author_key
+        and len(_norm_video_text(name)) >= 3
+        and (
+            _norm_video_text(name) == author_key
+            or _norm_video_text(name) in author_key
+            or author_key in _norm_video_text(name)
+        )
+    ]
+    evidence: list[str] = []
+    known_platform = any(token in author_key for token in ("哔哩哔哩番剧", "bilibili番剧", "哔哩哔哩动画"))
+    self_claimed = any(token in lower for token in ("官方账号", "官方频道", "official channel")) or any(
+        token in author.lower() for token in ("官方", "official")
+    )
+    if known_platform:
+        uploader_class = "platform_account"
+        evidence.append("作者名命中 Bilibili 动画/番剧平台账号信号")
+    elif staff_hits:
+        uploader_class = "staff_or_production"
+        evidence.append("作者名与 Bangumi 制作方/Staff 信号匹配：" + "、".join(staff_hits[:2]))
+    elif self_claimed:
+        uploader_class = "self_claimed_official"
+        evidence.append("作者或简介含官方身份自述，尚未由平台授权页交叉确认")
+    else:
+        uploader_class = "unknown"
+
+    auxiliary_media = any(
+        token in content_lower
+        for token in ("op/ed", "op／ed", "剧中歌", "角色歌", "专辑", "演唱会", "特典", "素材", "剪辑")
+    )
+    reaction = "reaction" in content_lower
+    non_episode_context = auxiliary_media or reaction
+    full_episode = not non_episode_context and (
+        bool(_SUBJECT_EPISODE_RE.search(clean_title)) or any(
+            token in content_lower for token in ("正片", "全片", "全集", "全话", "全話", "完整版", "本篇", "免费放送")
+        )
+    )
+    promo = "pv" in content_lower or bool(re.search(r"(?:^|\W)(?:teaser|trailer)(?:\W|$)", content_lower, re.IGNORECASE)) or any(
+        token in content_lower for token in ("预告", "預告", "先导", "先導", "宣传片")
+    )
+    retrospective = any(token in content_lower for token in ("完结评价", "完結", "回顾", "回顧", "复盘", "補番", "补番", "多年后"))
+    review = any(token in content_lower for token in ("漫评", "评价", "解析", "解读", "吐槽", "初印象", "首集", "值不值得看"))
+    fan = any(token in content_lower for token in ("mad", "amv", "手书", "混剪", "二创", "mmd"))
+
+    trusted_identity = uploader_class in {"platform_account", "staff_or_production"}
+    if full_episode and trusted_identity:
+        evidence.append("标题具有正片/分集特征")
+        return (
+            "staff_uploaded_episode", uploader_class, True, evidence,
+            "这是普通视频稿件中的正片候选，不等同于番剧库授权页；请在打开后确认内容完整性、地区与版权说明。",
+        )
+    if full_episode:
+        evidence.append("标题具有正片/分集特征，但作者身份未交叉确认")
+        return (
+            "episode_candidate", uploader_class, False, evidence,
+            "可能包含动画正片，但未确认作者与制作方关系，不作为可靠在线观看入口。",
+        )
+    if promo:
+        if trusted_identity or self_claimed:
+            evidence.append("标题具有 PV/预告特征")
+            return "official_pv", uploader_class, False, evidence, "宣传内容不是完整正片。"
+        return "related", uploader_class, False, evidence, "PV 作者身份未确认。"
+    # OP/ED/特典合集和纯 reaction 并非作品观看链路的核心结果。它们仍可从
+    # B站搜索导航抵达，但不占用有限的编辑卡片名额。
+    if auxiliary_media or reaction:
+        return "related", uploader_class, False, evidence, "音乐/特典合集或 reaction 不进入默认作品视频卡片。"
+    if retrospective:
+        return "retrospective", "creator" if uploader_class == "unknown" else uploader_class, False, evidence, "回顾/复盘属于观点内容。"
+    if review:
+        return "review", "creator" if uploader_class == "unknown" else uploader_class, False, evidence, "漫评属于观点内容，不是正版播放入口。"
+    if fan:
+        return "fan_creation", "creator" if uploader_class == "unknown" else uploader_class, False, evidence, "二创内容不是正片播放入口。"
+    return "related", uploader_class, False, evidence, "相关性依据标题和稿件详情，打开后仍应核对内容。"
 
 
 def _season_end(start: datetime) -> datetime:
@@ -1644,6 +1795,217 @@ class SearchBiliGuideVideosTool(Tool):
         )
 
 
+class SearchBiliSubjectVideosTool(Tool):
+    name = "search_bilibili_subject_videos"
+    description = (
+        "搜索某一部动画的具体 B站视频并分类为 Staff/制作方直传正片候选、PV、漫评、回顾或二创。"
+        "普通视频稿件中的正片候选与 B站番剧库正版页严格分开；作者身份不足时不会冒充官方入口。"
+    )
+    args_model = BiliSubjectVideosArgs
+    result_model = BiliSubjectVideosResult
+
+    async def run(self, args: BiliSubjectVideosArgs) -> ToolResult[BiliSubjectVideosResult]:
+        query = args.query.strip()
+        aliases = list(dict.fromkeys([query, *(x.strip() for x in args.aliases if x.strip())]))[:8]
+        warnings: list[str] = []
+
+        if args.lifecycle == "upcoming":
+            suffixes = ("官方 PV", "预告", "前瞻", "漫评")
+        elif args.lifecycle == "airing":
+            suffixes = ("正片", "官方", "首集 漫评", "PV")
+        elif args.lifecycle == "archive":
+            suffixes = ("正片", "全集", "回顾", "补番 漫评")
+        else:
+            suffixes = ("正片", "官方 PV", "漫评", "回顾")
+        variants = list(dict.fromkeys([query, *(f"{query} {suffix}" for suffix in suffixes)]))[:5]
+
+        async def search_variant(value: str) -> dict | None:
+            try:
+                return await _bili_search_async(value)
+            except (httpx.HTTPError, httpx.TransportError, ValueError):
+                try:
+                    return await asyncio.to_thread(_sync_bili_search, value)
+                except (httpx.HTTPError, httpx.TransportError, ValueError) as exc:
+                    warnings.append(f"搜索变体《{value}》不可用：{type(exc).__name__}")
+                    return None
+
+        payloads = await asyncio.gather(*(search_variant(value) for value in variants))
+        seen: set[str] = set()
+        candidates: list[tuple[float, str, dict]] = []
+        for payload in payloads:
+            if not payload:
+                continue
+            for raw in ((payload.get("data") or {}).get("result") or []):
+                key = str(raw.get("bvid") or raw.get("aid") or raw.get("id") or raw.get("arcurl") or "")
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                confidence, reason = _hit_relevance(
+                    raw,
+                    up_name="",
+                    aliases=aliases,
+                    tags=[],
+                    season_query=" ".join(aliases),
+                )
+                if confidence >= 0.46:
+                    candidates.append((confidence, reason, raw))
+        def precheck_priority(row: tuple[float, str, dict]) -> tuple[float, int]:
+            confidence, _reason, raw = row
+            role, _uploader, _watch, _evidence, _caution = classify_subject_video(
+                _clean_bili_title(raw.get("title") or ""),
+                str(raw.get("author") or ""),
+                str(raw.get("description") or ""),
+                staff_names=args.staff_names,
+            )
+            bonus = {
+                "staff_uploaded_episode": 0.28,
+                "official_pv": 0.18,
+                "review": 0.15,
+                "retrospective": 0.15,
+                "fan_creation": 0.07,
+                "episode_candidate": 0.02,
+                "related": -0.3,
+            }[role]
+            return -(confidence + bonus), -int(raw.get("pubdate") or 0)
+
+        candidates.sort(key=precheck_priority)
+
+        async def verify(row: tuple[float, str, dict]) -> tuple[float, str, dict, bool]:
+            confidence, reason, raw = row
+            try:
+                payload = await asyncio.to_thread(
+                    _sync_bili_view, raw.get("aid") or raw.get("id"), raw.get("bvid"),
+                )
+                detail = payload.get("data") or {}
+                if not detail:
+                    return confidence, reason, raw, False
+                normalized = {
+                    **raw,
+                    "title": detail.get("title") or raw.get("title"),
+                    "description": detail.get("desc") or raw.get("description") or "",
+                    "author": (detail.get("owner") or {}).get("name") or raw.get("author"),
+                    "mid": (detail.get("owner") or {}).get("mid") or raw.get("mid"),
+                    "aid": detail.get("aid") or raw.get("aid") or raw.get("id"),
+                    "bvid": detail.get("bvid") or raw.get("bvid"),
+                    "pic": detail.get("pic") or raw.get("pic"),
+                    "pubdate": detail.get("pubdate") or raw.get("pubdate"),
+                    "play": (detail.get("stat") or {}).get("view") or raw.get("play"),
+                    "video_review": (detail.get("stat") or {}).get("danmaku") or raw.get("video_review"),
+                }
+                confidence, reason = _hit_relevance(
+                    normalized,
+                    up_name="",
+                    aliases=aliases,
+                    tags=[],
+                    season_query=" ".join(aliases),
+                )
+                return confidence, reason, normalized, True
+            except (httpx.HTTPError, httpx.TransportError, ValueError):
+                return confidence, reason, raw, False
+
+        checked = await asyncio.gather(*(
+            verify(row) for row in candidates[: min(max(args.limit * 3, 10), 20)]
+        ))
+        ranked: list[tuple[float, BiliSubjectVideoMeta]] = []
+        role_bonus = {
+            "staff_uploaded_episode": 0.22,
+            "official_pv": 0.12,
+            "review": 0.08,
+            "retrospective": 0.08,
+            "fan_creation": 0.02,
+            "episode_candidate": -0.04,
+            "related": 0.0,
+        }
+        for confidence, reason, raw, view_verified in checked:
+            if confidence < 0.56:
+                continue
+            title = _clean_bili_title(raw.get("title") or "")
+            author = str(raw.get("author") or "")
+            role, uploader_class, watch_candidate, evidence, caution = classify_subject_video(
+                title,
+                author,
+                str(raw.get("description") or ""),
+                staff_names=args.staff_names,
+            )
+            # The work hub is editorial, not a raw Bilibili search page.  Merch,
+            # radio, event, material and other generic title matches stay behind
+            # the navigation link instead of filling the five recommendation cards.
+            if role == "related":
+                continue
+            # Unverified full-episode uploads are deliberately harder to surface than reviews.
+            if role == "episode_candidate" and confidence < 0.7:
+                continue
+            url = raw.get("arcurl") or f"https://www.bilibili.com/video/{raw.get('bvid') or ('av' + str(raw.get('aid') or raw.get('id')))}"
+            content_type, content_type_reason = classify_season_video(title, raw.get("pubdate"), query)
+            item = BiliSubjectVideoMeta(
+                title=title,
+                url=str(url).replace("http://", "https://"),
+                aid=raw.get("aid") or raw.get("id"),
+                bvid=raw.get("bvid"),
+                author=author,
+                mid=raw.get("mid"),
+                thumbnail_url=_clean_bili_image(raw.get("pic")),
+                play=raw.get("play"),
+                danmaku=raw.get("video_review"),
+                pubdate=raw.get("pubdate"),
+                content_type=content_type,
+                content_type_reason=content_type_reason,
+                matched_whitelist=author in _whitelist_by_name(),
+                match_confidence=round(confidence, 3),
+                match_reason=reason,
+                verified=view_verified,
+                verification_status="view_verified" if view_verified else "search_metadata",
+                role=role,
+                uploader_class=uploader_class,
+                watch_candidate=watch_candidate,
+                identity_evidence=evidence,
+                caution=caution,
+            )
+            ranked.append((confidence + role_bonus[role], item))
+        ranked.sort(key=lambda row: (-row[0], -(row[1].pubdate or 0)))
+
+        # Prefer several editorial roles over five near-identical review videos.
+        role_limits = {
+            "staff_uploaded_episode": 2,
+            "official_pv": 1,
+            "review": 2,
+            "retrospective": 2,
+            "fan_creation": 1,
+            "episode_candidate": 1,
+        }
+        selected: list[BiliSubjectVideoMeta] = []
+        role_counts: dict[str, int] = {}
+        for _score, item in ranked:
+            if role_counts.get(item.role, 0) >= role_limits.get(item.role, 0):
+                continue
+            selected.append(item)
+            role_counts[item.role] = role_counts.get(item.role, 0) + 1
+            if len(selected) >= args.limit:
+                break
+        selected = selected[: args.limit]
+        watch_candidates = [item for item in selected if item.watch_candidate]
+        if watch_candidates:
+            warnings.append(
+                "发现制作方/Staff身份信号与正片特征同时成立的普通视频稿件；已作为直传观看候选展示，但不等同番剧库授权页。"
+            )
+        if any(item.role == "episode_candidate" for item in selected):
+            warnings.append("存在标题像正片但作者身份不足的稿件；只列为视频内容，不作为可靠观看入口。")
+        if not selected:
+            warnings.append("没有具体视频通过作品标题与版本一致性阈值；保留 B站搜索导航。")
+        return ToolResult(
+            ok=True,
+            data=BiliSubjectVideosResult(
+                query=query,
+                count=len(selected),
+                watch_candidates=watch_candidates,
+                videos=selected,
+                navigation_url=_bili(query),
+                warnings=warnings,
+            ),
+            sources=[Citation(title=f"Bilibili — {item.title}", url=item.url, source="bilibili") for item in selected[:5]],
+        )
+
+
 class GetBiliVideoCommentsTool(Tool):
     name = "get_bilibili_video_comments"
     description = (
@@ -1983,6 +2345,7 @@ def build_video_tools() -> list[Tool]:
         FindVideosTool(),
         FindGuideVideosTool(),
         SearchBiliGuideVideosTool(),
+        SearchBiliSubjectVideosTool(),
         GetBiliVideoCommentsTool(),
         GetBiliVideoSubtitlesTool(),
         GetBiliVideoDanmakuTool(),

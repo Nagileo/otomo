@@ -240,6 +240,7 @@ function sessionActivityLabel(session: ChatSession) {
 function evidenceSummary(evidence: EvidenceMap) {
   const rows = [
     ["season_guide_brief", "季番导视"],
+    ["anime_watch_hub", "动画观看中心"],
     ["where_to_watch", "正版观看"],
     ["get_anime_release_feeds", "离线资源/RSS"],
     ["get_bangumi_index", "Bangumi目录"],
@@ -313,6 +314,8 @@ function friendlyToolName(name: string) {
   const map: Record<string, string> = {
     recommend_subjects: "生成推荐候选",
     season_guide_brief: "整理季番导视",
+    anime_watch_hub: "汇总动画观看中心",
+    search_bilibili_subject_videos: "核验单部动画B站内容",
     where_to_watch: "查询正版入口",
     get_anime_release_feeds: "聚合离线RSS",
     get_bangumi_index: "读取Bangumi目录",

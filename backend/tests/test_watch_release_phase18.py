@@ -10,7 +10,7 @@ from otomo.tools.release.tool import (
     GetAnimeReleaseFeedsTool,
     _parse_rss,
 )
-from otomo.tools.watch.tool import WhereToWatchArgs, WhereToWatchTool
+from otomo.tools.watch.tool import WhereToWatchArgs, WhereToWatchTool, _bili_title_match
 from otomo.tools.yuc.tool import _parse as parse_yuc
 
 
@@ -71,6 +71,15 @@ def test_yuc_parser_keeps_bilibili_bangumi_links_only():
     assert rows[0].bili_url == "https://www.bilibili.com/bangumi/media/md123"
     assert len(rows[0].stream_urls) == 1
     assert rows[0].official_url == "https://anime.example/"
+
+
+def test_bilibili_bangumi_match_rejects_second_season_for_unmarked_first_season():
+    first = {"title": "轻音少女 第一季", "org_title": "K-ON!"}
+    second = {"title": "轻音少女 第二季", "org_title": "K-ON!!"}
+    assert _bili_title_match("轻音少女", "けいおん！", first)[0] > 0
+    assert _bili_title_match("轻音少女", "けいおん！", second)[0] == 0
+    assert _bili_title_match("轻音少女 第二季", "けいおん！！", first)[0] == 0
+    assert _bili_title_match("轻音少女 第二季", "けいおん！！", second)[0] > 0
 
 
 def test_where_to_watch_uses_bangumi_data(monkeypatch):

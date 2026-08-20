@@ -87,7 +87,10 @@ class ReleaseSearchLink(BaseModel):
 class AnimeReleaseFeedsArgs(BaseModel):
     subject_id: int | None = Field(None, description="Bangumi 动画 subject_id；优先使用")
     title: str = Field("", description="动画标题；subject_id 为空时用于搜索 Bangumi / RSS")
-    prefer: Literal["auto", "mikan", "bt", "bd"] = Field("auto", description="auto/mikan/bt/bd；BD 收藏优先设 bd")
+    prefer: Literal["auto", "mikan", "bt", "bd", "archive"] = Field(
+        "auto",
+        description="auto/mikan/bt/bd/archive；老番补番用 archive，同时查番组 RSS、BT 合集与 BD 入口",
+    )
     subgroup_filter: str = Field("", description="可选字幕组过滤，如 喵萌")
     limit: int = Field(12, ge=1, le=30)
 
@@ -471,7 +474,7 @@ class GetAnimeReleaseFeedsTool(Tool):
         mapping_confidence = 0.0
         await emit_tool_progress(tool=self.name, summary="读取 Mikan 映射与 RSS", current=2, total=4)
         search_matched = ""
-        if args.prefer in {"auto", "mikan"}:
+        if args.prefer in {"auto", "mikan", "archive"}:
             try:
                 if subject_id:
                     mapping = await load_mikan_mapping()
@@ -510,10 +513,14 @@ class GetAnimeReleaseFeedsTool(Tool):
             except Exception:  # noqa: BLE001
                 mapping_confidence = mapping_confidence or 0.0
         await emit_tool_progress(tool=self.name, summary="读取 DMHY / ACGNX RSS 兜底", current=3, total=4)
-        if args.prefer in {"auto", "bt", "bd"} or not groups:
+        if args.prefer in {"auto", "bt", "bd", "archive"} or not groups:
             # BD 收藏意图：VCB-Studio 的发布本来就走 dmhy/acgnx 等 BT 站（2026-07-05 实测
             # acgnx 搜 "VCB K-ON" 直接命中），带前缀检索即可磁力直出；无果再退 BDRip 通用词。
-            bt_queries = [f"VCB-Studio {title}", f"{title} BDRip"] if args.prefer == "bd" else [title]
+            bt_queries = (
+                [f"VCB-Studio {title}", f"{title} BDRip", f"{title} 合集"]
+                if args.prefer in {"bd", "archive"}
+                else [title]
+            )
             for bt_query in bt_queries:
                 bt_q = quote(bt_query)
                 for source, url in (("dmhy", _DMHY_RSS.format(q=bt_q)), ("acgnx", _ACGNX_RSS.format(q=bt_q))):
@@ -524,7 +531,7 @@ class GetAnimeReleaseFeedsTool(Tool):
                     fallback_items.extend(_filter_items(rows, args.subgroup_filter, args.limit))
                 if fallback_items:
                     break
-        if args.prefer == "bd":
+        if args.prefer in {"bd", "archive"}:
             vcb_q = quote(f"VCB-Studio {title}")
             groups.append(
                 ReleaseGroup(

@@ -92,6 +92,8 @@ from ..tools.discovery.tool import CompareSubjectsArgs, CompareSubjectsTool
 from ..tools.moegirl.client import MoegirlClient
 from ..tools.recommend.tool import RecommendArgs, RecommendTool
 from ..tools.product_loop.tool import (
+    AnimeWatchHubArgs,
+    AnimeWatchHubTool,
     MonthlyWatchReportArgs,
     MonthlyWatchReportTool,
     SubjectDossierArgs,
@@ -2141,6 +2143,7 @@ async def product_subject_dossier(
     request: Request,
     response: Response,
     spoiler_level: Literal["none", "mild", "full"] = "none",
+    include_watch: bool = True,
     include_release: bool = True,
 ) -> dict[str, Any]:
     session = _ensure_auth_session(request, response)
@@ -2151,10 +2154,38 @@ async def product_subject_dossier(
         args = SubjectDossierArgs(
             subject_id=subject_id,
             spoiler_level=spoiler_level,
+            include_watch=include_watch,
             include_release=include_release,
         )
         with tenant_scope(identity.username, authenticated=identity.authenticated):
             result = await SubjectDossierTool(client).run(args)
+        return result.model_dump(mode="json", exclude_none=True)
+    finally:
+        await client.aclose()
+
+
+@app.get("/product/subjects/{subject_id}/watch-hub")
+async def product_anime_watch_hub(
+    subject_id: int,
+    request: Request,
+    response: Response,
+    include_release: bool = True,
+    include_videos: bool = True,
+    video_limit: int = 5,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _product_rate_limit(request, session.auth_session_id, "subject_watch_hub")
+    identity = app.state.auth.identity(session.auth_session_id)
+    client = await _request_client(app, session.auth_session_id)
+    try:
+        args = AnimeWatchHubArgs(
+            subject_id=subject_id,
+            include_release=include_release,
+            include_videos=include_videos,
+            video_limit=min(max(video_limit, 1), 10),
+        )
+        with tenant_scope(identity.username, authenticated=identity.authenticated):
+            result = await AnimeWatchHubTool(client).run(args)
         return result.model_dump(mode="json", exclude_none=True)
     finally:
         await client.aclose()

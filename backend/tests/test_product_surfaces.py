@@ -12,7 +12,11 @@ from otomo.auth import BangumiToken
 from otomo.memory import LongTermMemory
 from otomo.memory.models import FeedbackItem
 from otomo.security_context import tenant_scope
-from otomo.tools.product_loop.tool import SubjectDossierResult
+from otomo.tools.product_loop.tool import (
+    AnimeLifecycle,
+    AnimeWatchHubResult,
+    SubjectDossierResult,
+)
 from otomo.tools.profile.tool import (
     CollectionDashboardArgs,
     CollectionDashboardResult,
@@ -168,11 +172,39 @@ def test_subject_surface_is_public_and_forwards_spoiler_and_release_flags(tmp_pa
 
     monkeypatch.setattr("otomo.api.app.SubjectDossierTool.run", dossier_run)
     with TestClient(app) as client:
-        response = client.get("/product/subjects/42?spoiler_level=mild&include_release=false")
+        response = client.get("/product/subjects/42?spoiler_level=mild&include_watch=false&include_release=false")
         assert response.status_code == 200
         assert response.json()["data"]["subject"]["id"] == 42
         assert seen["spoiler_level"] == "mild"
+        assert seen["include_watch"] is False
         assert seen["include_release"] is False
+
+
+def test_watch_hub_surface_forwards_lazy_module_flags(tmp_path, monkeypatch):
+    _configure_stores(tmp_path, monkeypatch)
+    seen: dict[str, object] = {}
+
+    async def watch_hub_run(_self, args):
+        seen.update(args.model_dump())
+        return ToolResult(ok=True, data=AnimeWatchHubResult(
+            subject={"id": args.subject_id, "name": "测试动画"},
+            lifecycle=AnimeLifecycle(state="airing", label="正在播出"),
+        ))
+
+    monkeypatch.setattr("otomo.api.app.AnimeWatchHubTool.run", watch_hub_run)
+    with TestClient(app) as client:
+        response = client.get(
+            "/product/subjects/42/watch-hub?include_release=false&include_videos=true&video_limit=3",
+        )
+        assert response.status_code == 200
+        assert response.json()["data"]["lifecycle"]["state"] == "airing"
+        assert seen == {
+            "subject_id": 42,
+            "title": "",
+            "include_release": False,
+            "include_videos": True,
+            "video_limit": 3,
+        }
 
 
 def test_collection_dashboard_reads_feedback_from_full_user_memory(tmp_path):

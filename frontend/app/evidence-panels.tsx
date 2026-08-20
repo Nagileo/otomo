@@ -12,7 +12,7 @@ import { PixivPanel } from "./panels/visual";
 type EvidenceMap = Record<string, AnyRecord[]>;
 type EvidenceMode = "user" | "dev";
 
-import { ReviewEvidencePanel, SourceRoutingPanel, TasteAffinityPanel, WhereToWatchPanel, ReleaseFeedsPanel, BangumiIndexPanel, SeasonGuidePanel, BroadcastCalendarPanel, AiringProgressPanel, EpisodeRadarPanel, ExplorerPanel, TodayCockpitPanel } from "./panels/media";
+import { AnimeWatchHubPanel, ReviewEvidencePanel, SourceRoutingPanel, TasteAffinityPanel, WhereToWatchPanel, ReleaseFeedsPanel, BangumiIndexPanel, SeasonGuidePanel, BroadcastCalendarPanel, AiringProgressPanel, EpisodeRadarPanel, ExplorerPanel, TodayCockpitPanel } from "./panels/media";
 import { AspectProfilePanel, RecommendPanel, WatchCopilotPanel, WatchOrderPanel } from "./panels/recommend";
 import { MonthlyWatchReportPanel, ProductSectionsPanel, SubjectDossierPanel, AnimeMusicThemesPanel, AnimeThemesPanel, WeeklyDigestPanel } from "./panels/product";
 import { VisualTextPanel, VisualStylePanel, ImageSourcePanel, RouteImageSourcePanel, BiliVideoContentPanel, VideoFramePanel } from "./panels/visual";
@@ -62,6 +62,7 @@ export const PANEL_LABELS: Record<string, string> = {
   get_airing_progress: "追番进度",
   watch_cockpit: "追番驾驶舱",
   subject_dossier: "作品档案",
+  anime_watch_hub: "动画观看中心",
   franchise_map: "IP 图谱",
   monthly_watch_report: "观看报告",
   get_subject_trend: "口碑走势",
@@ -137,6 +138,7 @@ export function renderPanelByName(name: string, rows: AnyRecord[], h: PanelHandl
     case "get_airing_progress": return render((d, i) => <AiringProgressPanel data={d} key={`${name}-${i}`} />);
     case "watch_cockpit": return render((d, i) => <ProductSectionsPanel data={d} title="追番驾驶舱" shareType="watch_cockpit" onShareSnapshot={h.onShareSnapshot} key={`${name}-${i}`} />);
     case "subject_dossier": return render((d, i) => <SubjectDossierPanel data={d} onShareSnapshot={h.onShareSnapshot} key={`${name}-${i}`} />);
+    case "anime_watch_hub": return render((d, i) => <AnimeWatchHubPanel data={d} onPrepareDownloaderPush={h.onPrepareDownloaderPush} key={`${name}-${i}`} />);
     case "franchise_map": return render((d, i) => <ProductSectionsPanel data={d} title="IP 图谱" key={`${name}-${i}`} />);
     case "monthly_watch_report": return render((d, i) => <MonthlyWatchReportPanel data={d} onShareSnapshot={h.onShareSnapshot} key={`${name}-${i}`} />);
     case "anime_music_themes": return render((d, i) => <AnimeMusicThemesPanel data={d} key={`${name}-${i}`} />);

@@ -40,7 +40,7 @@ EXPOSED_TOOLS: set[str] = {
     "season_guide_brief", "list_season_anime", "list_year_anime", "get_broadcast_calendar",
     "get_trending_subjects",
     # 观看与资源
-    "where_to_watch", "get_anime_release_feeds",
+    "anime_watch_hub", "where_to_watch", "get_anime_release_feeds", "search_bilibili_subject_videos",
     # 巡礼 / 音乐 / 生日 / IP
     "get_pilgrimage_map", "plan_pilgrimage_trip", "anime_music_themes", "search_anime_themes",
     "get_character_birthdays", "franchise_map",

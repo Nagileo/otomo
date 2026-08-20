@@ -6,8 +6,10 @@ underlying sources traceable.
 """
 from __future__ import annotations
 
+import asyncio
 from collections import Counter, defaultdict
 from datetime import date
+import re
 from statistics import mean
 from typing import Any, Literal
 
@@ -25,6 +27,11 @@ from ..discovery.tool import EpisodeBuzzRadarTool, EpisodeRadarArgs
 from ..animethemes.tool import AnimeThemesArgs, SearchAnimeThemesTool
 from ..release.tool import AnimeReleaseFeedsArgs, GetAnimeReleaseFeedsTool
 from ..review.tool import ReviewSubjectArgs, ReviewSubjectTool
+from ..videos.tool import (
+    BiliSubjectVideosArgs,
+    BiliSubjectVideosResult,
+    SearchBiliSubjectVideosTool,
+)
 from ..watch.tool import WhereToWatchArgs, WhereToWatchTool
 from ..watchorder.tool import WatchCopilotArgs, WatchCopilotTool, WatchOrderArgs, WatchOrderTool, _resolve_username
 
@@ -57,12 +64,42 @@ class SubjectDossierArgs(BaseModel):
     title: str = Field("", description="subject_id 为空时按标题搜索")
     subject_type: Literal["anime", "book", "music", "game", "real"] | None = None
     spoiler_level: Literal["none", "mild", "full"] = "none"
+    include_watch: bool = Field(True, description="是否聚合观看入口；产品页可改由 anime_watch_hub 分段加载")
     include_release: bool = Field(True, description="anime 条目是否补 release/RSS 入口")
 
 
 class SubjectDossierResult(BaseModel):
     subject: dict[str, Any]
     sections: list[ProductSection] = Field(default_factory=list)
+    quick_actions: list[str] = Field(default_factory=list)
+    caveats: list[str] = Field(default_factory=list)
+
+
+class AnimeLifecycle(BaseModel):
+    state: Literal["upcoming", "airing", "recent", "archive", "unknown"] = "unknown"
+    label: str = "状态待确认"
+    air_date: str = ""
+    end_date: str = ""
+    strategy: str = "按作品身份查询观看与内容入口"
+    confidence: float = 0.5
+
+
+class AnimeWatchHubArgs(BaseModel):
+    subject_id: int | None = Field(None, description="Bangumi 动画 subject_id；优先使用")
+    title: str = Field("", description="subject_id 为空时按标题搜索")
+    include_release: bool = True
+    include_videos: bool = True
+    video_limit: int = Field(5, ge=1, le=10)
+
+
+class AnimeWatchHubResult(BaseModel):
+    subject: dict[str, Any]
+    lifecycle: AnimeLifecycle
+    online: dict[str, Any] = Field(default_factory=dict)
+    releases: dict[str, Any] = Field(default_factory=dict)
+    bilibili: BiliSubjectVideosResult | None = None
+    staff_signals: list[str] = Field(default_factory=list)
+    status_summary: list[str] = Field(default_factory=list)
     quick_actions: list[str] = Field(default_factory=list)
     caveats: list[str] = Field(default_factory=list)
 
@@ -162,7 +199,10 @@ def _subject_type_name(value: int | None) -> str:
     return {1: "book", 2: "anime", 3: "music", 4: "game", 6: "real"}.get(value or 0, "")
 
 
-async def _resolve_subject(client: BangumiClient, args: SubjectDossierArgs | FranchiseMapArgs) -> dict[str, Any] | None:
+async def _resolve_subject(
+    client: BangumiClient,
+    args: SubjectDossierArgs | FranchiseMapArgs | AnimeWatchHubArgs,
+) -> dict[str, Any] | None:
     if args.subject_id:
         return await client.get_subject(args.subject_id)
     if not args.title.strip():
@@ -185,12 +225,92 @@ def _subject_payload(raw: dict[str, Any]) -> dict[str, Any]:
         "type": raw.get("type"),
         "type_name": _subject_type_name(raw.get("type")),
         "date": raw.get("date") or "",
+        "eps": raw.get("eps") or raw.get("total_episodes"),
+        "platform": raw.get("platform") or "",
         "score": rating.get("score"),
         "rank": rating.get("rank"),
         "summary": (raw.get("summary") or "")[:600],
         "image": _image(raw),
         "tags": [t.get("name") for t in (raw.get("tags") or []) if isinstance(t, dict) and t.get("name")][:15],
     }
+
+
+def _infobox_text(raw: dict[str, Any], keys: tuple[str, ...]) -> str:
+    for row in raw.get("infobox") or []:
+        if not isinstance(row, dict) or str(row.get("key") or "").strip() not in keys:
+            continue
+        value = row.get("value")
+        if isinstance(value, list):
+            values = [str(item.get("v") if isinstance(item, dict) else item).strip() for item in value]
+            return " / ".join(item for item in values if item)
+        return str(value or "").strip()
+    return ""
+
+
+def _date_prefix(value: str) -> date | None:
+    match = re.search(r"(20\d{2})[-年/.](\d{1,2})[-月/.](\d{1,2})", value or "")
+    if not match:
+        return None
+    try:
+        return date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    except ValueError:
+        return None
+
+
+def _anime_lifecycle(raw: dict[str, Any]) -> AnimeLifecycle:
+    today = date.today()
+    air_text = str(raw.get("date") or "")
+    end_text = _infobox_text(raw, ("播放结束", "放送结束", "上映结束", "发售日", "発売日"))
+    start = _date_prefix(air_text)
+    end = _date_prefix(end_text)
+    if start and start > today:
+        return AnimeLifecycle(
+            state="upcoming", label="尚未开播", air_date=air_text, end_date=end_text,
+            strategy="优先查正版预约、官方/Staff PV 与播前内容；不把未发布资源写成可观看",
+            confidence=0.94,
+        )
+    if end and end < today:
+        days = (today - end).days
+        state = "recent" if days <= 365 else "archive"
+        return AnimeLifecycle(
+            state=state,
+            label="近期完结" if state == "recent" else "已完结老番",
+            air_date=air_text,
+            end_date=end_text,
+            strategy=(
+                "优先查完结评价、全集/番组 RSS 与系列下一部"
+                if state == "recent"
+                else "优先查正版存量、全集/BD/VCB、补番回顾与系列顺序"
+            ),
+            confidence=0.92,
+        )
+    if start:
+        age = (today - start).days
+        if age <= 210:
+            return AnimeLifecycle(
+                state="airing", label="正在播出或近期上线", air_date=air_text, end_date=end_text,
+                strategy="优先查正版更新、最新集 RSS、Staff 直传候选与首集/阶段漫评",
+                confidence=0.72 if not end else 0.88,
+            )
+        if age <= 730:
+            return AnimeLifecycle(
+                state="recent", label="近期作品", air_date=air_text, end_date=end_text,
+                strategy="兼顾正版存量、番组 RSS、完结评价和系列路线",
+                confidence=0.68,
+            )
+        return AnimeLifecycle(
+            state="archive", label="已完结老番", air_date=air_text, end_date=end_text,
+            strategy="优先查正版存量、全集/BD/VCB、补番回顾与系列顺序",
+            confidence=0.78,
+        )
+    return AnimeLifecycle(
+        state="unknown",
+        label="播出状态待确认",
+        air_date=air_text,
+        end_date=end_text,
+        strategy="先按作品条目查询；对资源与视频结果保留较强版本警告",
+        confidence=0.4,
+    )
 
 
 def _norm_music_title(value: str) -> str:
@@ -465,6 +585,159 @@ class WatchCockpitTool(Tool):
         return ToolResult(ok=True, data=result, sources=sources[:10])
 
 
+class AnimeWatchHubTool(Tool):
+    name = "anime_watch_hub"
+    description = (
+        "动画作品的一站式观看枢纽：按 Bangumi 条目聚合正版观看、制作方/Staff B站直传候选、"
+        "PV/漫评/回顾、Mikan/字幕组 RSS、BT/BD 入口。适用于新番和老番；只读聚合，下载器仍需单独确认。"
+    )
+    args_model = AnimeWatchHubArgs
+    result_model = AnimeWatchHubResult
+
+    def __init__(self, client: BangumiClient) -> None:
+        self.client = client
+        self.watch = WhereToWatchTool(client)
+        self.release = GetAnimeReleaseFeedsTool(client)
+        self.videos = SearchBiliSubjectVideosTool()
+
+    async def _staff_signals(self, subject_id: int) -> list[str]:
+        try:
+            rows = await self.client.get_subject_persons(subject_id)
+        except Exception:  # noqa: BLE001 - staff 缺失不应拖垮观看入口
+            return []
+        relevant: list[str] = []
+        relation_words = ("制作", "导演", "監督", "原作", "企画", "制片", "系列构成", "脚本")
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            relation = str(row.get("relation") or row.get("staff") or "")
+            if relation and not any(word in relation for word in relation_words):
+                continue
+            name = str(row.get("name_cn") or row.get("name") or "").strip()
+            if name and name not in relevant:
+                relevant.append(name)
+        return relevant[:24]
+
+    async def run(self, args: AnimeWatchHubArgs) -> ToolResult[AnimeWatchHubResult]:
+        raw = await _resolve_subject(self.client, args)
+        if not raw:
+            return ToolResult(ok=False, error="需要 subject_id 或可解析的动画标题")
+        subject = _subject_payload(raw)
+        if subject.get("type_name") != "anime":
+            return ToolResult(ok=False, error="动画观看枢纽只处理 anime 条目")
+        sid = int(subject["id"])
+        lifecycle = _anime_lifecycle(raw)
+        aliases = [str(subject.get("name") or ""), str(subject.get("name_jp") or "")]
+
+        staff_task = asyncio.create_task(asyncio.wait_for(self._staff_signals(sid), timeout=8))
+        watch_task = asyncio.create_task(asyncio.wait_for(self.watch.run(WhereToWatchArgs(
+            subject_id=sid,
+            title=str(subject.get("name") or ""),
+        )), timeout=20))
+        release_task = (
+            asyncio.create_task(asyncio.wait_for(self.release.run(AnimeReleaseFeedsArgs(
+                subject_id=sid,
+                title=str(subject.get("name") or ""),
+                prefer="archive" if lifecycle.state == "archive" else "auto",
+                limit=10,
+            )), timeout=35))
+            if args.include_release else None
+        )
+        try:
+            staff_names = await staff_task
+        except TimeoutError:
+            staff_names = []
+        production_text = _infobox_text(raw, ("动画制作", "動畫製作", "アニメーション制作", "制作"))
+        for name in re.split(r"\s*[/、,，]\s*", production_text):
+            name = name.strip()
+            if name and name not in staff_names:
+                staff_names.append(name)
+        staff_names = staff_names[:24]
+        video_task = (
+            asyncio.create_task(asyncio.wait_for(self.videos.run(BiliSubjectVideosArgs(
+                query=str(subject.get("name") or ""),
+                aliases=aliases,
+                staff_names=staff_names,
+                lifecycle=lifecycle.state,
+                limit=args.video_limit,
+            )), timeout=25))
+            if args.include_videos else None
+        )
+        pending = [watch_task]
+        if release_task is not None:
+            pending.append(release_task)
+        if video_task is not None:
+            pending.append(video_task)
+        resolved = await asyncio.gather(*pending, return_exceptions=True)
+
+        watch_res = resolved[0] if resolved else None
+        cursor = 1
+        release_res = resolved[cursor] if release_task is not None else None
+        cursor += 1 if release_task is not None else 0
+        video_res = resolved[cursor] if video_task is not None and cursor < len(resolved) else None
+        online: dict[str, Any] = {}
+        releases: dict[str, Any] = {}
+        bilibili: BiliSubjectVideosResult | None = None
+        sources = [Citation(
+            title=str(subject.get("name") or sid),
+            url=f"https://bgm.tv/subject/{sid}",
+            source="bangumi",
+            image=subject.get("image"),
+        )]
+        if not isinstance(watch_res, BaseException) and getattr(watch_res, "ok", False) and watch_res.data:
+            online = watch_res.data.model_dump(mode="json", exclude_none=True)
+            sources.extend(watch_res.sources)
+        if not isinstance(release_res, BaseException) and getattr(release_res, "ok", False) and release_res.data:
+            releases = release_res.data.model_dump(mode="json", exclude_none=True)
+            sources.extend(release_res.sources)
+        if not isinstance(video_res, BaseException) and getattr(video_res, "ok", False) and video_res.data:
+            bilibili = video_res.data
+            sources.extend(video_res.sources)
+
+        official_count = len(online.get("official_sources") or [])
+        fallback_count = len(online.get("search_fallbacks") or [])
+        release_groups = len(releases.get("groups") or [])
+        release_items = len(releases.get("fallback_items") or [])
+        staff_uploads = len(bilibili.watch_candidates) if bilibili else 0
+        video_count = len(bilibili.videos) if bilibili else 0
+        summary = [
+            f"正版/官方平台：{official_count} 个已核验候选" if official_count else (
+                f"正版平台暂不可核验；保留 {fallback_count} 个搜索入口" if fallback_count else "暂未找到可靠正版平台入口"
+            ),
+            f"B站 Staff/制作方直传正片候选：{staff_uploads} 个" if staff_uploads else "未发现同时满足作者身份与正片特征的B站直传",
+            f"离线入口：{release_groups} 个 RSS 组 / {release_items} 条 BT/BD 兜底" if releases else "本轮未返回离线入口",
+            f"B站延伸内容：{video_count} 个已分类具体视频" if bilibili else "本轮未返回B站延伸内容",
+        ]
+        caveats = [
+            "B站番剧库页是平台正版入口；普通视频稿件即使匹配制作方/Staff，也只作为直传观看候选，不能据此推断全部地区版权。",
+            "RSS、BT 与 BD 结果只聚合公开标题和外链；Otomo 不代理、不托管、不自动下载内容。",
+            "推送 qBittorrent 必须由用户从具体发布项发起，并在确认界面再次确认。",
+        ]
+        if isinstance(watch_res, TimeoutError):
+            caveats.append("正版入口冷查询超过 20 秒，本轮已停止等待；缓存或稍后刷新可继续补齐。")
+        if isinstance(release_res, TimeoutError):
+            caveats.append("离线/RSS 冷查询超过 35 秒，本轮已停止等待；不会让慢源阻塞整个作品页。")
+        if isinstance(video_res, TimeoutError):
+            caveats.append("B站具体视频核验超过 25 秒，本轮已停止等待；搜索导航仍可使用。")
+        if bilibili:
+            caveats.extend(bilibili.warnings[:3])
+        return ToolResult(
+            ok=True,
+            data=AnimeWatchHubResult(
+                subject=subject,
+                lifecycle=lifecycle,
+                online=online,
+                releases=releases,
+                bilibili=bilibili,
+                staff_signals=staff_names[:8],
+                status_summary=summary,
+                quick_actions=["打开正版入口", "选择 RSS/字幕组", "查看具体视频", "准备下载器推送"],
+                caveats=list(dict.fromkeys(caveats)),
+            ),
+            sources=sources[:14],
+        )
+
+
 class SubjectDossierTool(Tool):
     name = "subject_dossier"
     description = "作品档案页：聚合条目详情、无剧透评价、观看/购买入口、资源入口、分集热度与系列路线。"
@@ -490,9 +763,10 @@ class SubjectDossierTool(Tool):
         stype_name = subject["type_name"] or args.subject_type or "anime"
         jobs = [
             self.reviewer.run(ReviewSubjectArgs(subject_id=sid, title_hint=subject["name"], include_comments=True, spoiler_level=args.spoiler_level)),
-            self.watch.run(WhereToWatchArgs(subject_id=sid, title=subject["name"])),
             self.relations.run(SubjectRelationsArgs(subject_id=sid, limit=30)),
         ]
+        if args.include_watch:
+            jobs.append(self.watch.run(WhereToWatchArgs(subject_id=sid, title=subject["name"])))
         if stype_name == "anime":
             if args.include_release:
                 jobs.append(self.release.run(AnimeReleaseFeedsArgs(subject_id=sid, title=subject["name"], prefer="auto", limit=8)))
@@ -782,6 +1056,7 @@ def build_product_loop_tools(client: BangumiClient, ltm: LongTermMemory) -> list
     return [
         WatchCockpitTool(client, ltm),
         AnimeMusicThemesTool(client),
+        AnimeWatchHubTool(client),
         SubjectDossierTool(client),
         FranchiseMapTool(client),
         MonthlyWatchReportTool(client),

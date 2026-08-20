@@ -786,6 +786,108 @@ export function ReleaseFeedsPanel({ data, onPrepareDownloaderPush }: { data: Any
   );
 }
 
+export function AnimeWatchHubPanel({
+  data,
+  onPrepareDownloaderPush,
+}: {
+  data: AnyRecord;
+  onPrepareDownloaderPush?: PrepareDownloaderHandler;
+}) {
+  const subject = data.subject || {};
+  const lifecycle = data.lifecycle || {};
+  const bili = data.bilibili || {};
+  const videos = list(bili.videos);
+  const directCount = list(bili.watch_candidates).length;
+  const roleLabel: Record<string, string> = {
+    staff_uploaded_episode: "Staff/制作方直传",
+    episode_candidate: "疑似正片",
+    official_pv: "官方/PV",
+    review: "漫评",
+    retrospective: "回顾/复盘",
+    fan_creation: "二创",
+    related: "相关视频",
+  };
+  const uploaderLabel: Record<string, string> = {
+    platform_account: "平台动画账号",
+    staff_or_production: "制作方/Staff信号",
+    self_claimed_official: "官方身份待核验",
+    creator: "内容创作者",
+    unknown: "作者身份未知",
+  };
+  const formatCount = (value: unknown) => {
+    const number = Number(value || 0);
+    return number ? new Intl.NumberFormat("zh-CN", { notation: "compact", maximumFractionDigits: 1 }).format(number) : "";
+  };
+  return (
+    <>
+      <Panel title="动画观看中心" subtitle={`${text(subject.name)} · ${text(lifecycle.label, "状态待确认")}`}>
+        <div className="evidence-row">
+          <Badge tone={lifecycle.state === "airing" ? "good" : lifecycle.state === "upcoming" ? "warn" : "dim"}>{text(lifecycle.label)}</Badge>
+          {subject.platform ? <Badge tone="dim">{text(subject.platform)}</Badge> : null}
+          {subject.eps ? <Badge tone="dim">{subject.eps} 集</Badge> : null}
+          <Badge tone={directCount ? "good" : "dim"}>B站直传候选 {directCount}</Badge>
+        </div>
+        <p className="evidence-copy">{text(lifecycle.strategy)}</p>
+        <div className="watch-hub-summary">
+          {list<string>(data.status_summary).map((row, i) => <span key={i}>{row}</span>)}
+        </div>
+      </Panel>
+      {data.online?.title ? <WhereToWatchPanel data={data.online} /> : null}
+      <Panel
+        title={`B站视频内容 · ${text(subject.name)}`}
+        subtitle={`${videos.length} 个具体稿件 · 正片直传与漫评严格分开`}
+      >
+        <div className="inline-notice watch-source-boundary">
+          番剧库页面是已核验平台入口；Staff/制作方上传的普通视频稿件会单独标识，不能仅凭稿件推断全部地区版权。
+        </div>
+        {videos.length ? (
+          <div className="bili-video-grid">
+            {videos.map((video, i) => {
+              const href = video.url || "";
+              const upHref = video.mid ? `https://space.bilibili.com/${video.mid}` : "";
+              return (
+                <article className={`bili-video-card subject-video ${video.watch_candidate ? "staff-upload" : ""}`} key={`${video.bvid || video.aid || href}-${i}`}>
+                  <a className="bili-video-cover" href={href} target="_blank" rel="noreferrer">
+                    {video.thumbnail_url ? <img src={video.thumbnail_url} alt="" loading="lazy" referrerPolicy="no-referrer" /> : <span><b>BILI</b><small>{roleLabel[String(video.role)] || "相关视频"}</small></span>}
+                    <i>{roleLabel[String(video.role)] || "相关视频"}</i>
+                  </a>
+                  <div className="bili-video-body">
+                    <div className="evidence-row tight">
+                      <Badge tone={video.watch_candidate ? "good" : video.role === "episode_candidate" ? "warn" : "dim"}>{roleLabel[String(video.role)] || "相关视频"}</Badge>
+                      <Badge tone={video.uploader_class === "staff_or_production" || video.uploader_class === "platform_account" ? "good" : video.uploader_class === "self_claimed_official" ? "warn" : "dim"}>{uploaderLabel[String(video.uploader_class)] || "作者身份未知"}</Badge>
+                      <Badge tone={video.verified ? "good" : "warn"}>{video.verified ? "稿件详情已核验" : "仅搜索元数据"}</Badge>
+                    </div>
+                    <a className="bili-video-title" href={href} target="_blank" rel="noreferrer">{text(video.title)}</a>
+                    <div className="bili-video-byline">
+                      {upHref ? <a href={upHref} target="_blank" rel="noreferrer">{text(video.author)}</a> : <span>{text(video.author)}</span>}
+                      {video.pubdate ? <span>{new Date(Number(video.pubdate) * 1000).toLocaleDateString("zh-CN")}</span> : null}
+                    </div>
+                    <div className="bili-video-stats">
+                      {video.play ? <span>播放 {formatCount(video.play)}</span> : null}
+                      {video.danmaku ? <span>弹幕 {formatCount(video.danmaku)}</span> : null}
+                      <span>作品匹配 {pct(video.match_confidence)}</span>
+                    </div>
+                    <details className="bili-video-proof">
+                      <summary>{video.watch_candidate ? "为什么认为是直传正片候选" : "分类与核验依据"}</summary>
+                      {list<string>(video.identity_evidence).map((row, j) => <p key={j}>{row}</p>)}
+                      <p>{text(video.match_reason, "标题与作品别名通过一致性检查")}</p>
+                      <p>{text(video.caution, "打开后请核对内容")}</p>
+                    </details>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        ) : <EmptyHint text="暂时没有具体视频通过作品与版本一致性门槛；不会用不确定稿件填充卡片。" />}
+        {bili.navigation_url ? <div className="panel-actions"><a className="button-secondary" href={bili.navigation_url} target="_blank" rel="noreferrer">在B站继续搜索</a></div> : null}
+        <Meta notes={list<string>(bili.warnings)} />
+      </Panel>
+      {data.releases?.title ? <ReleaseFeedsPanel data={data.releases} onPrepareDownloaderPush={onPrepareDownloaderPush} /> : null}
+      <Meta notes={list<string>(data.caveats)} />
+    </>
+  );
+}
+
 export function BangumiIndexPanel({ data, onPrepareWrite }: { data: AnyRecord; onPrepareWrite?: PrepareWriteHandler }) {
   const items = list(data.items);
   return (
@@ -993,6 +1095,7 @@ export function SeasonGuidePanel({
                 </div>
               )}
               <div className="link-row">
+                {item.subject_id && <a href={`/subject/${item.subject_id}`}>作品中心</a>}
                 {item.subject_id && onPrepareWrite && (
                   <button
                     type="button"
@@ -1006,9 +1109,9 @@ export function SeasonGuidePanel({
                     想看
                   </button>
                 )}
-                {item.official_url && <span>官网</span>}
-                {item.pv_url && <span>PV</span>}
-                {item.bili_url && <span>B站正版</span>}
+                {item.official_url && <a href={item.official_url} target="_blank" rel="noreferrer">官网</a>}
+                {item.pv_url && <a href={item.pv_url} target="_blank" rel="noreferrer">PV</a>}
+                {item.bili_url && <a href={item.bili_url} target="_blank" rel="noreferrer">B站正版</a>}
               </div>
               {list(item.guide_videos).length > 0 && (
                 <details className="item-guide-details">

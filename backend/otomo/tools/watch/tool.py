@@ -35,6 +35,21 @@ def _norm_bili_title(s: str) -> str:
 
 
 _SEQUEL_MARK_RE = re.compile(r"[0-9０-９ⅡⅢⅣⅤ]|[季期部篇章]$|第[一二三四五六七八九十]")
+_INSTALLMENT_RE = re.compile(
+    r"(?:第\s*([0-9一二三四五六七八九十]+)\s*[季期部]|(?:season|s)\s*([0-9]+)|([0-9]+)(?:st|nd|rd|th)\s*season)",
+    re.IGNORECASE,
+)
+
+
+def _installment_number(value: str) -> int | None:
+    match = _INSTALLMENT_RE.search(value or "")
+    if not match:
+        return None
+    token = next((item for item in match.groups() if item), "")
+    if token.isdigit():
+        return int(token)
+    chinese = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+    return chinese.get(token)
 
 
 def _bili_title_match(query_cn: str, query_jp: str, hit: dict) -> tuple[float, str]:
@@ -46,6 +61,17 @@ def _bili_title_match(query_cn: str, query_jp: str, hit: dict) -> tuple[float, s
     """
     hit_title = _norm_bili_title(str(hit.get("title") or ""))
     hit_org = _norm_bili_title(str(hit.get("org_title") or ""))
+    query_installment = _installment_number(f"{query_cn} {query_jp}")
+    hit_installment = _installment_number(f"{hit.get('title') or ''} {hit.get('org_title') or ''}")
+    if query_installment and hit_installment and query_installment != hit_installment:
+        return 0.0, ""
+    # Canonical first-season titles often omit “第一季”, while Bilibili adds it.
+    # A hit explicitly marked season 2+ must not win merely because its Japanese
+    # org_title differs from season 1 only by punctuation (K-ON! vs K-ON!!).
+    if query_installment is None and hit_installment and hit_installment >= 2:
+        return 0.0, ""
+    if query_installment is None and hit_installment == 1:
+        hit_title = _norm_bili_title(_INSTALLMENT_RE.sub("", str(hit.get("title") or "")))
     best: tuple[float, str] = (0.0, "")
     for q in filter(None, (_norm_bili_title(query_cn), _norm_bili_title(query_jp))):
         for h in filter(None, (hit_title, hit_org)):

@@ -603,6 +603,13 @@ def summarize(result: ToolResult) -> str:
         layers = "/".join(d.get("read_layers") or [])
         content = (d.get("content_summary") or d.get("audience_summary") or [""])[0]
         return f"B站视频分析：{layers} · {content[:80]}"
+    if d.get("lifecycle") and d.get("online") is not None and d.get("releases") is not None:
+        title = (d.get("subject") or {}).get("name") or "动画"
+        lifecycle = (d.get("lifecycle") or {}).get("label") or "状态待确认"
+        official = len((d.get("online") or {}).get("official_sources") or [])
+        videos = len(((d.get("bilibili") or {}).get("videos") or []))
+        groups = len((d.get("releases") or {}).get("groups") or [])
+        return f"动画观看中心：{title} · {lifecycle} · 正版 {official} / 视频 {videos} / RSS {groups}"
     if d.get("aspect_opinions"):
         return f"{len(d['aspect_opinions'])} 条方面观点"
     for key in ("subjects", "characters", "persons"):
@@ -623,6 +630,7 @@ _PANEL_TOOLS = {
     "get_airing_progress",
     "watch_cockpit",
     "subject_dossier",
+    "anime_watch_hub",
     "franchise_map",
     "monthly_watch_report",
     "anime_music_themes",
@@ -1106,6 +1114,40 @@ def _safe_memory_payload(data: dict[str, Any], *, include_action: bool = True) -
     return safe
 
 
+def _safe_anime_watch_hub_payload(data: dict[str, Any]) -> dict[str, Any]:
+    bili_raw = data.get("bilibili") if isinstance(data.get("bilibili"), dict) else {}
+    videos = []
+    for item in _trim_dicts(bili_raw.get("videos"), limit=8):
+        copied = dict(item)
+        copied["identity_evidence"] = _trim_strings(copied.get("identity_evidence"), limit=4, text_limit=160)
+        copied["match_reason"] = _trim_text(copied.get("match_reason"), 220)
+        copied["caution"] = _trim_text(copied.get("caution"), 220)
+        videos.append(copied)
+    watch_keys = {
+        str(item.get("bvid") or item.get("aid") or "")
+        for item in _trim_dicts(bili_raw.get("watch_candidates"), limit=4)
+    }
+    return {
+        "subject": dict(data.get("subject") or {}),
+        "lifecycle": dict(data.get("lifecycle") or {}),
+        "online": _safe_watch_sources_payload(data.get("online") or {}),
+        "releases": _safe_release_feed_payload(data.get("releases") or {}),
+        "bilibili": {
+            "query": bili_raw.get("query"),
+            "count": len(videos),
+            "videos": videos,
+            "watch_candidates": [
+                item for item in videos
+                if str(item.get("bvid") or item.get("aid") or "") in watch_keys
+            ],
+            "navigation_url": bili_raw.get("navigation_url"),
+            "warnings": _trim_strings(bili_raw.get("warnings"), limit=5, text_limit=200),
+        } if bili_raw else None,
+        "staff_signals": _trim_strings(data.get("staff_signals"), limit=8, text_limit=80),
+        "status_summary": _trim_strings(data.get("status_summary"), limit=6, text_limit=180),
+        "quick_actions": _trim_strings(data.get("quick_actions"), limit=6, text_limit=80),
+        "caveats": _trim_strings(data.get("caveats"), limit=8, text_limit=220),
+    }
 def _safe_today_cockpit_payload(data: dict[str, Any]) -> dict[str, Any]:
     def items(key: str, limit: int) -> list[dict[str, Any]]:
         rows = []
@@ -1456,6 +1498,8 @@ def panel_data_from_payload(name: str, payload: dict[str, Any] | None) -> dict[s
         return _safe_today_cockpit_payload(data)
     if name in {"watch_cockpit", "subject_dossier", "monthly_watch_report"}:
         return _safe_product_sections_payload(data)
+    if name == "anime_watch_hub":
+        return _safe_anime_watch_hub_payload(data)
     if name == "franchise_map":
         return _safe_franchise_payload(data)
     if name == "anime_music_themes":
@@ -1932,7 +1976,7 @@ _ANCHOR_PANEL_TOOLS = {
     "search_pixiv_illusts", "get_pixiv_artist_portfolio", "get_trending_subjects",
     "get_character_birthdays", "compare_subjects", "get_pilgrimage_map", "plan_pilgrimage_trip",
     "list_weekly_digest_inbox", "get_broadcast_calendar", "get_airing_progress", "today_cockpit", "watch_cockpit",
-    "subject_dossier", "franchise_map", "monthly_watch_report", "get_subject_trend",
+    "subject_dossier", "anime_watch_hub", "franchise_map", "monthly_watch_report", "get_subject_trend",
     "get_rating_movers", "anime_omikuji", "generate_acgn_quiz", "get_my_episode_progress",
     "export_my_collections_csv", "scan_my_episode_buzz", "anime_music_themes", "where_to_watch",
     "get_anime_release_feeds", "get_bangumi_index", "recommend_subjects", "season_guide_brief",

@@ -57,6 +57,7 @@ TOOL_GROUPS: dict[str, dict[str, Any]] = {
         "desc": "B站导视/漫评视频检索、弹幕/字幕/评论读取、视频内容摘要",
         "tools": {
             "find_related_videos", "find_guide_videos", "search_bilibili_guide_videos",
+            "search_bilibili_subject_videos",
             "get_bilibili_video_comments", "get_bilibili_video_danmaku",
             "get_bilibili_video_subtitles", "summarize_bilibili_video_content",
         },
@@ -74,8 +75,8 @@ TOOL_GROUPS: dict[str, dict[str, Any]] = {
     },
     "watch_resource": {
         "desc": "在哪看/在哪买正版渠道、离线资源 RSS/种子/BD（蜜柑/dmhy/acgnx/VCB）、推送下载器",
-        "tools": {"where_to_watch", "get_anime_release_feeds", "get_vertical_links", "prepare_downloader_push"},
-        "keywords": ["在哪看", "在哪买", "资源", "下载", "rss", "种子", "磁力", "蜜柑", "mikan", "dmhy", "acgnx", "vcb", "bd", "字幕组", "正版", "购买", "steam", "dlsite", "订阅.{0,4}字幕"],
+        "tools": {"anime_watch_hub", "where_to_watch", "get_anime_release_feeds", "get_vertical_links", "prepare_downloader_push"},
+        "keywords": ["在哪看", "在线看", "在线观看", "观看入口", "正片", "作品中心", "在哪买", "资源", "下载", "rss", "种子", "磁力", "蜜柑", "mikan", "dmhy", "acgnx", "vcb", "bd", "字幕组", "正版", "购买", "steam", "dlsite", "订阅.{0,4}字幕"],
     },
     "season_hot": {
         "desc": "季度新番表、放送日历、追番进度、全站热门/热播榜",
@@ -105,7 +106,7 @@ TOOL_GROUPS: dict[str, dict[str, Any]] = {
     },
     "product_page": {
         "desc": "追番驾驶舱、作品档案页、IP 跨媒介图谱、月度报告、口味报告、收藏仪表盘、作品对比、补番顺序",
-        "tools": {"watch_cockpit", "subject_dossier", "franchise_map", "monthly_watch_report", "build_taste_report", "build_collection_dashboard", "compare_subjects", "plan_watch_order", "plan_watch_copilot"},
+        "tools": {"watch_cockpit", "subject_dossier", "anime_watch_hub", "franchise_map", "monthly_watch_report", "build_taste_report", "build_collection_dashboard", "compare_subjects", "plan_watch_order", "plan_watch_copilot"},
         "keywords": ["档案", "驾驶舱", "系列", "ip", "月报", "月度", "年度", "年终", "wrapped", "我的20", "报告", "仪表盘", "对比", "哪个好", "补番顺序", "观看顺序", "全貌", "总结"],
     },
     "discovery_extra": {

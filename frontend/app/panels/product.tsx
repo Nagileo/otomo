@@ -268,7 +268,6 @@ export function SubjectDossierPanel({
     "口碑": ["评价矩阵", "分集热度雷达"],
     "系列": ["补番路线", "跨媒体关系"],
     "音乐": ["OP/ED/音乐"],
-    "观看与资源": ["观看/购买入口", "Release/RSS"],
   };
   const [activeTab, setActiveTab] = useState("概览");
   const visibleSections = productView ? tabs[activeTab] : sectionNames;
