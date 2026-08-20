@@ -24,6 +24,8 @@ from ...agent.contracts import Citation, Tool, ToolResult
 from ...config import settings
 from .._cache import acached, scached
 from .._concurrency import gather_limited
+from ..media_identity import assess_media_scope, build_media_identity
+from .._persistent_cache import PersistentJsonCache
 from ..review.tool import (
     AspectOpinion,
     AspectSummary,
@@ -230,12 +232,29 @@ class BiliSubjectVideoMeta(BiliVideoMeta):
     caution: str = ""
 
 
+class BiliVersionConflict(BaseModel):
+    title: str
+    url: str = ""
+    aid: int | None = None
+    bvid: str | None = None
+    author: str = ""
+    reason: str = ""
+    suggested_subject_id: int | None = None
+    suggested_subject_title: str = ""
+    suggested_relation: str = ""
+
+
 class BiliSubjectVideosResult(BaseModel):
     query: str
     count: int
     watch_candidates: list[BiliSubjectVideoMeta] = Field(default_factory=list)
     videos: list[BiliSubjectVideoMeta] = Field(default_factory=list)
+    version_conflicts: list[BiliVersionConflict] = Field(default_factory=list)
     navigation_url: str = ""
+    cache_hit: bool = False
+    search_partial: bool = False
+    rate_limited: bool = False
+    last_verified: str = ""
     warnings: list[str] = Field(default_factory=list)
 
 
@@ -701,41 +720,16 @@ def _subject_version_compatibility(
     page_titles: list[str] | None = None,
     subject_platform: str = "",
 ) -> tuple[bool, str]:
-    """Reject watch uploads that explicitly name another installment or format."""
-    query_text = " ".join([*aliases, subject_platform])
-    hit_text = " ".join([title, *(page_titles or [])])
-    query_markers = _season_markers(query_text)
-    hit_markers = _season_markers(hit_text)
-    query_number = _chinese_number(query_markers["numbered"]) if query_markers["numbered"] else None
-    hit_number = _chinese_number(hit_markers["numbered"]) if hit_markers["numbered"] else None
-    if query_number and hit_number and query_number != hit_number:
-        return False, f"候选明确标注第 {hit_number} 季，与当前第 {query_number} 季条目冲突"
-    if query_number is None and hit_number and hit_number >= 2:
-        return False, f"当前条目未标续作编号，候选却明确标注第 {hit_number} 季"
-
-    query_lower = query_text.lower()
-    hit_lower = hit_text.lower()
-    movie_tokens = ("剧场版", "劇場版", "电影版", "電影版", "the movie")
-    ova_tokens = ("ova", "oad")
-    query_is_movie = any(token in query_lower for token in movie_tokens) or any(
-        token in query_lower for token in ("movie", "电影", "電影")
+    """Compatibility wrapper backed by the shared media identity module."""
+    identity = build_media_identity(
+        title=aliases[0] if aliases else title,
+        aliases=aliases,
+        platform=subject_platform,
     )
-    hit_is_movie = any(token in hit_lower for token in movie_tokens)
-    query_is_ova = any(token in query_lower for token in ova_tokens)
-    hit_is_ova = any(token in hit_lower for token in ova_tokens)
-    if hit_is_movie and not query_is_movie:
-        return False, "候选明确标注为剧场版，但当前条目不是电影/剧场版"
-    if hit_is_ova and not query_is_ova:
-        return False, "候选明确标注为 OVA/OAD，但当前条目不是对应篇章"
-    if hit_number and query_number == hit_number:
-        return True, f"候选季数与当前第 {query_number} 季条目一致"
-    if hit_number == 1 and query_number is None:
-        return True, "候选标注第一季，与当前未标续作编号的条目兼容"
-    if hit_is_movie and query_is_movie:
-        return True, "候选与当前条目均为电影/剧场版"
-    if hit_is_ova and query_is_ova:
-        return True, "候选与当前条目均为 OVA/OAD"
-    return True, ""
+    scope = assess_media_scope(identity, title, page_titles)
+    if scope.status in {"conflict", "bundle"}:
+        return False, scope.reason
+    return True, scope.reason if scope.status == "exact" else ""
 
 
 def classify_subject_video(
@@ -1365,16 +1359,55 @@ def _bili_json(data: dict) -> dict:
     return data
 
 
-@scached()
+_BILI_PERSISTENT_CACHES: dict[tuple[str, str], PersistentJsonCache] = {}
+
+
+def _bili_cache(namespace: str) -> PersistentJsonCache:
+    key = (settings.bilibili_cache_path, namespace)
+    cache = _BILI_PERSISTENT_CACHES.get(key)
+    if cache is None:
+        cache = PersistentJsonCache(settings.bilibili_cache_path, namespace)
+        _BILI_PERSISTENT_CACHES[key] = cache
+    return cache
+
+
+def _cache_payload(payload: dict, created_at: float, *, hit: bool, stale: bool = False, rate_limited: bool = False) -> dict:
+    return {
+        **payload,
+        "_otomo_cache": {
+            "hit": hit,
+            "stale": stale,
+            "rate_limited": rate_limited,
+            "verified_at": datetime.fromtimestamp(created_at, timezone.utc).isoformat(),
+        },
+    }
+
+
+def _is_rate_limited(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return any(token in text for token in ("-412", "429", "rate limit", "too many requests"))
+
+
 def _sync_bili_search(query: str) -> dict:
-    r = httpx.get(
-        _BILI_SEARCH_API,
-        params={"search_type": "video", "keyword": query, "page": 1},
-        headers={"User-Agent": _BROWSER_UA, "Referer": "https://www.bilibili.com/"},
-        timeout=settings.http_timeout,
-    )
-    r.raise_for_status()
-    return _bili_json(r.json())
+    cache = _bili_cache("search")
+    if hit := cache.get(query, ttl=settings.bilibili_search_cache_ttl):
+        return _cache_payload(hit[0], hit[1], hit=True)
+    try:
+        r = httpx.get(
+            _BILI_SEARCH_API,
+            params={"search_type": "video", "keyword": query, "page": 1},
+            headers={"User-Agent": _BROWSER_UA, "Referer": "https://www.bilibili.com/"},
+            timeout=settings.http_timeout,
+        )
+        r.raise_for_status()
+        payload = _bili_json(r.json())
+    except (httpx.HTTPError, httpx.TransportError, ValueError) as exc:
+        stale = cache.get(query, ttl=settings.bilibili_stale_cache_ttl)
+        if stale:
+            return _cache_payload(stale[0], stale[1], hit=True, stale=True, rate_limited=_is_rate_limited(exc))
+        raise
+    created_at = cache.set(query, payload)
+    return _cache_payload(payload, created_at, hit=False)
 
 
 @scached()
@@ -1389,32 +1422,53 @@ def _sync_bili_replies(aid: int, limit: int) -> dict:
     return _bili_json(r.json())
 
 
-@acached()
 async def _bili_search_async(q: str) -> dict:
-    async with httpx.AsyncClient(
-        timeout=settings.http_timeout,
-        headers={"User-Agent": _BROWSER_UA, "Referer": "https://www.bilibili.com/"},
-    ) as c:
-        r = await c.get(_BILI_SEARCH_API, params={"search_type": "video", "keyword": q, "page": 1})
-        r.raise_for_status()
-        return _bili_json(r.json())
+    cache = _bili_cache("search")
+    if hit := cache.get(q, ttl=settings.bilibili_search_cache_ttl):
+        return _cache_payload(hit[0], hit[1], hit=True)
+    try:
+        async with httpx.AsyncClient(
+            timeout=settings.http_timeout,
+            headers={"User-Agent": _BROWSER_UA, "Referer": "https://www.bilibili.com/"},
+        ) as c:
+            r = await c.get(_BILI_SEARCH_API, params={"search_type": "video", "keyword": q, "page": 1})
+            r.raise_for_status()
+            payload = _bili_json(r.json())
+    except (httpx.HTTPError, httpx.TransportError, ValueError) as exc:
+        stale = cache.get(q, ttl=settings.bilibili_stale_cache_ttl)
+        if stale:
+            return _cache_payload(stale[0], stale[1], hit=True, stale=True, rate_limited=_is_rate_limited(exc))
+        raise
+    created_at = cache.set(q, payload)
+    return _cache_payload(payload, created_at, hit=False)
 
 
 def _summarize_aspect_opinions(opinions: list[AspectOpinion]) -> list[str]:
     return _format_aspect_summary(_build_aspect_summary(opinions))
 
 
-@scached()
 def _sync_bili_view(aid: int | None, bvid: str | None) -> dict:
+    key = str(bvid or f"av{aid or 0}")
+    cache = _bili_cache("view")
+    if hit := cache.get(key, ttl=settings.bilibili_view_cache_ttl):
+        return _cache_payload(hit[0], hit[1], hit=True)
     params = {"aid": aid} if aid else {"bvid": bvid}
-    r = httpx.get(
-        _BILI_VIEW_API,
-        params=params,
-        headers={"User-Agent": _BROWSER_UA, "Referer": "https://www.bilibili.com/"},
-        timeout=settings.http_timeout,
-    )
-    r.raise_for_status()
-    return _bili_json(r.json())
+    try:
+        r = httpx.get(
+            _BILI_VIEW_API,
+            params=params,
+            headers={"User-Agent": _BROWSER_UA, "Referer": "https://www.bilibili.com/"},
+            timeout=settings.http_timeout,
+        )
+        r.raise_for_status()
+        payload = _bili_json(r.json())
+    except (httpx.HTTPError, httpx.TransportError, ValueError) as exc:
+        stale = cache.get(key, ttl=settings.bilibili_stale_cache_ttl)
+        if stale:
+            return _cache_payload(stale[0], stale[1], hit=True, stale=True, rate_limited=_is_rate_limited(exc))
+        raise
+    created_at = cache.set(key, payload)
+    return _cache_payload(payload, created_at, hit=False)
 
 
 @scached()
@@ -1983,7 +2037,8 @@ class SearchBiliSubjectVideosTool(Tool):
         query = args.query.strip()
         aliases = list(dict.fromkeys([query, *(x.strip() for x in args.aliases if x.strip())]))[:8]
         warnings: list[str] = []
-        version_rejections: list[str] = []
+        version_conflicts: list[BiliVersionConflict] = []
+        search_failures: list[str] = []
 
         if args.lifecycle == "upcoming":
             suffixes = ("官方 PV", "预告", "前瞻", "漫评")
@@ -2003,9 +2058,21 @@ class SearchBiliSubjectVideosTool(Tool):
                     return await asyncio.to_thread(_sync_bili_search, value)
                 except (httpx.HTTPError, httpx.TransportError, ValueError) as exc:
                     warnings.append(f"搜索变体《{value}》不可用：{type(exc).__name__}")
+                    search_failures.append(str(exc))
                     return None
 
         payloads = await asyncio.gather(*(search_variant(value) for value in variants))
+        cache_marks = [
+            payload.get("_otomo_cache") or {}
+            for payload in payloads
+            if isinstance(payload, dict)
+        ]
+        cache_hit = any(bool(mark.get("hit")) for mark in cache_marks)
+        rate_limited = any(bool(mark.get("rate_limited")) for mark in cache_marks) or any(
+            _is_rate_limited(ValueError(reason)) for reason in search_failures
+        )
+        verified_times = [str(mark.get("verified_at") or "") for mark in cache_marks if mark.get("verified_at")]
+        search_partial = len([payload for payload in payloads if payload]) < len(variants)
         seen: set[str] = set()
         candidates: list[tuple[float, str, dict]] = []
         for payload in payloads:
@@ -2054,7 +2121,7 @@ class SearchBiliSubjectVideosTool(Tool):
 
         candidates.sort(key=precheck_priority)
 
-        async def verify(row: tuple[float, str, dict]) -> tuple[float, str, dict, bool]:
+        async def verify(row: tuple[float, str, dict]) -> tuple[float, str, dict, bool, dict]:
             confidence, reason, raw = row
             try:
                 payload = await asyncio.to_thread(
@@ -2062,7 +2129,7 @@ class SearchBiliSubjectVideosTool(Tool):
                 )
                 detail = payload.get("data") or {}
                 if not detail:
-                    return confidence, reason, raw, False
+                    return confidence, reason, raw, False, payload.get("_otomo_cache") or {}
                 normalized = {
                     **raw,
                     "title": detail.get("title") or raw.get("title"),
@@ -2088,9 +2155,9 @@ class SearchBiliSubjectVideosTool(Tool):
                     tags=[],
                     season_query=" ".join(aliases),
                 )
-                return confidence, reason, normalized, True
-            except (httpx.HTTPError, httpx.TransportError, ValueError):
-                return confidence, reason, raw, False
+                return confidence, reason, normalized, True, payload.get("_otomo_cache") or {}
+            except (httpx.HTTPError, httpx.TransportError, ValueError) as exc:
+                return confidence, reason, raw, False, {"rate_limited": _is_rate_limited(exc)}
 
         checked = await asyncio.gather(*(
             verify(row) for row in candidates[: min(max(args.limit * 3, 10), 20)]
@@ -2105,7 +2172,11 @@ class SearchBiliSubjectVideosTool(Tool):
             "episode_candidate": -0.04,
             "related": 0.0,
         }
-        for confidence, reason, raw, view_verified in checked:
+        for confidence, reason, raw, view_verified, view_mark in checked:
+            cache_hit = cache_hit or bool(view_mark.get("hit"))
+            rate_limited = rate_limited or bool(view_mark.get("rate_limited"))
+            if view_mark.get("verified_at"):
+                verified_times.append(str(view_mark["verified_at"]))
             if confidence < 0.56:
                 continue
             title = _clean_bili_title(raw.get("title") or "")
@@ -2135,7 +2206,15 @@ class SearchBiliSubjectVideosTool(Tool):
             if version_reason:
                 content_evidence.append(version_reason)
             if not version_ok and role in {"public_full_episode", "episode_candidate"}:
-                version_rejections.append(f"《{title}》：{version_reason}")
+                conflict_url = raw.get("arcurl") or f"https://www.bilibili.com/video/{raw.get('bvid') or ('av' + str(raw.get('aid') or raw.get('id')))}"
+                version_conflicts.append(BiliVersionConflict(
+                    title=title,
+                    url=str(conflict_url).replace("http://", "https://"),
+                    aid=raw.get("aid") or raw.get("id"),
+                    bvid=raw.get("bvid"),
+                    author=author,
+                    reason=version_reason,
+                ))
                 continue
             # The work hub is editorial, not a raw Bilibili search page.  Merch,
             # radio, event, material and other generic title matches stay behind
@@ -2180,6 +2259,69 @@ class SearchBiliSubjectVideosTool(Tool):
             ranked.append((confidence + role_bonus[role], item))
         ranked.sort(key=lambda row: (-row[0], -(row[1].pubdate or 0)))
 
+        # Transcript/ASR is intentionally reserved for at most two top boundary
+        # candidates.  It must never turn every subject search into a download/
+        # transcription job, but it can catch obvious long-form UP narration.
+        boundary_rows = [
+            item for _score, item in ranked
+            if item.role == "episode_candidate"
+            or (item.watch_candidate and not item.episode_coverage and item.match_confidence < 0.86)
+        ][:2]
+
+        async def inspect_boundary(item: BiliSubjectVideoMeta) -> tuple[BiliSubjectVideoMeta, bool, bool]:
+            try:
+                subtitle_result = await asyncio.wait_for(
+                    GetBiliVideoSubtitlesTool().run(BiliVideoSubtitleArgs(
+                        aid=item.aid,
+                        bvid=item.bvid,
+                        max_segments=60,
+                        allow_asr=settings.asr_provider != "off",
+                        sample_across_video=True,
+                    )),
+                    timeout=min(max(settings.http_timeout * 2, 8), 24),
+                )
+            except (TimeoutError, asyncio.CancelledError):
+                return item, False, False
+            except Exception:  # noqa: BLE001 - transcript enrichment must never break search
+                return item, False, False
+            if not subtitle_result.ok or not subtitle_result.data:
+                return item, False, False
+            transcript = " ".join(segment.text for segment in subtitle_result.data.segments).lower()
+            narration_signals = [
+                signal for signal in (
+                    "本期视频", "大家好我是", "今天我们", "这期节目", "剧情讲解", "剧情解析",
+                    "一口气看", "带大家看", "接下来我们", "点赞投币", "三连", "关注我",
+                    "这部动画讲述", "本作讲述",
+                )
+                if signal in transcript
+            ]
+            source_label = "公开字幕" if subtitle_result.data.source == "bili_public_subtitle" else "ASR"
+            item.content_verified = True
+            item.transcript_source = "subtitle" if subtitle_result.data.source == "bili_public_subtitle" else "asr"
+            if len(narration_signals) >= 2:
+                item.role = "retrospective"
+                item.watch_candidate = False
+                if item.uploader_class == "unknown":
+                    item.uploader_class = "creator"
+                item.content_match_confidence = 0.88
+                item.content_match_reason = f"{source_label}连续命中UP口播/讲解信号：" + "、".join(narration_signals[:4])
+                item.content_evidence.append(item.content_match_reason)
+                item.caution = "字幕内容表明它更像剧情讲解或漫评，已从正片入口降级。"
+                return item, True, True
+            item.content_match_confidence = 0.64
+            item.content_match_reason = f"已抽样核验{source_label}，未发现成组的UP口播/剧情讲解信号"
+            item.content_evidence.append(item.content_match_reason)
+            return item, True, False
+
+        if boundary_rows:
+            inspected = await asyncio.gather(*(inspect_boundary(item) for item in boundary_rows))
+            checked_count = sum(checked for _item, checked, _downgraded in inspected)
+            downgraded_count = sum(downgraded for _item, _checked, downgraded in inspected)
+            if checked_count:
+                warnings.append(f"已对 {checked_count} 个最高优先级边界候选抽样读取公开字幕/ASR。")
+            if downgraded_count:
+                warnings.append(f"其中 {downgraded_count} 个命中连续UP口播/剧情讲解信号，已从正片入口降级。")
+
         # Prefer several editorial roles over five near-identical review videos.
         role_limits = {
             "public_full_episode": 3,
@@ -2207,13 +2349,19 @@ class SearchBiliSubjectVideosTool(Tool):
             )
         if any(item.role == "episode_candidate" for item in selected):
             warnings.append("存在标题像正片但时长、分P或作品一致性证据不足的稿件；只放在疑似区，不作为默认观看入口。")
-        if version_rejections:
+        if version_conflicts:
             warnings.append(
-                f"已隐藏 {len(version_rejections)} 个与当前季数/篇章明确冲突的正片候选；"
-                + "；".join(version_rejections[:2])
+                f"已从当前篇章移出 {len(version_conflicts)} 个季数/媒介形态冲突的正片候选；"
+                + "；".join(f"《{item.title}》：{item.reason}" for item in version_conflicts[:2])
             )
         if not selected:
             warnings.append("没有具体视频通过作品标题与版本一致性阈值；保留 B站搜索导航。")
+        if cache_hit:
+            warnings.append("本轮优先复用了已核验的B站搜索/稿件缓存，减少等待和触发限流的概率。")
+        if search_partial:
+            warnings.append("部分B站搜索变体暂不可用；已用其余变体与缓存继续返回，不把单点失败当成整轮失败。")
+        if rate_limited:
+            warnings.append("B站本轮触发限流；已尽量使用缓存降级，未缓存部分不会用不可靠结果填充。")
         return ToolResult(
             ok=True,
             data=BiliSubjectVideosResult(
@@ -2221,7 +2369,12 @@ class SearchBiliSubjectVideosTool(Tool):
                 count=len(selected),
                 watch_candidates=watch_candidates,
                 videos=selected,
+                version_conflicts=version_conflicts[:6],
                 navigation_url=_bili(query),
+                cache_hit=cache_hit,
+                search_partial=search_partial,
+                rate_limited=rate_limited,
+                last_verified=max(verified_times, default=""),
                 warnings=warnings,
             ),
             sources=[Citation(title=f"Bilibili — {item.title}", url=item.url, source="bilibili") for item in selected[:5]],

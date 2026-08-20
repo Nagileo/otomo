@@ -198,6 +198,10 @@ class Settings(BaseSettings):
     mikan_mapping_cache_ttl: float = 60 * 60 * 24
     release_feed_cache_ttl: float = 60 * 30
     release_feed_timeout: float = 12.0
+    bilibili_cache_path: str = "cache/bilibili.sqlite3"
+    bilibili_search_cache_ttl: float = 60 * 60 * 3
+    bilibili_view_cache_ttl: float = 60 * 60 * 24 * 3
+    bilibili_stale_cache_ttl: float = 60 * 60 * 24 * 14
     qbittorrent_url: str = ""
     qbittorrent_username: str = ""
     qbittorrent_password: str = ""

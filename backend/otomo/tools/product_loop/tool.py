@@ -26,6 +26,7 @@ from ..calendar.tool import AiringProgressArgs, AiringProgressTool, BroadcastCal
 from ..discovery.tool import EpisodeBuzzRadarTool, EpisodeRadarArgs
 from ..animethemes.tool import AnimeThemesArgs, SearchAnimeThemesTool
 from ..release.tool import AnimeReleaseFeedsArgs, GetAnimeReleaseFeedsTool
+from ..media_identity import assess_media_scope, media_identity_from_subject
 from ..review.tool import ReviewSubjectArgs, ReviewSubjectTool
 from ..videos.tool import (
     BiliSubjectVideosArgs,
@@ -90,6 +91,7 @@ class AnimeWatchHubArgs(BaseModel):
     include_release: bool = True
     include_videos: bool = True
     video_limit: int = Field(5, ge=1, le=10)
+    stage: Literal["all", "core", "videos", "releases"] = "all"
 
 
 class AnimeWatchHubResult(BaseModel):
@@ -667,29 +669,35 @@ class AnimeWatchHubTool(Tool):
         runtime_text = _infobox_text(raw, ("片长", "片長", "单集片长", "單集片長", "每话时长", "每話時長", "时长", "時長"))
         expected_episode_minutes = _duration_minutes(runtime_text)
 
-        staff_task = asyncio.create_task(asyncio.wait_for(self._staff_signals(sid), timeout=8))
-        watch_task = asyncio.create_task(asyncio.wait_for(self.watch.run(WhereToWatchArgs(
-            subject_id=sid,
-            title=str(subject.get("name") or ""),
-        )), timeout=20))
-        release_task = (
-            asyncio.create_task(asyncio.wait_for(self.release.run(AnimeReleaseFeedsArgs(
+        want_online = args.stage in {"all", "core"}
+        want_release = args.include_release and args.stage in {"all", "releases"}
+        want_videos = args.include_videos and args.stage in {"all", "videos"}
+        staff_task = (
+            asyncio.create_task(asyncio.wait_for(self._staff_signals(sid), timeout=8))
+            if args.stage in {"all", "core"} else None
+        )
+        tasks: dict[str, asyncio.Task] = {}
+        if want_online:
+            tasks["watch"] = asyncio.create_task(asyncio.wait_for(self.watch.run(WhereToWatchArgs(
+                subject_id=sid,
+                title=str(subject.get("name") or ""),
+            )), timeout=20))
+        if want_release:
+            tasks["release"] = asyncio.create_task(asyncio.wait_for(self.release.run(AnimeReleaseFeedsArgs(
                 subject_id=sid,
                 title=str(subject.get("name") or ""),
                 prefer="archive" if lifecycle.state == "archive" else "auto",
                 limit=10,
             )), timeout=35))
-            if args.include_release else None
-        )
-        if expected_episode_minutes is None and args.include_videos:
+        if expected_episode_minutes is None and want_videos:
             try:
                 expected_episode_minutes = await asyncio.wait_for(
                     self._episode_runtime_minutes(sid), timeout=6,
                 )
             except (TimeoutError, asyncio.CancelledError):
                 expected_episode_minutes = None
-        video_task = (
-            asyncio.create_task(asyncio.wait_for(self.videos.run(BiliSubjectVideosArgs(
+        if want_videos:
+            tasks["videos"] = asyncio.create_task(asyncio.wait_for(self.videos.run(BiliSubjectVideosArgs(
                 query=str(subject.get("name") or ""),
                 aliases=aliases,
                 # 身份只作附加说明，不再阻塞或决定“公开视频可看”的判定。
@@ -698,26 +706,27 @@ class AnimeWatchHubTool(Tool):
                 subject_platform=str(subject.get("platform") or ""),
                 lifecycle=lifecycle.state,
                 limit=args.video_limit,
-            )), timeout=25))
-            if args.include_videos else None
-        )
-        pending = [watch_task]
-        if release_task is not None:
-            pending.append(release_task)
-        if video_task is not None:
-            pending.append(video_task)
-        resolved = await asyncio.gather(*pending, return_exceptions=True)
-        try:
-            person_staff = await staff_task
-        except (TimeoutError, asyncio.CancelledError):
+            )), timeout=30))
+            if hasattr(self.client, "get_subject_relations"):
+                tasks["relations"] = asyncio.create_task(asyncio.wait_for(
+                    self.client.get_subject_relations(sid), timeout=8,
+                ))
+        keys = list(tasks)
+        values = await asyncio.gather(*(tasks[key] for key in keys), return_exceptions=True)
+        resolved = dict(zip(keys, values, strict=True))
+        if staff_task is not None:
+            try:
+                person_staff = await staff_task
+            except (TimeoutError, asyncio.CancelledError):
+                person_staff = []
+        else:
             person_staff = []
         staff_names = list(dict.fromkeys([*production_names, *person_staff]))[:24]
 
-        watch_res = resolved[0] if resolved else None
-        cursor = 1
-        release_res = resolved[cursor] if release_task is not None else None
-        cursor += 1 if release_task is not None else 0
-        video_res = resolved[cursor] if video_task is not None and cursor < len(resolved) else None
+        watch_res = resolved.get("watch")
+        release_res = resolved.get("release")
+        video_res = resolved.get("videos")
+        relation_res = resolved.get("relations")
         online: dict[str, Any] = {}
         releases: dict[str, Any] = {}
         bilibili: BiliSubjectVideosResult | None = None
@@ -736,6 +745,33 @@ class AnimeWatchHubTool(Tool):
         if not isinstance(video_res, BaseException) and getattr(video_res, "ok", False) and video_res.data:
             bilibili = video_res.data
             sources.extend(video_res.sources)
+        if bilibili and bilibili.version_conflicts and isinstance(relation_res, list):
+            related_anime = [
+                row for row in relation_res
+                if isinstance(row, dict) and row.get("id") and row.get("type") == SUBJECT_TYPE["anime"]
+            ]
+            for conflict in bilibili.version_conflicts:
+                matches: list[tuple[int, dict[str, Any]]] = []
+                for row in related_anime:
+                    scope = assess_media_scope(media_identity_from_subject(row), conflict.title)
+                    score = 2 if scope.status == "exact" else 1 if scope.status == "compatible" else 0
+                    if score:
+                        matches.append((score, row))
+                matches.sort(key=lambda pair: (-pair[0], int(pair[1].get("id") or 0)))
+                related: dict[str, Any] | None = None
+                if matches and (len(matches) == 1 or matches[0][0] > matches[1][0]):
+                    related = matches[0][1]
+                elif "季" in conflict.reason:
+                    sequel_rows = [
+                        row for row in related_anime
+                        if any(token in str(row.get("relation") or "").lower() for token in ("续集", "续作", "続編", "sequel"))
+                    ]
+                    if len(sequel_rows) == 1:
+                        related = sequel_rows[0]
+                if related is not None:
+                    conflict.suggested_subject_id = int(related["id"])
+                    conflict.suggested_subject_title = str(related.get("name_cn") or related.get("name") or related["id"])
+                    conflict.suggested_relation = str(related.get("relation") or "关联篇章")
 
         official_count = len(online.get("official_sources") or [])
         fallback_count = len(online.get("search_fallbacks") or [])
@@ -743,14 +779,18 @@ class AnimeWatchHubTool(Tool):
         release_items = len(releases.get("fallback_items") or [])
         public_uploads = len(bilibili.watch_candidates) if bilibili else 0
         video_count = len(bilibili.videos) if bilibili else 0
-        summary = [
-            f"正版/官方平台：{official_count} 个已核验候选" if official_count else (
+        summary: list[str] = []
+        if want_online:
+            summary.append(f"正版/官方平台：{official_count} 个已核验候选" if official_count else (
                 f"正版平台暂不可核验；保留 {fallback_count} 个搜索入口" if fallback_count else "暂未找到可靠正版平台入口"
-            ),
-            f"B站普通投稿可看正片候选：{public_uploads} 个（非正版入口）" if public_uploads else "未发现通过时长、分P与作品一致性核验的B站普通投稿正片",
-            f"离线入口：{release_groups} 个 RSS 组 / {release_items} 条 BT/BD 兜底" if releases else "本轮未返回离线入口",
-            f"B站延伸内容：{video_count} 个已分类具体视频" if bilibili else "本轮未返回B站延伸内容",
-        ]
+            ))
+        if want_videos:
+            summary.extend([
+                f"B站普通投稿可看正片候选：{public_uploads} 个（非正版入口）" if public_uploads else "未发现通过时长、分P与作品一致性核验的B站普通投稿正片",
+                f"B站延伸内容：{video_count} 个已分类具体视频" if bilibili else "本轮未返回B站延伸内容",
+            ])
+        if want_release:
+            summary.append(f"离线入口：{release_groups} 个 RSS 组 / {release_items} 条 BT/BD 兜底" if releases else "本轮未返回离线入口")
         caveats = [
             "B站番剧库页是平台正版入口；普通投稿即使包含完整动画内容，也只作为公开可看候选，版权与上传授权未核验。",
             "RSS、BT 与 BD 结果只聚合公开标题和外链；Otomo 不代理、不托管、不自动下载内容。",
@@ -761,7 +801,7 @@ class AnimeWatchHubTool(Tool):
         if isinstance(release_res, TimeoutError):
             caveats.append("离线/RSS 冷查询超过 35 秒，本轮已停止等待；不会让慢源阻塞整个作品页。")
         if isinstance(video_res, TimeoutError):
-            caveats.append("B站具体视频核验超过 25 秒，本轮已停止等待；搜索导航仍可使用。")
+            caveats.append("B站具体视频核验超过 30 秒，本轮已停止等待；搜索导航仍可使用。")
         if bilibili:
             caveats.extend(bilibili.warnings[:3])
         return ToolResult(

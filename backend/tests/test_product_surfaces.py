@@ -204,7 +204,15 @@ def test_watch_hub_surface_forwards_lazy_module_flags(tmp_path, monkeypatch):
             "include_release": False,
             "include_videos": True,
             "video_limit": 3,
+            "stage": "all",
         }
+
+        staged = client.get(
+            "/product/subjects/42/watch-hub?stage=videos&include_release=true&include_videos=true&video_limit=4",
+        )
+        assert staged.status_code == 200
+        assert seen["stage"] == "videos"
+        assert seen["video_limit"] == 4
 
 
 def test_collection_dashboard_reads_feedback_from_full_user_memory(tmp_path):

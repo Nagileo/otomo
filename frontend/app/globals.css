@@ -1360,6 +1360,8 @@ a.card-title:hover { color: var(--accent); }
 .bili-video-proof p { margin: 5px 0 0; color: var(--dim); font-size: 10.5px; line-height: 1.5; }
 .watch-hub-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; margin-top: 10px; }
 .watch-hub-summary > span { padding: 9px 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); color: var(--text-soft); font-size: 12px; line-height: 1.5; }
+.watch-hub-anchor { scroll-margin-top: 84px; }
+.release-related-items .release-list { margin-top: 10px; }
 .watch-source-boundary { margin-bottom: 12px; }
 @media (max-width: 620px) {
   .bili-video-grid, .bili-video-grid.compact { grid-template-columns: 1fr; }

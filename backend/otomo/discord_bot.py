@@ -196,7 +196,8 @@ def _season_embeds(discord, data: dict) -> list:
             bits.append(str(it["broadcast"]))
         reason = str(it.get("reason") or "")[:120]
         sid = it.get("subject_id")
-        title_link = f"[{it.get('title') or '?'}](https://bgm.tv/subject/{sid})" if sid else str(it.get("title") or "?")
+        subject_url = f"{settings.frontend_base_url.rstrip('/')}/subject/{sid}" if sid else ""
+        title_link = f"[{it.get('title') or '?'}]({subject_url})" if subject_url else str(it.get("title") or "?")
         e.add_field(
             name=(" · ".join(bits) or "·")[:256],
             value=f"{title_link}\n{reason}"[:1024],
@@ -1124,6 +1125,16 @@ def run() -> None:
         recommendation = next((data for name, data in observations if name == "recommend_subjects"), None)
         if recommendation:
             interaction_state["recommendation"] = recommendation
+        season_guide = next((data for name, data in observations if name == "season_guide_brief"), None)
+        if season_guide:
+            interaction_state["season_items"] = [
+                {
+                    "subject_id": int(item["subject_id"]),
+                    "title": str(item.get("title") or item["subject_id"]),
+                }
+                for item in (season_guide.get("items") or [])[:25]
+                if item.get("subject_id")
+            ]
         return (
             _clean(result) or "(这次没能整理出回答,换个问法试试?)",
             embeds[:10],
@@ -1330,6 +1341,59 @@ def run() -> None:
         async def interaction_check(self, interaction: "discord.Interaction") -> bool:
             if interaction.user.id != self.requester_id:
                 await interaction.response.send_message("这些操作只属于原提问者。", ephemeral=True)
+                return False
+            return True
+
+    class SeasonItemLinksView(discord.ui.View):
+        def __init__(self, subject_id: int) -> None:
+            super().__init__(timeout=180)
+            base = f"{settings.frontend_base_url.rstrip('/')}/subject/{subject_id}"
+            self.add_item(discord.ui.Button(label="作品中心", style=discord.ButtonStyle.link, url=base))
+            self.add_item(discord.ui.Button(label="在线观看", style=discord.ButtonStyle.link, url=f"{base}#watch-online"))
+            self.add_item(discord.ui.Button(label="B站内容", style=discord.ButtonStyle.link, url=f"{base}#watch-bilibili"))
+            self.add_item(discord.ui.Button(label="RSS/下载", style=discord.ButtonStyle.link, url=f"{base}#watch-release"))
+
+    class SeasonItemSelect(discord.ui.Select):
+        def __init__(self, items: list[dict]) -> None:
+            self.items = {str(item["subject_id"]): item for item in items if item.get("subject_id")}
+            options = [
+                discord.SelectOption(
+                    label=str(item.get("title") or item["subject_id"])[:100],
+                    value=str(item["subject_id"]),
+                    description="打开观看、B站内容或RSS/下载入口",
+                )
+                for item in list(self.items.values())[:25]
+            ]
+            super().__init__(placeholder="选择一部新番继续", options=options, min_values=1, max_values=1)
+
+        async def callback(self, interaction: "discord.Interaction") -> None:
+            view = self.view
+            if not isinstance(view, SeasonGuideActionView):
+                return
+            item = self.items[self.values[0]]
+            await interaction.response.send_message(
+                f"**{item.get('title') or item['subject_id']}**：选择下一步",
+                view=SeasonItemLinksView(int(item["subject_id"])),
+                ephemeral=True,
+            )
+
+    class SeasonGuideActionView(discord.ui.View):
+        def __init__(self, requester_id: int, items: list[dict], web_url: str = "") -> None:
+            super().__init__(timeout=300)
+            self.requester_id = requester_id
+            if items:
+                self.add_item(SeasonItemSelect(items))
+            if web_url:
+                self.add_item(discord.ui.Button(
+                    label="在网页继续",
+                    style=discord.ButtonStyle.link,
+                    url=web_url,
+                    row=4,
+                ))
+
+        async def interaction_check(self, interaction: "discord.Interaction") -> bool:
+            if interaction.user.id != self.requester_id:
+                await interaction.response.send_message("这份新番导视操作只属于原提问者。", ephemeral=True)
                 return False
             return True
 
@@ -1590,6 +1654,14 @@ def run() -> None:
             view = RecommendationActionView(
                 requester_id,
                 state["recommendation"],
+                str(state.get("web_handoff_url") or ""),
+            )
+            if view.children:
+                return view
+        if state.get("season_items"):
+            view = SeasonGuideActionView(
+                requester_id,
+                state["season_items"],
                 str(state.get("web_handoff_url") or ""),
             )
             if view.children:

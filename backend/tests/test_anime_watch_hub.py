@@ -6,9 +6,12 @@ from otomo.agent.contracts import ToolResult
 from otomo.tools.product_loop.tool import AnimeWatchHubArgs, AnimeWatchHubTool, _duration_minutes
 from otomo.tools.release.tool import AnimeReleaseFeedsResult
 from otomo.tools.videos.tool import (
+    BiliSubtitleSegment,
     BiliSubjectVideoMeta,
     BiliSubjectVideosResult,
     BiliSubjectVideosArgs,
+    BiliVersionConflict,
+    BiliVideoSubtitleResult,
     SearchBiliSubjectVideosTool,
     _episode_coverage,
     _subject_version_compatibility,
@@ -314,6 +317,58 @@ async def test_subject_video_search_promotes_long_public_upload_without_staff_id
 
 
 @pytest.mark.asyncio
+async def test_boundary_candidate_with_narration_subtitles_is_downgraded(monkeypatch) -> None:
+    from otomo.tools.videos import tool as videos_tool
+
+    row = {
+        "title": "测试动画 第1话 正片完整版",
+        "author": "普通UP",
+        "bvid": "BVnarration",
+        "aid": 99,
+        "pubdate": 100,
+        "arcurl": "https://www.bilibili.com/video/BVnarration",
+    }
+
+    async def fake_search(_query: str):
+        return {"data": {"result": [row]}}
+
+    def fake_view(_aid, _bvid):
+        return {"data": {
+            **row,
+            "owner": {"name": row["author"], "mid": 99},
+            "stat": {"view": 1000, "danmaku": 10},
+        }}
+
+    async def fake_subtitles(_self, args):
+        return ToolResult(ok=True, data=BiliVideoSubtitleResult(
+            aid=args.aid,
+            bvid=args.bvid,
+            source="bili_public_subtitle",
+            count=3,
+            segments=[
+                BiliSubtitleSegment(text="大家好我是某某，本期视频来聊这部动画"),
+                BiliSubtitleSegment(text="接下来我们做完整剧情讲解"),
+                BiliSubtitleSegment(text="喜欢请点赞投币三连"),
+            ],
+        ))
+
+    monkeypatch.setattr(videos_tool, "_bili_search_async", fake_search)
+    monkeypatch.setattr(videos_tool, "_sync_bili_view", fake_view)
+    monkeypatch.setattr(videos_tool.GetBiliVideoSubtitlesTool, "run", fake_subtitles)
+    result = await SearchBiliSubjectVideosTool().run(BiliSubjectVideosArgs(
+        query="测试动画",
+        aliases=["Test Anime"],
+        lifecycle="archive",
+        limit=5,
+    ))
+
+    assert result.ok and result.data is not None
+    assert result.data.watch_candidates == []
+    assert result.data.videos[0].role == "retrospective"
+    assert "口播" in result.data.videos[0].content_match_reason
+
+
+@pytest.mark.asyncio
 async def test_archive_watch_hub_uses_archive_release_strategy(monkeypatch) -> None:
     class FakeClient:
         async def get_subject(self, subject_id: int):
@@ -396,3 +451,52 @@ async def test_archive_watch_hub_uses_archive_release_strategy(monkeypatch) -> N
     assert result.data.bilibili is not None
     assert result.data.bilibili.watch_candidates[0].watch_candidate is True
     assert "普通投稿" in result.data.caveats[0]
+
+
+@pytest.mark.asyncio
+async def test_watch_hub_maps_conflicting_season_to_unique_sequel(monkeypatch) -> None:
+    class FakeClient:
+        async def get_subject(self, subject_id: int):
+            return {
+                "id": subject_id,
+                "type": 2,
+                "name": "Test Anime",
+                "name_cn": "测试动画",
+                "platform": "Web",
+                "date": "2010-01-01",
+            }
+
+        async def get_episodes(self, *_args, **_kwargs):
+            return {"data": []}
+
+        async def get_subject_relations(self, _subject_id: int):
+            return [{
+                "id": 43,
+                "type": 2,
+                "name": "Test Anime New Chapter",
+                "name_cn": "测试动画 新篇章",
+                "relation": "续集",
+            }]
+
+    tool = AnimeWatchHubTool(FakeClient())
+
+    async def video_run(args):
+        return ToolResult(ok=True, data=BiliSubjectVideosResult(
+            query=args.query,
+            count=0,
+            version_conflicts=[BiliVersionConflict(
+                title="测试动画 第二季 全集",
+                url="https://www.bilibili.com/video/BVsequel",
+                bvid="BVsequel",
+                reason="当前条目未标续作编号，候选却明确标注第 2 季",
+            )],
+        ))
+
+    monkeypatch.setattr(tool.videos, "run", video_run)
+    result = await tool.run(AnimeWatchHubArgs(subject_id=42, stage="videos"))
+
+    assert result.ok and result.data and result.data.bilibili
+    conflict = result.data.bilibili.version_conflicts[0]
+    assert conflict.suggested_subject_id == 43
+    assert conflict.suggested_subject_title == "测试动画 新篇章"
+    assert conflict.suggested_relation == "续集"

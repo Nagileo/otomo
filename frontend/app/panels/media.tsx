@@ -615,10 +615,11 @@ export function WhereToWatchPanel({ data }: { data: AnyRecord }) {
   const official = list(data.official_sources);
   const fallbacks = list(data.search_fallbacks);
   return (
-    <Panel
-      title={`正版观看 · ${text(data.title)}`}
-      subtitle={`${official.length} 个官方候选 · ${fallbacks.length} 个搜索兜底`}
-    >
+    <div id="watch-online" className="watch-hub-anchor">
+      <Panel
+        title={`正版观看 · ${text(data.title)}`}
+        subtitle={`${official.length} 个官方候选 · ${fallbacks.length} 个搜索兜底`}
+      >
       <div className="evidence-row">
         <Badge tone={official.length ? "good" : "warn"}>{official.length ? "official sources" : "no verified platform"}</Badge>
         {data.offline_hint && <Badge tone="dim">可继续查 RSS/BD</Badge>}
@@ -654,6 +655,7 @@ export function WhereToWatchPanel({ data }: { data: AnyRecord }) {
       )}
       <Meta notes={list<string>(data.caveats)} />
     </Panel>
+    </div>
   );
 }
 
@@ -675,8 +677,14 @@ export function ReleaseItemCard({
         <Badge tone="dim">{text(item.source)}</Badge>
         {item.quality && item.quality !== "tv" && <Badge tone="warn">{text(item.quality)}</Badge>}
         {item.pub_date && <span className="release-date">{String(item.pub_date).slice(0, 10)}</span>}
+        {item.scope_status === "exact" && <Badge tone="good">当前篇章</Badge>}
+        {item.scope_status === "compatible" && <Badge tone="dim">未发现篇章冲突</Badge>}
+        {item.scope_status === "bundle" && <Badge tone="warn">跨季/合集</Badge>}
+        {item.scope_status === "conflict" && <Badge tone="warn">其他篇章/内容</Badge>}
+        {item.scope_status === "unknown" && <Badge tone="warn">身份待确认</Badge>}
       </div>
       <div className="release-item-title" title={text(item.title)}>{text(item.title)}</div>
+      {item.scope_reason && <div className="card-meta">{text(item.scope_reason)}</div>}
       <div className="release-item-actions">
         {item.page_url && <a href={item.page_url} target="_blank" rel="noreferrer">页面</a>}
         {item.torrent_url && <a href={item.torrent_url} target="_blank" rel="noreferrer">种子</a>}
@@ -704,13 +712,15 @@ export function ReleaseItemCard({
 export function ReleaseFeedsPanel({ data, onPrepareDownloaderPush }: { data: AnyRecord; onPrepareDownloaderPush?: PrepareDownloaderHandler }) {
   const groups = list(data.groups);
   const fallback = list(data.fallback_items);
+  const related = list(data.related_items);
   const links = list(data.search_links);
   const subjectId = data.subject_id ? Number(data.subject_id) : undefined;
   return (
-    <Panel
-      title={`离线资源/RSS · ${text(data.title)}`}
-      subtitle={`${groups.length} 个字幕组 · ${fallback.length} 条兜底订阅源`}
-    >
+    <div id="watch-release" className="watch-hub-anchor">
+      <Panel
+        title={`离线资源/RSS · ${text(data.title)}`}
+        subtitle={`${groups.length} 个RSS/收藏分组 · ${fallback.length} 条当前篇章兜底 · ${Number(data.filtered_count || related.length)} 条移入确认区`}
+      >
       <div className="evidence-row">
         <Badge tone={data.mapping_confidence >= 0.8 ? "good" : "warn"}>{data.mapping_confidence >= 0.8 ? "外站对齐可靠" : "外站对齐存疑"}</Badge>
         <Badge tone="warn">link aggregation only</Badge>
@@ -769,6 +779,23 @@ export function ReleaseFeedsPanel({ data, onPrepareDownloaderPush }: { data: Any
           </div>
         </>
       )}
+      {related.length > 0 && (
+        <details className="pending-guide-sources release-related-items">
+          <summary>相关篇章 / 合集 / 身份待确认 {Number(data.filtered_count || related.length)}</summary>
+          <div className="section-copy">这些结果不会混入当前条目的默认下载区。若确实需要系列合集，请先核对标题与源站页面；推送下载器仍需再次确认。</div>
+          <div className="release-list">
+            {related.map((item, i) => (
+              <ReleaseItemCard
+                item={item}
+                subjectId={subjectId}
+                subjectName={text(data.title)}
+                onPrepareDownloaderPush={onPrepareDownloaderPush}
+                key={`${item.source}-${item.title}-${i}`}
+              />
+            ))}
+          </div>
+        </details>
+      )}
       {links.length > 0 && (
         <>
           <div className="section-title">搜索入口</div>
@@ -783,6 +810,7 @@ export function ReleaseFeedsPanel({ data, onPrepareDownloaderPush }: { data: Any
       )}
       <Meta notes={list<string>(data.caveats)} />
     </Panel>
+    </div>
   );
 }
 
@@ -800,6 +828,7 @@ export function AnimeWatchHubPanel({
   const playableVideos = videos.filter((video) => video.watch_candidate);
   const uncertainVideos = videos.filter((video) => video.role === "episode_candidate");
   const editorialVideos = videos.filter((video) => !video.watch_candidate && video.role !== "episode_candidate");
+  const versionConflicts = list(bili.version_conflicts);
   const roleLabel: Record<string, string> = {
     public_full_episode: "公开视频正片",
     episode_candidate: "疑似正片",
@@ -875,7 +904,7 @@ export function AnimeWatchHubPanel({
           <Badge tone={lifecycle.state === "airing" ? "good" : lifecycle.state === "upcoming" ? "warn" : "dim"}>{text(lifecycle.label)}</Badge>
           {subject.platform ? <Badge tone="dim">{text(subject.platform)}</Badge> : null}
           {subject.eps ? <Badge tone="dim">{subject.eps} 集</Badge> : null}
-          <Badge tone={playableVideos.length ? "warn" : "dim"}>B站普通投稿可看 {playableVideos.length}</Badge>
+          {data.bilibili ? <Badge tone={playableVideos.length ? "warn" : "dim"}>B站普通投稿可看 {playableVideos.length}</Badge> : null}
         </div>
         <p className="evidence-copy">{text(lifecycle.strategy)}</p>
         <div className="watch-hub-summary">
@@ -883,10 +912,17 @@ export function AnimeWatchHubPanel({
         </div>
       </Panel>
       {data.online?.title ? <WhereToWatchPanel data={data.online} /> : null}
-      <Panel
-        title={`B站普通投稿与延伸内容 · ${text(subject.name)}`}
-        subtitle={`${playableVideos.length} 个可看正片候选 · ${editorialVideos.length} 个PV/漫评/回顾 · ${uncertainVideos.length} 个疑似候选`}
-      >
+      {data.bilibili ? <div id="watch-bilibili" className="watch-hub-anchor">
+        <Panel
+          title={`B站普通投稿与延伸内容 · ${text(subject.name)}`}
+          subtitle={`${playableVideos.length} 个可看正片候选 · ${editorialVideos.length} 个PV/漫评/回顾 · ${uncertainVideos.length} 个疑似候选`}
+        >
+        <div className="evidence-row">
+          {bili.cache_hit ? <Badge tone="good">已复用核验缓存</Badge> : <Badge tone="dim">本轮实时核验</Badge>}
+          {bili.search_partial ? <Badge tone="warn">部分搜索源降级</Badge> : null}
+          {bili.rate_limited ? <Badge tone="warn">B站限流 · 缓存兜底</Badge> : null}
+          {bili.last_verified ? <Badge tone="dim">最近核验 {String(bili.last_verified).slice(0, 10)}</Badge> : null}
+        </div>
         <div className="inline-notice watch-source-boundary">
           番剧库页面才是正版平台入口。下方“公开视频正片”来自B站普通投稿：可以打开观看，但Otomo未核验版权或上传授权，不会把它写成正版。
         </div>
@@ -914,9 +950,25 @@ export function AnimeWatchHubPanel({
             <div className="bili-video-grid compact">{uncertainVideos.map(renderVideoCard)}</div>
           </details>
         ) : null}
+        {versionConflicts.length ? (
+          <details className="pending-guide-sources">
+            <summary>不是当前篇章的视频 {versionConflicts.length}</summary>
+            <div className="section-copy">它们不会进入当前作品的观看入口；只有关联条目能够唯一对齐时，Otomo 才会给出“可能属于”的跳转。</div>
+            <div className="compact-list">
+              {versionConflicts.map((item, index) => (
+                <span key={`${item.bvid || item.aid || item.title}-${index}`}>
+                  <a href={item.url} target="_blank" rel="noreferrer">{text(item.title)}</a>
+                  {` · ${text(item.reason)}`}
+                  {item.suggested_subject_id ? <> · 可能属于 <a href={`/subject/${item.suggested_subject_id}`}>{text(item.suggested_subject_title)}</a>{item.suggested_relation ? `（${text(item.suggested_relation)}）` : ""}</> : " · 暂不能可靠映射到具体关联条目"}
+                </span>
+              ))}
+            </div>
+          </details>
+        ) : null}
         {bili.navigation_url ? <div className="panel-actions"><a className="button-secondary" href={bili.navigation_url} target="_blank" rel="noreferrer">在B站继续搜索</a></div> : null}
         <Meta notes={list<string>(bili.warnings)} />
-      </Panel>
+        </Panel>
+      </div> : null}
       {data.releases?.title ? <ReleaseFeedsPanel data={data.releases} onPrepareDownloaderPush={onPrepareDownloaderPush} /> : null}
       <Meta notes={list<string>(data.caveats)} />
     </>
@@ -1131,6 +1183,9 @@ export function SeasonGuidePanel({
               )}
               <div className="link-row">
                 {item.subject_id && <a href={`/subject/${item.subject_id}`}>作品中心</a>}
+                {item.subject_id && <a href={`/subject/${item.subject_id}#watch-online`}>在线观看</a>}
+                {item.subject_id && <a href={`/subject/${item.subject_id}#watch-bilibili`}>B站内容</a>}
+                {item.subject_id && <a href={`/subject/${item.subject_id}#watch-release`}>RSS/下载</a>}
                 {item.subject_id && onPrepareWrite && (
                   <button
                     type="button"

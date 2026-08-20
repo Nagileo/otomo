@@ -30,6 +30,12 @@ from ...memory.models import DecisionLogItem, MemorySummary, PendingWriteAction,
 from .._cache import acached
 from .._concurrency import gather_limited
 from ..bangumi.client import SUBJECT_TYPE, BangumiClient
+from ..media_identity import (
+    MediaIdentity,
+    assess_media_scope,
+    build_media_identity,
+    media_identity_from_subject,
+)
 
 _MIKAN_MAP_URLS = [
     "https://raw.githubusercontent.com/xiaoyvyv/bangumi-data/main/data/mikan/bangumi-mikan.json",
@@ -67,6 +73,8 @@ class ReleaseItem(BaseModel):
     subgroup: str = ""
     quality: str = "tv"
     note: str = ""
+    scope_status: Literal["exact", "compatible", "bundle", "conflict", "unknown"] = "unknown"
+    scope_reason: str = ""
 
 
 class ReleaseGroup(BaseModel):
@@ -102,6 +110,8 @@ class AnimeReleaseFeedsResult(BaseModel):
     mapping_confidence: float = 0.0
     groups: list[ReleaseGroup] = Field(default_factory=list)
     fallback_items: list[ReleaseItem] = Field(default_factory=list)
+    related_items: list[ReleaseItem] = Field(default_factory=list)
+    filtered_count: int = 0
     search_links: list[ReleaseSearchLink] = Field(default_factory=list)
     offline_hint: bool = True
     caveats: list[str] = Field(default_factory=list)
@@ -437,17 +447,51 @@ def _attach_precise_rss(groups: list[ReleaseGroup], subgroup_rss: dict[str, str]
                 break
 
 
-async def _resolve_subject(client: BangumiClient, subject_id: int | None, title: str) -> tuple[int | None, str, str | None]:
+async def _resolve_subject(
+    client: BangumiClient,
+    subject_id: int | None,
+    title: str,
+) -> tuple[int | None, str, str | None, MediaIdentity]:
     if subject_id:
         raw = await client.get_subject(subject_id)
-        return subject_id, str(raw.get("name_cn") or raw.get("name") or title or subject_id), (raw.get("images") or {}).get("common")
+        resolved_title = str(raw.get("name_cn") or raw.get("name") or title or subject_id)
+        return (
+            subject_id,
+            resolved_title,
+            (raw.get("images") or {}).get("common"),
+            media_identity_from_subject(raw, fallback_title=resolved_title),
+        )
     if title.strip():
         raw = await client.search_subjects(title, SUBJECT_TYPE["anime"], limit=5)
         rows = raw.get("data") or []
         if rows:
             best = rows[0]
-            return int(best["id"]), str(best.get("name_cn") or best.get("name") or title), (best.get("images") or {}).get("common")
-    return None, title.strip(), None
+            resolved_title = str(best.get("name_cn") or best.get("name") or title)
+            return (
+                int(best["id"]),
+                resolved_title,
+                (best.get("images") or {}).get("common"),
+                media_identity_from_subject(best, fallback_title=resolved_title),
+            )
+    clean_title = title.strip()
+    return None, clean_title, None, build_media_identity(title=clean_title)
+
+
+def _scope_release_items(
+    items: list[ReleaseItem],
+    identity: MediaIdentity,
+) -> tuple[list[ReleaseItem], list[ReleaseItem]]:
+    primary: list[ReleaseItem] = []
+    related: list[ReleaseItem] = []
+    for item in items:
+        scope = assess_media_scope(identity, item.title)
+        item.scope_status = scope.status
+        item.scope_reason = scope.reason
+        if scope.status in {"exact", "compatible"}:
+            primary.append(item)
+        else:
+            related.append(item)
+    return primary, related
 
 
 class GetAnimeReleaseFeedsTool(Tool):
@@ -464,12 +508,13 @@ class GetAnimeReleaseFeedsTool(Tool):
 
     async def run(self, args: AnimeReleaseFeedsArgs) -> ToolResult[AnimeReleaseFeedsResult]:
         await emit_tool_progress(tool=self.name, summary="解析 Bangumi 动画条目", current=1, total=4)
-        subject_id, title, image = await _resolve_subject(self.client, args.subject_id, args.title)
+        subject_id, title, image, identity = await _resolve_subject(self.client, args.subject_id, args.title)
         if not title:
             return ToolResult(ok=False, error="需要 subject_id 或 title")
         q = quote(title)
         groups: list[ReleaseGroup] = []
         fallback_items: list[ReleaseItem] = []
+        related_items: list[ReleaseItem] = []
         mikan_ids: list[int] = []
         mapping_confidence = 0.0
         await emit_tool_progress(tool=self.name, summary="读取 Mikan 映射与 RSS", current=2, total=4)
@@ -495,7 +540,11 @@ class GetAnimeReleaseFeedsTool(Tool):
                     if isinstance(rows, BaseException):
                         continue
                     rss_url = _MIKAN_RSS.format(id=mid)
-                    items = _filter_items(rows, args.subgroup_filter, args.limit)
+                    scoped, related = _scope_release_items(
+                        _filter_items(rows, args.subgroup_filter, min(args.limit * 3, 60)), identity,
+                    )
+                    items = scoped[: args.limit]
+                    related_items.extend(related)
                     groups.extend(_group_items(items, "mikan", rss_url))
                 if groups and mikan_ids:
                     # 条目级混合 RSS → 字幕组精确 RSS（番剧页自带 subgroupid 链接）
@@ -505,7 +554,11 @@ class GetAnimeReleaseFeedsTool(Tool):
                     # 第三级：番组页还没建（新番常见）但站内已有发布记录 → 搜索 RSS
                     search_rss_url = _MIKAN_SEARCH_RSS.format(q=q)
                     rows = await fetch_release_items_from_url(search_rss_url, "mikan")
-                    items = _filter_items(rows, args.subgroup_filter, args.limit)
+                    scoped, related = _scope_release_items(
+                        _filter_items(rows, args.subgroup_filter, min(args.limit * 3, 60)), identity,
+                    )
+                    items = scoped[: args.limit]
+                    related_items.extend(related)
                     if items:
                         groups.extend(_group_items(items, "mikan", search_rss_url))
                         mapping_confidence = max(mapping_confidence, 0.5)
@@ -528,7 +581,11 @@ class GetAnimeReleaseFeedsTool(Tool):
                         rows = await fetch_release_items_from_url(url, source)
                     except Exception:  # noqa: BLE001
                         continue
-                    fallback_items.extend(_filter_items(rows, args.subgroup_filter, args.limit))
+                    scoped, related = _scope_release_items(
+                        _filter_items(rows, args.subgroup_filter, min(args.limit * 3, 60)), identity,
+                    )
+                    fallback_items.extend(scoped[: args.limit])
+                    related_items.extend(related)
                 if fallback_items:
                     break
         if args.prefer in {"bd", "archive"}:
@@ -546,6 +603,8 @@ class GetAnimeReleaseFeedsTool(Tool):
                             page_url=_VCB_SEARCH.format(q=vcb_q),
                             quality="bd",
                             note="VCB-Studio 是 BD/BDRip 搜索入口；Otomo 不抓取详情、不下载内容。",
+                            scope_status="compatible",
+                            scope_reason="这是按当前条目标题生成的搜索入口，不代表具体发布项已核验。",
                         )
                     ],
                 )
@@ -558,11 +617,22 @@ class GetAnimeReleaseFeedsTool(Tool):
         ]
         # dmhy 与 acgnx 内容高度重叠（互相搬运），按磁力 btih / 标题去重
         deduped: dict[str, ReleaseItem] = {}
+        seen_titles: set[str] = set()
         for item in fallback_items:
+            title_key = _norm_cmp(item.title)
+            if title_key in seen_titles:
+                continue
+            seen_titles.add(title_key)
             m = re.search(r"btih:([0-9a-zA-Z]+)", item.magnet)
             key = m.group(1).lower() if m else item.title.strip().lower()
             deduped.setdefault(key, item)
         fallback_items = sorted(deduped.values(), key=lambda x: x.pub_date, reverse=True)[: args.limit]
+        related_deduped: dict[str, ReleaseItem] = {}
+        for item in related_items:
+            key = _norm_cmp(item.title) or f"{item.source}:{item.page_url}:{item.magnet}"
+            related_deduped.setdefault(key, item)
+        related_items = sorted(related_deduped.values(), key=lambda x: x.pub_date, reverse=True)
+        filtered_count = len(related_items)
         await emit_tool_progress(tool=self.name, summary=f"资源聚合完成：{len(groups)} 组 / {len(fallback_items)} 条兜底", current=4, total=4)
         result = AnimeReleaseFeedsResult(
             subject_id=subject_id,
@@ -571,12 +641,18 @@ class GetAnimeReleaseFeedsTool(Tool):
             mapping_confidence=mapping_confidence,
             groups=groups[:12],
             fallback_items=fallback_items,
+            related_items=related_items[: args.limit],
+            filtered_count=filtered_count,
             search_links=search_links,
             offline_hint=True,
             caveats=[
                 "Otomo 只聚合公开 RSS/搜索链接，不代理、不下载、不托管、不播放任何资源内容。",
                 "字幕组标题和资源质量来自 RSS 标题启发式解析，最终以源站页面为准。",
                 "BD/VCB-Studio 入口默认只给搜索链接；用户自行确认版权、地区和个人使用合规性。",
+                *(
+                    [f"已把 {filtered_count} 条跨季、剧场版、合集或身份不明的资源移到“相关篇章/需确认”，不会混入当前条目默认下载区。"]
+                    if filtered_count else []
+                ),
                 *(
                     [
                         f"蜜柑番组页暂未收录该番，结果来自{search_matched}；此 RSS 按标题检索，可能混入同名条目。"

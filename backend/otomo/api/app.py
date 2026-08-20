@@ -2172,6 +2172,7 @@ async def product_anime_watch_hub(
     include_release: bool = True,
     include_videos: bool = True,
     video_limit: int = 5,
+    stage: Literal["all", "core", "videos", "releases"] = "all",
 ) -> dict[str, Any]:
     session = _ensure_auth_session(request, response)
     _product_rate_limit(request, session.auth_session_id, "subject_watch_hub")
@@ -2183,6 +2184,7 @@ async def product_anime_watch_hub(
             include_release=include_release,
             include_videos=include_videos,
             video_limit=min(max(video_limit, 1), 10),
+            stage=stage,
         )
         with tenant_scope(identity.username, authenticated=identity.authenticated):
             result = await AnimeWatchHubTool(client).run(args)

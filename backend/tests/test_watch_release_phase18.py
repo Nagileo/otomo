@@ -10,6 +10,7 @@ from otomo.tools.release.tool import (
     GetAnimeReleaseFeedsTool,
     _parse_rss,
 )
+from otomo.tools.media_identity import assess_media_scope, build_media_identity
 from otomo.tools.watch.tool import WhereToWatchArgs, WhereToWatchTool, _bili_title_match
 from otomo.tools.yuc.tool import _parse as parse_yuc
 
@@ -150,6 +151,73 @@ def test_release_tool_groups_mikan_items(monkeypatch):
     assert res.ok and res.data is not None
     assert res.data.mikan_ids == [123]
     assert res.data.groups[0].subgroup == "喵萌"
+
+
+def test_shared_media_identity_separates_current_installment_bundle_and_movie():
+    identity = build_media_identity(
+        subject_id=1,
+        title="轻音少女 第一季",
+        aliases=["K-ON!"],
+        platform="TV",
+    )
+    assert assess_media_scope(identity, "[字幕组] 轻音少女 第一季 01").status == "exact"
+    assert assess_media_scope(identity, "轻音少女 S1-S2 + MOVIE + LIVE").status == "bundle"
+    assert assess_media_scope(identity, "轻音少女合集【14+27+Movie】BDRIP").status == "bundle"
+    movie = assess_media_scope(identity, "轻音少女 剧场版 BDRip")
+    assert movie.status == "conflict"
+    assert "剧场版" in movie.reason
+    concert = assess_media_scope(identity, "K-ON! Live Event 横滨演唱会 1080p BDRip")
+    assert concert.status == "conflict"
+    assert "衍生内容" in concert.reason
+
+    lost_identity = build_media_identity(title="Lost Universe", platform="TV")
+    assert assess_media_scope(lost_identity, "Lost Universe 01 BDRip").status == "compatible"
+
+
+def test_release_tool_moves_cross_installment_items_out_of_default_groups(monkeypatch):
+    class FirstSeasonBangumi(FakeBangumi):
+        async def get_subject(self, subject_id: int):
+            return {
+                "id": subject_id,
+                "name": "K-ON!",
+                "name_cn": "轻音少女 第一季",
+                "platform": "TV",
+                "eps": 12,
+                "type": 2,
+                "images": {"common": "cover.jpg"},
+            }
+
+    async def fake_mapping():
+        return {1424: [777]}
+
+    async def fake_fetch(_url, source):
+        return [
+            _parse_rss(f"""
+              <rss><channel><item><title>{title}</title><link>https://example.test/{index}</link></item></channel></rss>
+            """, source)[0]
+            for index, title in enumerate((
+                "[字幕组] 轻音少女 第一季 01",
+                "轻音少女 S1-S2 + MOVIE + LIVE",
+                "轻音少女 剧场版 BDRip",
+            ), 1)
+        ]
+
+    async def fake_subgroups(_mikan_id):
+        return {}
+
+    monkeypatch.setattr("otomo.tools.release.tool.load_mikan_mapping", fake_mapping)
+    monkeypatch.setattr("otomo.tools.release.tool.fetch_release_items_from_url", fake_fetch)
+    monkeypatch.setattr("otomo.tools.release.tool._subgroup_rss_map", fake_subgroups)
+    result = asyncio.run(GetAnimeReleaseFeedsTool(FirstSeasonBangumi()).run(AnimeReleaseFeedsArgs(
+        subject_id=1424,
+        prefer="mikan",
+    )))
+
+    assert result.ok and result.data is not None
+    default_titles = [item.title for group in result.data.groups for item in group.latest_items]
+    assert default_titles == ["[字幕组] 轻音少女 第一季 01"]
+    assert result.data.filtered_count == 2
+    assert {item.scope_status for item in result.data.related_items} == {"bundle", "conflict"}
 
 
 def test_daily_airing_service_writes_once_and_updates_rss(monkeypatch, tmp_path):

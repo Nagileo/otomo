@@ -17,6 +17,7 @@ export default function SubjectPage({ params }: { params: { id: string } }) {
   const [sources, setSources] = useState<any[]>([]);
   const [watchHub, setWatchHub] = useState<any>(null);
   const [watchHubError, setWatchHubError] = useState("");
+  const [watchHubLoading, setWatchHubLoading] = useState({ core: true, videos: true, releases: true });
   const [pendingDownload, setPendingDownload] = useState<any>(null);
   const [error, setError] = useState("");
   const [share, setShare] = useState("");
@@ -28,6 +29,7 @@ export default function SubjectPage({ params }: { params: { id: string } }) {
     setSources([]);
     setError("");
     setWatchHubError("");
+    setWatchHubLoading({ core: true, videos: true, releases: true });
     setPendingDownload(null);
     productFetch(`/product/subjects/${encodeURIComponent(params.id)}?spoiler_level=none&include_watch=false&include_release=false`)
       .then((payload) => {
@@ -36,19 +38,51 @@ export default function SubjectPage({ params }: { params: { id: string } }) {
         setSources((rows) => [...rows, ...(payload.sources || [])]);
       })
       .catch((e) => { if (!cancelled) setError(String(e)); });
-    productFetch(
-      `/product/subjects/${encodeURIComponent(params.id)}/watch-hub?include_release=true&include_videos=true&video_limit=5`,
-      undefined,
-      { track: true, label: "补齐在线观看、RSS与B站内容", href: `/subject/${params.id}` },
+    const mergeWatchHub = (next: any) => setWatchHub((current: any) => {
+      if (!current) return next;
+      return {
+        ...current,
+        ...next,
+        subject: next?.subject || current.subject,
+        lifecycle: next?.lifecycle || current.lifecycle,
+        online: next?.online?.title ? next.online : current.online,
+        bilibili: next?.bilibili || current.bilibili,
+        releases: next?.releases?.title ? next.releases : current.releases,
+        staff_signals: Array.from(new Set([...(current.staff_signals || []), ...(next?.staff_signals || [])])),
+        status_summary: Array.from(new Set([...(current.status_summary || []), ...(next?.status_summary || [])])),
+        caveats: Array.from(new Set([...(current.caveats || []), ...(next?.caveats || [])])),
+      };
+    });
+    const mergeSources = (incoming: any[]) => setSources((rows) => {
+      const merged = [...rows, ...incoming];
+      return merged.filter((item, index) => merged.findIndex((candidate) => candidate.url === item.url) === index);
+    });
+    const loadStage = (stage: "core" | "videos" | "releases") => productFetch(
+      `/product/subjects/${encodeURIComponent(params.id)}/watch-hub?stage=${stage}&include_release=true&include_videos=true&video_limit=5`,
     )
       .then((payload) => {
         if (cancelled) return;
-        setWatchHub(payload.data);
-        setSources((rows) => [...rows, ...(payload.sources || [])]);
+        mergeWatchHub(payload.data);
+        mergeSources(payload.sources || []);
       })
-      .catch((e) => { if (!cancelled) setWatchHubError(String(e)); });
+      .catch((e) => {
+        if (!cancelled) setWatchHubError((current) => [current, `${stage}: ${String(e)}`].filter(Boolean).join("；"));
+      })
+      .finally(() => {
+        if (!cancelled) setWatchHubLoading((current) => ({ ...current, [stage]: false }));
+      });
+    void loadStage("core");
+    void loadStage("videos");
+    void loadStage("releases");
     return () => { cancelled = true; };
   }, [params.id]);
+
+  useEffect(() => {
+    const anchor = window.location.hash.slice(1);
+    if (!anchor) return;
+    const target = document.getElementById(anchor);
+    if (target) window.requestAnimationFrame(() => target.scrollIntoView({ behavior: "smooth", block: "start" }));
+  }, [watchHub]);
 
   async function prepareDownloaderPush(payload: Record<string, any>) {
     try {
@@ -92,7 +126,9 @@ export default function SubjectPage({ params }: { params: { id: string } }) {
       {error ? <div className="surface-error">{error}</div> : null}
       {watchHubError ? <div className="surface-error">观看中心部分加载失败：{watchHubError}</div> : null}
       {!data && !error ? <div className="surface-loading">正在汇总无剧透评价、系列关系、音乐与观看入口…</div> : null}
-      {!watchHub && !watchHubError ? <div className="surface-loading">正在核验正版页面、B站普通投稿正片、延伸内容与离线RSS；作品档案可先继续浏览…</div> : null}
+      {watchHubLoading.core ? <div className="surface-loading">正在先核验正版观看入口；其他内容不会挡住作品页…</div> : null}
+      {!watchHubLoading.core && watchHubLoading.videos ? <div className="surface-loading">B站普通投稿、PV与漫评仍在深度核验，已完成的正版入口可以先用…</div> : null}
+      {!watchHubLoading.core && watchHubLoading.releases ? <div className="surface-loading">RSS/下载资源仍在核对当前季与相关篇章，完成后会自动补入…</div> : null}
       {share ? <div className="inline-notice">分享页已生成：<a href={share} target="_blank" rel="noreferrer">打开公开快照</a></div> : null}
       {data ? <SubjectActions subject={subject} /> : null}
       {pendingDownload ? <div className="inline-confirm"><strong>确认推送到你的 qBittorrent？</strong><span>{pendingDownload.summary}</span><div><button className="button-secondary" onClick={() => void confirmDownloader(false)}>取消</button><button className="button-primary" onClick={() => void confirmDownloader(true)}>确认推送</button></div></div> : null}
