@@ -1414,6 +1414,8 @@ a.card-title:hover { color: var(--accent); }
 .admin-bili-qr span { color: var(--dim); font-size: 11px; }
 .admin-cookie-fallback { margin-top: 14px; }
 .admin-cookie-fallback > summary { cursor: pointer; color: var(--dim); font-size: 11px; }
+.integration-settings-page { max-width: 960px; }
+.integration-settings-page .surface-notice { margin-bottom: 12px; padding: 10px 12px; color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line)); border-radius: 8px; background: color-mix(in srgb, var(--accent) 6%, var(--surface)); font-size: 11px; }
 .admin-integration-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .admin-integration-grid article { display: grid; align-content: start; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-soft); }
 .admin-integration-grid article > div { display: flex; align-items: center; justify-content: space-between; gap: 8px; }

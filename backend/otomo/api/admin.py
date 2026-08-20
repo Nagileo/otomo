@@ -1,6 +1,7 @@
 """Authenticated, read-mostly operations dashboard and community moderation."""
 from __future__ import annotations
 
+import importlib.util
 import os
 from pathlib import Path
 import shutil
@@ -14,11 +15,25 @@ from pydantic import BaseModel, Field
 from .. import __version__
 from ..config import settings
 from ..recsys_registry import cf_model_registry
-from ..series_overrides import SeriesOverrideRule
+from ..bilibili_account import validate_bilibili_cookie_text
+from ..series_overrides import SeriesOverrideRule, builtin_series_rules
 from ..tools.videos.tool import verify_bilibili_account
 from ..tools.release.qbittorrent import check_qbittorrent, downloader_public_status
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+
+
+def _series_rules_payload(store) -> list[dict[str, Any]]:
+    builtin_ids = {rule.id for rule in builtin_series_rules()}
+    operator_ids = store.operator_rule_ids()
+    return [
+        {
+            **row.model_dump(mode="json"),
+            "builtin": row.id in builtin_ids,
+            "operator_override": row.id in operator_ids,
+        }
+        for row in store.list()
+    ]
 
 
 def _admins() -> set[str]:
@@ -64,30 +79,11 @@ class BilibiliQrPollRequest(BaseModel):
     login_id: str = Field(min_length=8, max_length=96)
 
 
-def _bilibili_cookie_path() -> Path:
-    return Path(settings.bilibili_cookies_file).resolve()
-
-
 def _validate_bilibili_cookie_text(value: str) -> None:
-    if "Netscape HTTP Cookie File" not in value[:512]:
-        raise HTTPException(status_code=422, detail="需要浏览器插件导出的 Netscape cookies.txt")
-    valid_rows = []
-    for line in value.splitlines():
-        if not line:
-            continue
-        # Netscape uses this comment-looking prefix for HttpOnly cookies;
-        # SESSDATA is commonly exported in exactly this form.
-        if line.startswith("#HttpOnly_"):
-            line = line[len("#HttpOnly_"):]
-        elif line.startswith("#"):
-            continue
-        parts = line.split("\t")
-        if len(parts) >= 7 and parts[0].lstrip(".").lower().endswith("bilibili.com"):
-            valid_rows.append(parts)
-    if not valid_rows:
-        raise HTTPException(status_code=422, detail="文件中没有 bilibili.com Cookie")
-    if not any(parts[5] == "SESSDATA" for parts in valid_rows):
-        raise HTTPException(status_code=422, detail="没有找到 SESSDATA；这不是可用的 B站登录态导出")
+    try:
+        validate_bilibili_cookie_text(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 def _storage_file(path: str) -> dict[str, Any]:
@@ -106,9 +102,36 @@ async def _asr_integration_status() -> dict[str, Any]:
     result: dict[str, Any] = {
         "provider": provider,
         "configured": provider in {"local", "worker"},
-        "healthy": provider == "local",
+        "healthy": False,
         "max_video_seconds": settings.asr_max_video_seconds,
     }
+    if provider == "local":
+        dependencies = {
+            "yt_dlp": importlib.util.find_spec("yt_dlp") is not None,
+            "faster_whisper": importlib.util.find_spec("faster_whisper") is not None,
+        }
+        try:
+            from ..tools._rag import _LOCAL_MODELS
+
+            local_model = _LOCAL_MODELS / f"faster-whisper-{settings.asr_model}"
+            model_local = local_model.is_dir() and any(local_model.iterdir())
+        except (ImportError, OSError):
+            local_model = Path("")
+            model_local = False
+        result.update({
+            "dependencies": dependencies,
+            "model": settings.asr_model,
+            "model_local": model_local,
+            "model_path": str(local_model) if model_local else "",
+            "healthy": all(dependencies.values()) and model_local,
+            "execution": "final-candidates-only",
+        })
+        missing = [name for name, available in dependencies.items() if not available]
+        if missing:
+            result["error"] = "缺少本地 ASR 依赖：" + " / ".join(missing)
+        elif not model_local:
+            result["error"] = f"本地模型 faster-whisper-{settings.asr_model} 不存在或为空"
+        return result
     if provider != "worker":
         return result
     try:
@@ -181,24 +204,21 @@ async def admin_overview(request: Request, days: int = 30) -> dict[str, Any]:
         },
         "subscriptions": request.app.state.subscription_store.scheduler_status(),
         "integrations": {
-            "bilibili": verify_bilibili_account(),
+            "bilibili": verify_bilibili_account(identity.username),
             "asr": asr_status,
             "qbittorrent": downloader_public_status(),
         },
         "series_overrides": {
             "status": request.app.state.series_overrides.status(),
-            "rules": [
-                row.model_dump(mode="json")
-                for row in request.app.state.series_overrides.list()
-            ],
+            "rules": _series_rules_payload(request.app.state.series_overrides),
         },
     }
 
 
 @router.get("/integrations/bilibili")
 async def bilibili_integration_status(request: Request) -> dict[str, Any]:
-    _admin(request)
-    return {"ok": True, "integration": verify_bilibili_account()}
+    identity = _admin(request)
+    return {"ok": True, "integration": verify_bilibili_account(identity.username)}
 
 
 @router.post("/integrations/bilibili/qr/start")
@@ -222,35 +242,25 @@ async def poll_bilibili_qr(payload: BilibiliQrPollRequest, request: Request) -> 
         raise HTTPException(status_code=502, detail=f"B站扫码状态读取失败：{exc}") from exc
     result: dict[str, Any] = {"ok": True, "login": login}
     if login.get("status") == "connected":
-        result["integration"] = verify_bilibili_account()
+        result["integration"] = verify_bilibili_account(identity.username)
     return result
 
 
 @router.post("/integrations/bilibili")
 async def import_bilibili_cookies(payload: BilibiliCookieImportRequest, request: Request) -> dict[str, Any]:
-    _admin(request)
+    identity = _admin(request)
     _csrf(request)
     _validate_bilibili_cookie_text(payload.cookies_text)
-    target = _bilibili_cookie_path()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_name(f".{target.name}.tmp")
-    temporary.write_text(payload.cookies_text.replace("\r\n", "\n"), encoding="utf-8")
-    try:
-        os.chmod(temporary, 0o600)
-    except OSError:
-        pass
-    temporary.replace(target)
-    return {"ok": True, "integration": verify_bilibili_account()}
+    request.app.state.bilibili_credentials.save(identity.username, payload.cookies_text)
+    return {"ok": True, "integration": verify_bilibili_account(identity.username)}
 
 
 @router.delete("/integrations/bilibili")
 async def clear_bilibili_cookies(request: Request) -> dict[str, Any]:
-    _admin(request)
+    identity = _admin(request)
     _csrf(request)
-    target = _bilibili_cookie_path()
-    if target.is_file():
-        target.unlink()
-    return {"ok": True, "integration": verify_bilibili_account()}
+    request.app.state.bilibili_credentials.delete(identity.username)
+    return {"ok": True, "integration": verify_bilibili_account(identity.username)}
 
 
 @router.post("/integrations/qbittorrent/test")
@@ -265,10 +275,7 @@ async def list_series_overrides(request: Request) -> dict[str, Any]:
     _admin(request)
     return {
         "ok": True,
-        "rules": [
-            row.model_dump(mode="json")
-            for row in request.app.state.series_overrides.list()
-        ],
+        "rules": _series_rules_payload(request.app.state.series_overrides),
     }
 
 

@@ -8,6 +8,7 @@ The channel layer is deliberately small and dependency-light:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import ipaddress
 import json
 import socket
@@ -200,6 +201,7 @@ async def _send_webhook(username: str, sub: NotificationTarget, item: InboxItem)
         async with httpx.AsyncClient(
             timeout=settings.weekly_webhook_timeout,
             follow_redirects=False,
+            headers={"Idempotency-Key": item.id},
         ) as client:
             if fmt == "serverchan":
                 # Server酱 标题上限 32 字，超了会 400；desp 不能为空
@@ -213,8 +215,12 @@ async def _send_webhook(username: str, sub: NotificationTarget, item: InboxItem)
             elif fmt == "discord":
                 # Discord webhook content limit is 2000 chars; split instead of silently truncating.
                 responses = []
-                for chunk in _chunks(text, 1900)[:5]:
-                    responses.append(await client.post(webhook_url, json={"content": chunk}))
+                for index, chunk in enumerate(_chunks(text, 1900)[:5]):
+                    nonce = str(int(hashlib.sha256(f"{item.id}:{index}".encode()).hexdigest()[:15], 16))
+                    responses.append(await client.post(
+                        webhook_url,
+                        json={"content": chunk, "nonce": nonce, "enforce_nonce": True},
+                    ))
                 for r in responses:
                     r.raise_for_status()
                 resp = responses[-1]
@@ -226,6 +232,7 @@ async def _send_webhook(username: str, sub: NotificationTarget, item: InboxItem)
             else:
                 payload = {
                     "source": "otomo",
+                    "idempotency_key": item.id,
                     "kind": item.kind,
                     "username": username,
                     "title": item.title,
@@ -269,6 +276,7 @@ def _send_email_sync(username: str, sub: NotificationTarget, item: InboxItem) ->
     msg["Subject"] = item.title
     msg["From"] = settings.smtp_from
     msg["To"] = sub.email
+    msg["Message-ID"] = f"<{item.id}@otomo.local>"
     # multipart: 纯文本兜底 + HTML 卡片(邮件客户端只认内联样式)
     msg.set_content(f"Hi {username},\n\n{digest_text(item)}\n\n-- Otomo")
     msg.add_alternative(digest_html(username, item), subtype="html")
@@ -309,10 +317,11 @@ async def _send_discord_dm(username: str, item: InboxItem) -> dict[str, Any]:
             if r.status_code >= 400:
                 raise RuntimeError(f"open DM {r.status_code}: {r.text[:200]}")
             channel_id = r.json()["id"]
-            for chunk in _chunks(f"**{item.title}**\n{text}", 1900)[:5]:
+            for index, chunk in enumerate(_chunks(f"**{item.title}**\n{text}", 1900)[:5]):
+                nonce = str(int(hashlib.sha256(f"{item.id}:{index}".encode()).hexdigest()[:15], 16))
                 m = await client.post(
                     f"https://discord.com/api/v10/channels/{channel_id}/messages",
-                    json={"content": chunk}, headers=headers,
+                    json={"content": chunk, "nonce": nonce, "enforce_nonce": True}, headers=headers,
                 )
                 if m.status_code >= 400:
                     raise RuntimeError(f"send DM {m.status_code}: {m.text[:200]}")
@@ -333,7 +342,7 @@ def _send_webpush_one(target: dict[str, Any], item: InboxItem) -> dict[str, Any]
                 "title": item.title or "Otomo 更新",
                 "body": body,
                 "url": "/settings/subscriptions",
-                "tag": f"otomo-{item.kind}",
+                "tag": item.id,
                 "icon": "/icon-192.png",
                 "badge": "/icon-192.png",
             },

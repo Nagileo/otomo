@@ -210,6 +210,8 @@ class WatchSource(BaseModel):
     page_status_label: str = "未做页面探测"
     page_checked_at: str = ""
     http_status: int = 0
+    page_check_scope: Literal["none", "transport_only", "catalog_and_title"] = "none"
+    playability_verified: bool = False
 
 
 class WhereToWatchArgs(BaseModel):
@@ -481,6 +483,8 @@ class WhereToWatchTool(Tool):
             source.page_status_label = str(probe.get("label") or "未做页面探测")
             source.page_checked_at = _checked_now()
             source.http_status = int(probe.get("http_status") or 0)
+            source.page_check_scope = "transport_only"
+            source.playability_verified = False
         status_order = {"verified": 0, "catalog_match": 1, "possible": 2}
         official_sources.sort(key=lambda source: (
             status_order.get(source.availability_status, 9),

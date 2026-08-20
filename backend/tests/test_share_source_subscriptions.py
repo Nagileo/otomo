@@ -4,6 +4,8 @@ import asyncio
 from datetime import datetime
 import sqlite3
 
+import pytest
+
 from otomo import config
 from otomo.auth import AuthStore
 from otomo.factory import build_registry
@@ -360,3 +362,97 @@ def test_expired_cross_process_lease_can_be_recovered(tmp_path):
             (rule.id,),
         )
     assert store.claim_lease(rule, "hit-1", "worker-b")
+
+
+def test_outbox_does_not_resend_after_crash_between_external_send_and_commit(monkeypatch, tmp_path):
+    store = SubscriptionStore(str(tmp_path / "subs.sqlite3"))
+    rule = store.create(
+        CreateSubscriptionRuleRequest(
+            kind="birthday",
+            channels=["webhook"],
+            webhook_url="https://example.com/hook",
+            schedule=SubscriptionSchedule(timezone="Asia/Shanghai", interval_minutes=15),
+        ),
+        owner_key="user:alice",
+        username="alice",
+    )
+    service = SubscriptionService(store, LongTermMemory(tmp_path / "ltm"), AuthStore(tmp_path / "auth"))
+    sends = 0
+
+    async def materialize(_rule, *, test=False):
+        return {"sections": [{"title": "x", "items": [{"name": "item"}]}]}
+
+    async def sent_once(*_args, **_kwargs):
+        nonlocal sends
+        sends += 1
+        return [{"channel": "webhook", "ok": True}]
+
+    original_finish = store.finish_outbox
+    crashed = False
+
+    def crash_before_commit(*args, **kwargs):
+        nonlocal crashed
+        if not crashed:
+            crashed = True
+            raise asyncio.CancelledError
+        return original_finish(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_materialize", materialize)
+    monkeypatch.setattr("otomo.subscriptions.dispatch_notifications", sent_once)
+    monkeypatch.setattr(store, "finish_outbox", crash_before_commit)
+    run_at = datetime(2026, 7, 10, 12, 0)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(service.run_rule(rule, now=run_at))
+
+    monkeypatch.setattr(store, "finish_outbox", original_finish)
+    recovered = asyncio.run(service.run_rule(store.get(rule.id, rule.owner_key), now=run_at))
+    assert sends == 1
+    assert recovered.status == "skipped"
+    assert recovered.payload["outbox_status"] == "dispatching"
+    assert "not resent" in recovered.payload["reason"]
+
+
+def test_outbox_retry_reuses_committed_payload_and_target(monkeypatch, tmp_path):
+    store = SubscriptionStore(str(tmp_path / "subs.sqlite3"))
+    rule = store.create(
+        CreateSubscriptionRuleRequest(
+            kind="birthday",
+            channels=["webhook"],
+            webhook_url="https://example.com/original",
+            schedule=SubscriptionSchedule(timezone="Asia/Shanghai", interval_minutes=15),
+        ),
+        owner_key="user:alice",
+        username="alice",
+    )
+    service = SubscriptionService(store, LongTermMemory(tmp_path / "ltm"), AuthStore(tmp_path / "auth"))
+    materialized = 0
+    dispatched: list[tuple[str, str]] = []
+
+    async def changing_payload(_rule, *, test=False):
+        nonlocal materialized
+        materialized += 1
+        return {
+            "sections": [{"title": "x", "items": [{"name": f"payload-{materialized}"}]}],
+        }
+
+    async def fail_then_succeed(_username, target, item):
+        name = item.payload["sections"][0]["items"][0]["name"]
+        dispatched.append((target.webhook_url, name))
+        return [{"channel": "webhook", "ok": len(dispatched) > 1, "error": "temporary"}]
+
+    monkeypatch.setattr(service, "_materialize", changing_payload)
+    monkeypatch.setattr("otomo.subscriptions.dispatch_notifications", fail_then_succeed)
+    monkeypatch.setattr(store, "mark_failure", lambda *_args, **_kwargs: rule)
+    run_at = datetime(2026, 7, 10, 12, 0)
+
+    first = asyncio.run(service.run_rule(rule, now=run_at))
+    assert first.status == "failed"
+    rule.webhook_url = "https://example.com/changed"
+    second = asyncio.run(service.run_rule(rule, now=run_at))
+
+    assert second.status == "sent"
+    assert materialized == 2
+    assert dispatched == [
+        ("https://example.com/original", "payload-1"),
+        ("https://example.com/original", "payload-1"),
+    ]

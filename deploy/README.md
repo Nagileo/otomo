@@ -142,6 +142,7 @@ commit 发布 `otomo-backend-asr`，再执行 `bash deploy.sh`；否则脚本会
 - [ ] `COOKIE_SECURE=true` + `CORS_ALLOWED_ORIGINS` 收敛到你的公网 URL
 - [ ] Bangumi OAuth 回调地址 = `FRONTEND_BASE_URL/auth/bangumi/callback`
 - [ ] 如需浏览器推送，运行 `bash deploy/configure_webpush.sh 你的邮箱@example.com`，然后重新部署并在订阅设置授权浏览器
+- [ ] 如需 qBittorrent，填写 `QBITTORRENT_URL/USERNAME/PASSWORD`；URL 必须从 backend 容器可达，并在管理页执行一次只读连接检测
 - [ ] `DAILY_TOKEN_BUDGET_*` 按预算设（防爬虫刷爆 LLM 账单）
 - [ ] LLM/VLM provider 后台设月度充值上限（第二道熔断）
 - [ ] 备份整个 cache：`deploy/backup_cache.sh` 会对所有 SQLite 做在线一致快照和 `integrity_check`，并保留 auth 密钥、LTM 等非数据库文件；可挂 cron、可选传 OSS
@@ -156,4 +157,6 @@ commit 发布 `otomo-backend-asr`，再执行 `bash deploy.sh`；否则脚本会
 - **`NEXT_PUBLIC_BACKEND` 改了不生效**：它是 build 期内联的，改了要 `--build` 重建 frontend 镜像。
 - **证书申请失败**：确认 80/443 放行、`OTOMO_DOMAIN` 是能解析到本机的名字（nip.io 需公网 IP 可达）。
 - **浏览器推送按钮不可用**：确认公网 HTTPS、backend 与 scheduler 都读取同一份 `backend/.env`，且 VAPID 公私钥及 `WEBPUSH_VAPID_SUBJECT` 配置完整；授权后还需在具体规则里勾选“浏览器推送”。
-- **pixiv/B站本地 ASR 用不了**：先确认使用的是手动发布的 `otomo-backend-full`；国内 IP 直连 pixiv 仍需海外节点或代理，B站 ASR 还需 cookies（见 ASR_COOKIES_*）。
+- **qBittorrent 检测失败**：容器里的 `127.0.0.1` 指向 backend 自己，不是宿主机；改用 Docker 可达的宿主机/LAN 地址，并检查 qB WebUI 的 Host 白名单。Otomo 会发送 qB 5.x 要求的同源 `Origin/Referer`，并核对 Web API 版本。
+- **B站登录态**：登录 Otomo 后到“账号与集成”扫码；登录态按 Bangumi 用户加密隔离，不再使用一份全站共享 Cookie。升级自旧版时需要每位用户重新连接一次。
+- **pixiv/B站本地 ASR 用不了**：先确认使用的是手动发布的 `otomo-backend-full`；管理页会同时检查 `yt-dlp`、`faster-whisper` 和本地模型，不再只因 `ASR_PROVIDER=local` 就显示绿色。国内 IP 直连 pixiv 仍需海外节点或代理。

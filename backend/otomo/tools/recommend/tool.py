@@ -41,7 +41,12 @@ from ..curation import curated_recall_candidates
 from ..erogamescape.tool import EGSRankArgs, RankErogameScapeTool
 from ..review.tool import ReviewFusionResult, ReviewSubjectArgs, ReviewSubjectTool, _ASPECT_HINTS
 from ..series_progress import SeriesRelationMemo, collection_completed, collection_map, collection_state, necessity_for, state_label
-from .explanations import RecommendationClaim, audit_item_explanation, refresh_item_explanation
+from .explanations import (
+    RecommendationClaim,
+    audit_item_explanation,
+    refresh_item_explanation,
+    suppress_unverified_explanation,
+)
 
 _RECALL_PER_TAG = 50
 _MAX_RECALL_TAGS = 8
@@ -1982,6 +1987,7 @@ class RecommendTool(Tool):
             refresh_item_explanation(item, scenario)
             item.integrity_issues = audit_item_explanation(item)
             item.integrity_verified = not item.integrity_issues
+            suppress_unverified_explanation(item, item.integrity_issues)
         all_finalists = list(out)
         reranked_items = _mmr_rerank(
             [

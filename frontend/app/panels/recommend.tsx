@@ -225,13 +225,14 @@ export function RecommendPanel({
       )}
       <div className="rec-grid" ref={gridRef}>
         {shownItems.map((item, i) => {
-          const claims = list(item.claims);
+          const integrityVerified = item.integrity_verified !== false;
+          const claims = integrityVerified ? list(item.claims) : [];
           const fitClaims = claims.filter((claim) => claim.kind === "fit");
           const riskClaims = claims.filter((claim) => claim.kind === "risk");
           const qualityClaims = claims.filter((claim) => claim.kind === "quality");
           const provenanceClaims = claims.filter((claim) => claim.kind === "provenance");
-          const fit = text(fitClaims[0]?.text || list<string>(item.fit_points)[0], "");
-          const risk = list<string>(item.risks)[0] || list<string>(item.aspect_warnings)[0] || "";
+          const fit = integrityVerified ? text(fitClaims[0]?.text || list<string>(item.fit_points)[0], "") : "";
+          const risk = integrityVerified ? list<string>(item.risks)[0] || list<string>(item.aspect_warnings)[0] || "" : "";
           const nextStep = list<string>(item.next_step)[0] || "";
           const choiceOpen = feedbackChoice?.id === Number(item.id);
           return (
@@ -251,7 +252,7 @@ export function RecommendPanel({
                 {item.series_status?.continued_from ? <div className="evidence-row tight"><Badge tone="good">已回到下一部必要主线</Badge><span>原候选：{text(item.series_status.continued_from)}</span></div> : null}
                 {item.series_status?.has_predecessor && item.series_status?.prerequisites_satisfied ? <div className="evidence-row tight"><Badge tone="good">必要前作已完成</Badge></div> : null}
                 {item.series_status?.has_predecessor && !item.series_status?.prerequisites_satisfied ? <p className="card-note rec-risk"><strong>续作前置未完成</strong>{list(item.series_status.missing_predecessors).map((row) => text(row.name)).join("、")}</p> : null}
-                {fit ? <p className="card-note rec-fit"><strong>为什么适合你</strong>{fit}</p> : null}
+                {!integrityVerified ? <p className="card-note rec-risk"><strong>推荐解释已收起</strong>理由与证据未能完全对齐；请先查看作品资料。</p> : fit ? <p className="card-note rec-fit"><strong>为什么适合你</strong>{fit}</p> : null}
                 {risk ? <p className="card-note rec-risk"><strong>需要注意</strong>{risk}</p> : null}
                 <div className="evidence-row tight">
                   {item.id && onPrepareWrite && (
@@ -315,7 +316,7 @@ export function RecommendPanel({
                     >移除</button>
                   </div>
                 )}
-                {(claims.length > 0 || item.review_consensus || list<string>(item.quality_badges).length > 0) ? (
+                {integrityVerified && (claims.length > 0 || item.review_consensus || list<string>(item.quality_badges).length > 0) ? (
                   <details className="rec-evidence-details">
                     <summary>查看口碑与推荐依据</summary>
                     {fitClaims.slice(0, 4).map((claim, idx) => (

@@ -121,6 +121,7 @@ def test_where_to_watch_uses_bangumi_data(monkeypatch):
     assert res.data.official_sources[0].availability_status == "catalog_match"
     assert res.data.availability_status in {"verified", "catalog_match"}
     assert res.data.last_verified
+    assert res.data.official_sources[0].playability_verified is False
 
 
 def test_official_page_probe_reports_reachability_without_claiming_playability(monkeypatch):
@@ -305,6 +306,17 @@ def test_release_content_kind_rejects_books_games_and_keeps_title_words_safe():
     assert _classify_release_content("音乐少女 Visual Novel PC Game", identity)[0] == "game"
     assert _classify_release_content("音乐少女 漫画版 Scanlation", identity)[0] == "comic"
     assert _classify_release_content("音乐少女", identity)[0] == "unknown"
+
+
+def test_release_content_kind_rejects_real_world_wallpaper_subtitle_and_ncop_false_positives():
+    identity = build_media_identity(title="轻音少女", aliases=["K-ON!"])
+    cases = {
+        "轻音少女 壁纸合集 [JPG][PNG]": "image",
+        "轻音少女 NCOP NCED 合集 [1080p]": "extras",
+        "轻音少女 字幕合集 [ASS]": "subtitle",
+    }
+    for title, expected in cases.items():
+        assert _classify_release_content(title, identity)[0] == expected
 
 
 def test_ambiguous_title_only_release_stays_out_of_default_area(monkeypatch):

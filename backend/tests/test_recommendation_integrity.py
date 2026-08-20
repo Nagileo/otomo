@@ -6,7 +6,14 @@ import pytest
 
 from otomo.agent.contracts import ToolResult
 from otomo.memory.models import AspectPreference, UserAspectProfile
-from otomo.tools.recommend.explanations import audit_item_explanation, refresh_item_explanation
+from otomo.tools.recommend.explanations import (
+    RecommendationClaim,
+    RecommendationSupport,
+    UNVERIFIED_EXPLANATION,
+    audit_item_explanation,
+    refresh_item_explanation,
+    suppress_unverified_explanation,
+)
 from otomo.tools.recommend.tool import (
     RecItem,
     RecommendArgs,
@@ -165,6 +172,23 @@ def test_recent_feedback_never_becomes_an_explicit_claim():
     assert audit_item_explanation(item) == []
 
 
+def test_profile_aspect_claim_does_not_borrow_unrelated_review_rating_source():
+    item = RecItem(
+        id=23,
+        name="画像维度候选",
+        score=1.0,
+        reasons=[],
+        aspect_matches=["画面表现(0.80)"],
+        review_sources=["Bangumi"],
+    )
+    refresh_item_explanation(item, "general")
+
+    claim = next(claim for claim in item.claims if claim.text == "画面表现(0.80)")
+    assert claim.support == ["长期口味画像（由条目标签映射）"]
+    assert claim.evidence[0].kind == "profile_aspect"
+    assert audit_item_explanation(item) == []
+
+
 def test_explanation_audit_rejects_visible_prose_without_matching_support():
     item = RecItem(
         id=21,
@@ -179,6 +203,56 @@ def test_explanation_audit_rejects_visible_prose_without_matching_support():
 
     assert any("没有对应证据声明" in issue for issue in issues)
     assert any("分项加总不一致" in issue for issue in issues)
+
+
+def test_explanation_audit_rejects_source_name_and_forged_typed_fact():
+    claim = RecommendationClaim(
+        kind="fit",
+        text="这部作品非常治愈",
+        support=["Bangumi"],
+        evidence=[RecommendationSupport(
+            kind="subject_tag",
+            value="治愈",
+            source="Bangumi",
+            field="tags",
+            subject_id=22,
+            label="Bangumi 条目标签：治愈",
+        )],
+    )
+    item = RecItem(
+        id=22,
+        name="实际只有悬疑标签",
+        score=1.0,
+        reasons=[],
+        diversity_tags=["悬疑"],
+        fit_points=[claim.text],
+        claims=[claim],
+    )
+
+    issues = audit_item_explanation(item)
+
+    assert any("未对齐证据" in issue for issue in issues)
+
+
+def test_failed_explanation_audit_is_hidden_from_all_presentation_surfaces():
+    item = RecItem(
+        id=22,
+        name="证据错位候选",
+        score=1.0,
+        reasons=[],
+        fit_points=["伪造的适配理由"],
+        risks=["伪造的风险"],
+        why_recalled=["旧召回说明"],
+        claims=[],
+    )
+    issues = audit_item_explanation(item)
+    suppress_unverified_explanation(item, issues)
+
+    assert issues
+    assert item.fit_points == [UNVERIFIED_EXPLANATION]
+    assert item.risks == []
+    assert item.why_recalled == []
+    assert item.claims == []
 
 
 def test_personalization_seeds_exclude_low_ratings_and_non_consumption():

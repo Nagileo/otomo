@@ -6,8 +6,10 @@ import pytest
 
 from otomo import config
 from otomo.api.admin import _asr_integration_status, _validate_bilibili_cookie_text
-from otomo.bilibili_account import BilibiliQrLoginService, _netscape_cookie_text
-from otomo.tools.release.qbittorrent import check_qbittorrent
+from otomo.auth import AuthStore
+from otomo.bilibili_account import BilibiliCredentialStore, BilibiliQrLoginService, _netscape_cookie_text
+from otomo.security_context import tenant_scope
+from otomo.tools.release.qbittorrent import DownloaderPushRequest, check_qbittorrent, push_to_qbittorrent
 from otomo.tools.videos import tool as videos_tool
 
 
@@ -28,9 +30,11 @@ def test_cookie_validation_accepts_httponly_sessdata_and_rejects_other_domains()
 
 
 def test_bilibili_account_loader_keeps_cookie_server_side(tmp_path, monkeypatch):
-    cookie_path = tmp_path / "bilibili_cookies.txt"
-    cookie_path.write_text(COOKIE_TEXT, encoding="utf-8")
-    monkeypatch.setattr(config.settings, "bilibili_cookies_file", str(cookie_path))
+    account_path = tmp_path / "bilibili.sqlite3"
+    auth = AuthStore(tmp_path / "auth")
+    monkeypatch.setattr(config.settings, "bilibili_account_store_path", str(account_path))
+    monkeypatch.setattr(config.settings, "auth_store_path", str(tmp_path / "auth" / "auth.sqlite3"))
+    BilibiliCredentialStore(account_path, cipher=auth.cipher).save("alice", COOKIE_TEXT)
     seen: dict[str, object] = {}
 
     def fake_get(url, **kwargs):
@@ -44,7 +48,8 @@ def test_bilibili_account_loader_keeps_cookie_server_side(tmp_path, monkeypatch)
         )
 
     monkeypatch.setattr(videos_tool.httpx, "get", fake_get)
-    status = videos_tool.verify_bilibili_account()
+    with tenant_scope("alice", authenticated=True):
+        status = videos_tool.verify_bilibili_account()
     assert status == {
         "configured": True,
         "authenticated": True,
@@ -56,6 +61,17 @@ def test_bilibili_account_loader_keeps_cookie_server_side(tmp_path, monkeypatch)
     assert "bili_jct=csrf-value" in cookie_header
     assert "foreign" not in cookie_header
     assert "secret-session" not in str(status)
+    assert b"secret-session" not in account_path.read_bytes()
+
+
+def test_bilibili_accounts_are_isolated_by_bangumi_owner(tmp_path):
+    store = BilibiliCredentialStore(tmp_path / "bili.sqlite3", cipher=AuthStore(tmp_path / "auth").cipher)
+    store.save("alice", COOKIE_TEXT)
+    bob_cookie = COOKIE_TEXT.replace("secret-session", "bob-secret")
+    store.save("bob", bob_cookie)
+    assert "secret-session" in store.get("alice")
+    assert "bob-secret" not in store.get("alice")
+    assert "bob-secret" in store.get("bob")
 
 
 def test_netscape_cookie_export_requires_sessdata_and_never_returns_it_to_browser():
@@ -69,7 +85,7 @@ def test_netscape_cookie_export_requires_sessdata_and_never_returns_it_to_browse
         _netscape_cookie_text(httpx.Cookies())
 
 
-def test_bilibili_qr_flow_is_owner_scoped_and_writes_server_cookie_file(tmp_path, monkeypatch):
+def test_bilibili_qr_flow_is_owner_scoped_encrypted_and_cross_process_safe(tmp_path, monkeypatch):
     class FakeClient:
         def __init__(self, *args, **kwargs):
             pass
@@ -99,16 +115,44 @@ def test_bilibili_qr_flow_is_owner_scoped_and_writes_server_cookie_file(tmp_path
             )
 
     monkeypatch.setattr("otomo.bilibili_account.httpx.AsyncClient", FakeClient)
-    target = tmp_path / "bili.txt"
-    service = BilibiliQrLoginService(str(target))
+    store = BilibiliCredentialStore(tmp_path / "bili.sqlite3", cipher=AuthStore(tmp_path / "auth").cipher)
+    service = BilibiliQrLoginService(store)
     login = asyncio.run(service.start("alice"))
     assert login["status"] == "waiting"
+    pending_bytes = (tmp_path / "bili.sqlite3").read_bytes()
+    assert b"qr-key" not in pending_bytes
+    assert b"passport.bilibili.com/qr" not in pending_bytes
     assert asyncio.run(service.poll("bob", login["login_id"]))["status"] == "expired"
-    connected = asyncio.run(service.poll("alice", login["login_id"]))
-    assert connected == {"status": "connected", "message": "B站登录态已安全保存到服务器"}
+    # Polling through another service instance models a different web worker.
+    connected = asyncio.run(BilibiliQrLoginService(store).poll("alice", login["login_id"]))
+    assert connected == {"status": "connected", "message": "B站登录态已加密保存到你的独立账号"}
     assert "server-secret" not in str(connected)
-    saved = target.read_text(encoding="utf-8")
+    saved = store.get("alice")
     assert "SESSDATA\tserver-secret" in saved
+    assert b"server-secret" not in (tmp_path / "bili.sqlite3").read_bytes()
+
+
+def test_bilibili_authenticated_memory_caches_are_partitioned_by_owner(monkeypatch):
+    calls: list[str] = []
+
+    def fake_headers(owner=None):
+        return {"X-Test-Owner": str(owner or "public")}
+
+    def fake_get(url, **kwargs):
+        calls.append(str((kwargs.get("headers") or {}).get("X-Test-Owner")))
+        return httpx.Response(
+            200,
+            request=httpx.Request("GET", str(url)),
+            json={"code": 0, "data": {"replies": []}},
+        )
+
+    monkeypatch.setattr(videos_tool, "_bili_headers", fake_headers)
+    monkeypatch.setattr(videos_tool.httpx, "get", fake_get)
+    aid = 917_304_821
+    videos_tool._sync_bili_replies(aid, 7, "alice")
+    videos_tool._sync_bili_replies(aid, 7, "bob")
+    videos_tool._sync_bili_replies(aid, 7, "alice")
+    assert calls == ["alice", "bob"]
 
 
 def test_qbittorrent_diagnostic_authenticates_without_adding_torrent(monkeypatch):
@@ -116,10 +160,11 @@ def test_qbittorrent_diagnostic_authenticates_without_adding_torrent(monkeypatch
     monkeypatch.setattr(config.settings, "qbittorrent_username", "alice")
     monkeypatch.setattr(config.settings, "qbittorrent_password", "secret")
     calls: list[str] = []
+    client_headers: dict[str, str] = {}
 
     class FakeClient:
         def __init__(self, *args, **kwargs):
-            pass
+            client_headers.update(kwargs.get("headers") or {})
 
         async def __aenter__(self):
             return self
@@ -133,18 +178,85 @@ def test_qbittorrent_diagnostic_authenticates_without_adding_torrent(monkeypatch
 
         async def get(self, url, **_kwargs):
             calls.append(url)
-            return httpx.Response(200, request=httpx.Request("GET", url), text="5.0.4")
+            value = "2.11.3" if url.endswith("webapiVersion") else "5.0.4"
+            return httpx.Response(200, request=httpx.Request("GET", url), text=value)
 
     monkeypatch.setattr("otomo.tools.release.qbittorrent.httpx.AsyncClient", FakeClient)
     status = asyncio.run(check_qbittorrent())
     assert status["authenticated"] is True
     assert status["version"] == "5.0.4"
+    assert status["web_api_version"] == "2.11.3"
+    assert client_headers == {
+        "Origin": "https://qbit.example.test",
+        "Referer": "https://qbit.example.test/",
+    }
     assert all("torrents/add" not in url for url in calls)
 
 
-def test_local_asr_health_is_explicit_and_does_not_fake_worker_checks(monkeypatch):
+def test_qbittorrent_confirmed_push_uses_verified_session_and_expected_fields(monkeypatch):
+    monkeypatch.setattr(config.settings, "qbittorrent_url", "https://qbit.example.test")
+    monkeypatch.setattr(config.settings, "qbittorrent_username", "alice")
+    monkeypatch.setattr(config.settings, "qbittorrent_password", "secret")
+    monkeypatch.setattr(config.settings, "qbittorrent_category", "otomo")
+    monkeypatch.setattr(config.settings, "qbittorrent_save_path", "")
+    added: dict[str, object] = {}
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            added["headers"] = kwargs.get("headers")
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, url, **kwargs):
+            if url.endswith("torrents/add"):
+                added["data"] = kwargs.get("data")
+            return httpx.Response(200, request=httpx.Request("POST", url), text="Ok.")
+
+        async def get(self, url, **_kwargs):
+            value = "2.11.3" if url.endswith("webapiVersion") else "5.0.4"
+            return httpx.Response(200, request=httpx.Request("GET", url), text=value)
+
+    monkeypatch.setattr("otomo.tools.release.qbittorrent.httpx.AsyncClient", FakeClient)
+    result = asyncio.run(push_to_qbittorrent(DownloaderPushRequest(
+        url="magnet:?xt=urn:btih:ABC123",
+        paused=True,
+    )))
+    assert result["ok"] is True
+    assert result["web_api_version"] == "2.11.3"
+    assert added["headers"] == {
+        "Origin": "https://qbit.example.test",
+        "Referer": "https://qbit.example.test/",
+    }
+    assert added["data"] == {
+        "urls": "magnet:?xt=urn:btih:ABC123",
+        "paused": "true",
+        "category": "otomo",
+    }
+
+
+def test_qbittorrent_rejects_local_or_malformed_torrent_references_before_login(monkeypatch):
+    monkeypatch.setattr(config.settings, "qbittorrent_url", "https://qbit.example.test")
+    monkeypatch.setattr(config.settings, "qbittorrent_username", "alice")
+    monkeypatch.setattr(config.settings, "qbittorrent_password", "secret")
+    with pytest.raises(ValueError, match="localhost|内网|保留"):
+        asyncio.run(push_to_qbittorrent(DownloaderPushRequest(url="https://127.0.0.1/private.torrent")))
+    with pytest.raises(ValueError, match="btih/btmh"):
+        asyncio.run(push_to_qbittorrent(DownloaderPushRequest(url="magnet:?dn=missing-hash")))
+
+
+def test_local_asr_health_reports_missing_runtime_instead_of_fake_green(monkeypatch):
     monkeypatch.setattr(config.settings, "asr_provider", "local")
+    monkeypatch.setattr(
+        "otomo.api.admin.importlib.util.find_spec",
+        lambda name: None if name in {"yt_dlp", "faster_whisper"} else object(),
+    )
     status = asyncio.run(_asr_integration_status())
     assert status["configured"] is True
-    assert status["healthy"] is True
+    assert status["healthy"] is False
     assert status["provider"] == "local"
+    assert "yt_dlp" in status["error"]
+    assert status["execution"] == "final-candidates-only"

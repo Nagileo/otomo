@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
+from otomo import config
 from otomo.tools.recommend.tool import RecommendTool
 from otomo.tools.series_progress import (
     SeriesProgressArgs,
@@ -11,6 +12,7 @@ from otomo.tools.series_progress import (
     inspect_series_candidate,
 )
 from otomo.tools.watchorder.tool import WatchCopilotArgs, WatchCopilotTool
+from otomo.tools.watchorder.tool import WatchOrderArgs, WatchOrderTool
 from otomo.series_overrides import (
     SeriesOverrideMember,
     SeriesOverrideRule,
@@ -142,6 +144,52 @@ def test_manual_override_replaces_wrong_relation_edges_and_skips_recap(tmp_path)
     assert result.next_unwatched.id == 3
     assert result.mainline[2].prerequisite_ids == [1]
     assert [item.id for item in result.optional] == [2]
+
+
+def test_builtin_monogatari_and_fate_rules_exist_without_operator_json(tmp_path):
+    store = SeriesOverrideStore(tmp_path / "series.json")
+    monogatari = store.find_by_subject(68812)
+    fate = store.find_by_subject(109386)
+    assert monogatari is not None
+    assert monogatari.id == "monogatari-main-release-order"
+    assert [row.subject_id for row in monogatari.mainline[:6]] == [
+        1671, 7707, 148036, 148037, 23161, 56117,
+    ]
+    assert monogatari.mainline[-1].subject_id == 475354
+    assert "首次观看推荐顺序" in monogatari.title
+    assert fate is not None
+    assert fate.id == "fate-stay-night-core-routes"
+    assert [row.subject_id for row in fate.mainline] == [95225, 109386, 10639]
+    assert 109375 in {row.subject_id for row in fate.optional}
+    assert 290 in {row.subject_id for row in fate.alternates}
+    assert store.status()["builtin_rules"] == 2
+
+
+def test_watch_order_tool_uses_same_builtin_fate_branch_rule(monkeypatch, tmp_path):
+    monkeypatch.setattr(config.settings, "series_overrides_path", str(tmp_path / "series.json"))
+
+    class FateClient:
+        async def search_subjects(self, *_args, **_kwargs):
+            return {"data": [{"id": 109386, "name_cn": "Fate/stay night [UBW] 第二季"}]}
+
+        async def get_subject(self, subject_id):
+            names = {
+                95225: "Fate/stay night [Unlimited Blade Works]",
+                109386: "Fate/stay night [Unlimited Blade Works] 第二季",
+                10639: "Fate/Zero",
+                109375: "Heaven's Feel I",
+                175599: "Heaven's Feel II",
+                175600: "Heaven's Feel III",
+                290: "Fate/stay night（2006）",
+                3484: "Unlimited Blade Works（2010 剧场版）",
+            }
+            return {"id": subject_id, "name_cn": names[subject_id], "type": 2}
+
+    result = asyncio.run(WatchOrderTool(FateClient()).run(WatchOrderArgs(title="Fate UBW 第二季")))
+    assert result.ok and result.data is not None
+    assert [row.id for row in result.data.watch_order] == [95225, 109386, 10639]
+    assert [row.id for row in result.data.side_stories] == [109375, 175599, 175600]
+    assert any("复杂系列规则" in note for note in result.data.notes)
 
 
 def test_candidate_audit_uses_same_manual_override_as_progress_service(tmp_path):

@@ -1,0 +1,29 @@
+{
+  "verified_at": "2026-08-20",
+  "release_false_positives": [
+    {"title": "轻音少女 壁纸合集 [JPG][PNG]", "expected": "image"},
+    {"title": "轻音少女 NCOP NCED 合集 [1080p]", "expected": "extras"},
+    {"title": "轻音少女 字幕合集 [ASS]", "expected": "subtitle"}
+  ],
+  "bilibili_false_positives": [
+    {
+      "title": "《轻音少女》系列动画歌曲全集 1080P",
+      "description": "OP ED 剧中歌合集",
+      "duration_seconds": 10800,
+      "expected_role": "related"
+    }
+  ],
+  "series_rules": {
+    "monogatari_seed": 68812,
+    "monogatari_prefix": [1671, 7707, 148036, 148037, 23161, 56117, 68812],
+    "monogatari_latest_completed": 475354,
+    "fate_seed": 109386,
+    "fate_mainline": [95225, 109386, 10639],
+    "fate_heavens_feel": [109375, 175599, 175600]
+  },
+  "official_probe_counterexamples": [
+    {"url": "https://www.bilibili.com/bangumi/media/md99999999999", "http_status_observed": 200, "proves_playability": false},
+    {"url": "https://www.youtube.com/watch?v=invalid_otomo_20260820", "http_status_observed": 200, "proves_playability": false},
+    {"url": "https://www.netflix.com/title/9999999999999999", "http_status_observed": 404, "proves_playability": false}
+  ]
+}

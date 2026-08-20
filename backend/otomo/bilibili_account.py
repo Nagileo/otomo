@@ -1,15 +1,18 @@
-"""Short-lived Bilibili QR login flow for the single-user admin console."""
+"""Per-user encrypted Bilibili credentials and short-lived QR login flow."""
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-import os
 import secrets
+import sqlite3
 import time
 from typing import Any
 
 import httpx
+
+from .auth import TokenCipher
+from .config import settings
 
 
 _GENERATE_URL = "https://passport.bilibili.com/x/passport-login/web/qrcode/generate"
@@ -18,6 +21,23 @@ _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 )
+
+
+def validate_bilibili_cookie_text(value: str) -> None:
+    if "Netscape HTTP Cookie File" not in value[:512]:
+        raise ValueError("需要浏览器插件导出的 Netscape cookies.txt")
+    valid_rows: list[list[str]] = []
+    for raw_line in value.splitlines():
+        line = raw_line[len("#HttpOnly_"):] if raw_line.startswith("#HttpOnly_") else raw_line
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) >= 7 and parts[0].lstrip(".").lower().endswith("bilibili.com"):
+            valid_rows.append(parts)
+    if not valid_rows:
+        raise ValueError("文件中没有 bilibili.com Cookie")
+    if not any(parts[5] == "SESSDATA" and parts[6] for parts in valid_rows):
+        raise ValueError("没有找到 SESSDATA；这不是可用的 B站登录态导出")
 
 
 @dataclass
@@ -47,32 +67,165 @@ def _netscape_cookie_text(cookies: httpx.Cookies) -> str:
     return "\n".join(rows) + "\n"
 
 
-def _write_cookie_file(path: str, value: str) -> None:
-    target = Path(path).resolve()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_name(f".{target.name}.{secrets.token_hex(4)}.tmp")
-    temporary.write_text(value, encoding="utf-8")
-    try:
-        os.chmod(temporary, 0o600)
-    except OSError:
-        pass
-    temporary.replace(target)
+def _owner_key(owner: str) -> str:
+    value = owner.strip().casefold()
+    if not value:
+        raise ValueError("B站账号必须绑定到已登录的 Bangumi 用户")
+    return value
+
+
+class BilibiliCredentialStore:
+    """SQLite-backed encrypted cookie jars keyed by Bangumi username.
+
+    Cookie material is never returned from an API response.  SQLite gives all
+    web/worker processes the same account view, while ``TokenCipher`` keeps the
+    values encrypted at rest with Otomo's existing auth key.
+    """
+
+    def __init__(
+        self,
+        path: str | Path | None = None,
+        *,
+        cipher: TokenCipher | None = None,
+    ) -> None:
+        self.path = Path(path or settings.bilibili_account_store_path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.cipher = cipher or TokenCipher(Path(settings.auth_store_path).parent)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS bilibili_credentials (
+                    owner_key TEXT PRIMARY KEY,
+                    cookie_text TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS bilibili_qr_logins (
+                    login_id TEXT PRIMARY KEY,
+                    owner_key TEXT NOT NULL,
+                    qrcode_key TEXT NOT NULL,
+                    qr_url TEXT NOT NULL,
+                    expires_at REAL NOT NULL,
+                    created_at REAL NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_bilibili_qr_expiry ON bilibili_qr_logins(expires_at)"
+            )
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.path, timeout=10)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        return conn
+
+    def save(self, owner: str, cookie_text: str) -> None:
+        key = _owner_key(owner)
+        validate_bilibili_cookie_text(cookie_text)
+        encrypted = self.cipher.encrypt(cookie_text.replace("\r\n", "\n"))
+        now = time.time()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """
+                INSERT INTO bilibili_credentials(owner_key,cookie_text,created_at,updated_at)
+                VALUES(?,?,?,?)
+                ON CONFLICT(owner_key) DO UPDATE SET
+                    cookie_text=excluded.cookie_text,
+                    updated_at=excluded.updated_at
+                """,
+                (key, encrypted, now, now),
+            )
+
+    def get(self, owner: str) -> str:
+        key = _owner_key(owner)
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT cookie_text FROM bilibili_credentials WHERE owner_key=?",
+                (key,),
+            ).fetchone()
+        return self.cipher.decrypt(str(row["cookie_text"])) if row else ""
+
+    def delete(self, owner: str) -> bool:
+        key = _owner_key(owner)
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM bilibili_credentials WHERE owner_key=?",
+                (key,),
+            )
+        return bool(cursor.rowcount)
+
+    def configured(self, owner: str) -> bool:
+        return bool(self.get(owner))
+
+    def status(self) -> dict[str, Any]:
+        with self._connect() as conn:
+            row = conn.execute("SELECT COUNT(*) AS count FROM bilibili_credentials").fetchone()
+        return {"path": str(self.path), "accounts": int(row["count"] if row else 0)}
+
+    def save_pending_qr(self, owner: str, key: str, qr_url: str, expires_at: float) -> str:
+        login_id = "bqr_" + secrets.token_urlsafe(18).replace("-", "").replace("_", "")
+        now = time.time()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("DELETE FROM bilibili_qr_logins WHERE expires_at<=?", (now,))
+            conn.execute(
+                """
+                INSERT INTO bilibili_qr_logins(login_id,owner_key,qrcode_key,qr_url,expires_at,created_at)
+                VALUES(?,?,?,?,?,?)
+                """,
+                (
+                    login_id,
+                    _owner_key(owner),
+                    self.cipher.encrypt(key),
+                    self.cipher.encrypt(qr_url),
+                    expires_at,
+                    now,
+                ),
+            )
+        return login_id
+
+    def pending_qr(self, owner: str, login_id: str) -> _PendingQr | None:
+        now = time.time()
+        with self._connect() as conn:
+            conn.execute("DELETE FROM bilibili_qr_logins WHERE expires_at<=?", (now,))
+            row = conn.execute(
+                """
+                SELECT owner_key,qrcode_key,qr_url,expires_at FROM bilibili_qr_logins
+                WHERE login_id=? AND owner_key=?
+                """,
+                (login_id, _owner_key(owner)),
+            ).fetchone()
+        if not row:
+            return None
+        return _PendingQr(
+            owner=str(row["owner_key"]),
+            # ``TokenCipher.decrypt`` accepts legacy plaintext rows, so QR
+            # logins created immediately before this migration remain usable.
+            key=self.cipher.decrypt(str(row["qrcode_key"])),
+            qr_url=self.cipher.decrypt(str(row["qr_url"])),
+            expires_at=float(row["expires_at"]),
+        )
+
+    def delete_pending_qr(self, owner: str, login_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM bilibili_qr_logins WHERE login_id=? AND owner_key=?",
+                (login_id, _owner_key(owner)),
+            )
 
 
 class BilibiliQrLoginService:
-    def __init__(self, cookie_path: str) -> None:
-        self.cookie_path = cookie_path
-        self._pending: dict[str, _PendingQr] = {}
-
-    def _cleanup(self) -> None:
-        now = time.time()
-        self._pending = {
-            login_id: pending for login_id, pending in self._pending.items()
-            if pending.expires_at > now
-        }
+    def __init__(self, store: BilibiliCredentialStore | str | Path) -> None:
+        self.store = store if isinstance(store, BilibiliCredentialStore) else BilibiliCredentialStore(store)
 
     async def start(self, owner: str) -> dict[str, Any]:
-        self._cleanup()
         async with httpx.AsyncClient(timeout=10, headers={"User-Agent": _UA}) as client:
             response = await client.get(_GENERATE_URL)
             response.raise_for_status()
@@ -84,9 +237,8 @@ class BilibiliQrLoginService:
         qr_url = str(data.get("url") or "")
         if not key or not qr_url:
             raise RuntimeError("B站二维码响应缺少必要字段")
-        login_id = "bqr_" + secrets.token_urlsafe(18).replace("-", "").replace("_", "")
         expires_at = time.time() + 180
-        self._pending[login_id] = _PendingQr(owner=owner, key=key, qr_url=qr_url, expires_at=expires_at)
+        login_id = self.store.save_pending_qr(owner, key, qr_url, expires_at)
         return {
             "login_id": login_id,
             "qr_url": qr_url,
@@ -96,9 +248,8 @@ class BilibiliQrLoginService:
         }
 
     async def poll(self, owner: str, login_id: str) -> dict[str, Any]:
-        self._cleanup()
-        pending = self._pending.get(login_id)
-        if pending is None or pending.owner != owner:
+        pending = self.store.pending_qr(owner, login_id)
+        if pending is None:
             return {"status": "expired", "message": "二维码已过期，请重新生成"}
         async with httpx.AsyncClient(
             timeout=10,
@@ -114,14 +265,14 @@ class BilibiliQrLoginService:
         code = int(data.get("code") or 0)
         if code == 0:
             cookie_text = _netscape_cookie_text(response.cookies)
-            _write_cookie_file(self.cookie_path, cookie_text)
-            self._pending.pop(login_id, None)
-            return {"status": "connected", "message": "B站登录态已安全保存到服务器"}
+            self.store.save(owner, cookie_text)
+            self.store.delete_pending_qr(owner, login_id)
+            return {"status": "connected", "message": "B站登录态已加密保存到你的独立账号"}
         if code == 86090:
             return {"status": "scanned", "message": "已扫码，请在手机上确认登录"}
         if code == 86101:
             return {"status": "waiting", "message": "等待扫码"}
         if code == 86038:
-            self._pending.pop(login_id, None)
+            self.store.delete_pending_qr(owner, login_id)
             return {"status": "expired", "message": "二维码已过期，请重新生成"}
         return {"status": "waiting", "message": str(data.get("message") or "等待B站确认")}

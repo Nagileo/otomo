@@ -89,10 +89,15 @@ def _cover(item: dict) -> str | None:
 def _rec_embeds(discord, data: dict) -> list:
     out = []
     for it in (data.get("items") or [])[:5]:
+        integrity_verified = it.get("integrity_verified", True) is not False
         e = discord.Embed(
             title=str(it.get("name") or "?")[:256],
             url=f"https://bgm.tv/subject/{it.get('id')}" if it.get("id") else None,
-            description=str(_first(it.get("fit_points")) or it.get("review_consensus") or "")[:400],
+            description=(
+                str(_first(it.get("fit_points")) or it.get("review_consensus") or "")[:400]
+                if integrity_verified else
+                "推荐理由与证据未能完全对齐，已隐藏个性化解释；请打开作品资料确认。"
+            ),
             color=_EMBED_COLOR,
         )
         if cover := _cover(it):
@@ -101,9 +106,9 @@ def _rec_embeds(discord, data: dict) -> list:
             e.add_field(name="Bangumi", value=str(it["bangumi_score"]), inline=True)
         if it.get("rank"):
             e.add_field(name="全站排名", value=f"#{it['rank']}", inline=True)
-        if recall := _first(it.get("why_recalled")):
+        if integrity_verified and (recall := _first(it.get("why_recalled"))):
             e.add_field(name="为什么给你", value=recall[:200], inline=False)
-        if risk := (_first(it.get("risks")) or _first(it.get("aspect_warnings"))):
+        if integrity_verified and (risk := (_first(it.get("risks")) or _first(it.get("aspect_warnings")))):
             e.add_field(name="⚠️ 注意", value=risk[:200], inline=False)
         out.append(e)
     return out

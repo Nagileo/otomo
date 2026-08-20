@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   Bell, CalendarDays, CircleUserRound, Command, Compass, ListChecks, LogIn, LogOut,
-  MessageCircle, MessagesSquare, MonitorCog, Palette, Sparkles, Users,
+  MessageCircle, MessagesSquare, MonitorCog, Palette, Plug, Sparkles, Users,
 } from "lucide-react";
 import { useEffect } from "react";
 
@@ -79,6 +79,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <button className="secondary-nav" onClick={() => exp.setCompareOpen(true)}><ListChecks size={17} /><span>作品对比</span>{exp.compareItems.length ? <b className="nav-count">{exp.compareItems.length}</b> : null}</button>
         <Link className={`secondary-nav${active(pathname, "/friends") ? " active" : ""}`} href="/friends"><Users size={17} /><span>好友圈</span></Link>
         <button className="secondary-nav" onClick={() => exp.setSettingsOpen(true)}><Palette size={17} /><span>外观</span></button>
+        <Link className="secondary-nav" href="/settings/integrations"><Plug size={17} /><span>账号与集成</span></Link>
         <Link className="secondary-nav" href="/settings/subscriptions"><MonitorCog size={17} /><span>订阅设置</span></Link>
         <Link className="secondary-nav" href="/share/mine"><Sparkles size={17} /><span>我的分享</span></Link>
         <div className="account-block">

@@ -76,16 +76,22 @@ def test_community_api_requires_login_and_csrf_for_comments(tmp_path, monkeypatc
     monkeypatch.setattr(config.settings, "community_store_path", str(tmp_path / "community.sqlite3"))
     monkeypatch.setattr(config.settings, "ltm_store_path", str(tmp_path / "ltm.sqlite3"))
     monkeypatch.setattr(config.settings, "quota_store_path", str(tmp_path / "quota.json"))
-    monkeypatch.setattr(config.settings, "bilibili_cookies_file", str(tmp_path / "bilibili-cookies.txt"))
+    monkeypatch.setattr(config.settings, "bilibili_account_store_path", str(tmp_path / "bilibili-accounts.sqlite3"))
     monkeypatch.setattr(config.settings, "series_overrides_path", str(tmp_path / "series-overrides.json"))
     monkeypatch.setattr(config.settings, "subscription_scheduler_enabled", False)
     monkeypatch.setattr(config.settings, "rate_limit_enabled", False)
     monkeypatch.setattr(config.settings, "community_admin_usernames", "moderator")
-    monkeypatch.setattr(admin_api, "verify_bilibili_account", lambda: {
-        "configured": Path(config.settings.bilibili_cookies_file).is_file(),
-        "authenticated": Path(config.settings.bilibili_cookies_file).is_file(),
-        "username": "test-bili" if Path(config.settings.bilibili_cookies_file).is_file() else "",
-        "user_id": 42 if Path(config.settings.bilibili_cookies_file).is_file() else 0,
+    monkeypatch.setattr(admin_api, "verify_bilibili_account", lambda owner=None: {
+        "configured": bool(app.state.bilibili_credentials.get(owner)) if owner else False,
+        "authenticated": bool(app.state.bilibili_credentials.get(owner)) if owner else False,
+        "username": "test-bili" if owner and app.state.bilibili_credentials.get(owner) else "",
+        "user_id": 42 if owner and app.state.bilibili_credentials.get(owner) else 0,
+    })
+    monkeypatch.setattr("otomo.api.app.verify_bilibili_account", lambda owner=None: {
+        "configured": bool(app.state.bilibili_credentials.get(owner)) if owner else False,
+        "authenticated": bool(app.state.bilibili_credentials.get(owner)) if owner else False,
+        "username": owner or "",
+        "user_id": 7 if owner and app.state.bilibili_credentials.get(owner) else 0,
     })
 
     with TestClient(app) as client:
@@ -115,6 +121,15 @@ def test_community_api_requires_login_and_csrf_for_comments(tmp_path, monkeypatc
         overview = client.get("/community").json()
         assert overview["stats"]["total_visitors"] == 1
         assert overview["comments"][0]["can_delete"] is True
+        alice_cookie = (
+            "# Netscape HTTP Cookie File\n"
+            "#HttpOnly_.bilibili.com\tTRUE\t/\tTRUE\t0\tSESSDATA\talice-secret\n"
+        )
+        assert client.post(
+            "/integrations/bilibili/cookies",
+            headers={"x-otomo-csrf": auth["csrf_token"]},
+            json={"cookies_text": alice_cookie},
+        ).json()["integration"]["username"] == "alice"
 
         # A second authenticated account can report but cannot delete Alice's comment.
         client.cookies.clear()
@@ -124,6 +139,8 @@ def test_community_api_requires_login_and_csrf_for_comments(tmp_path, monkeypatc
         app.state.auth.save_token(
             BangumiToken(auth_session_id=bob_session, access_token="token", username="bob")
         )
+        assert client.get("/integrations/bilibili").json()["integration"]["configured"] is False
+        assert "alice-secret" not in client.get("/integrations/bilibili").text
         reported = client.post(
             f"/community/comments/{comment['id']}/reports",
             headers={"x-otomo-csrf": bob_auth["csrf_token"]},
@@ -147,7 +164,8 @@ def test_community_api_requires_login_and_csrf_for_comments(tmp_path, monkeypatc
         dashboard = client.get("/admin/overview?days=7")
         assert dashboard.status_code == 200
         assert "subscriptions" in dashboard.json()
-        assert dashboard.json()["series_overrides"]["rules"] == []
+        builtin_ids = {row["id"] for row in dashboard.json()["series_overrides"]["rules"]}
+        assert builtin_ids == {"monogatari-main-release-order", "fate-stay-night-core-routes"}
         series_rule = {
             "id": "test-series",
             "title": "测试复杂系列",
@@ -166,7 +184,9 @@ def test_community_api_requires_login_and_csrf_for_comments(tmp_path, monkeypatc
             json=series_rule,
         )
         assert saved_series.status_code == 200
-        assert client.get("/admin/series-overrides").json()["rules"][0]["id"] == "test-series"
+        assert "test-series" in {
+            row["id"] for row in client.get("/admin/series-overrides").json()["rules"]
+        }
         assert client.delete(
             "/admin/series-overrides/test-series",
             headers={"x-otomo-csrf": moderator_auth["csrf_token"]},
@@ -183,7 +203,8 @@ def test_community_api_requires_login_and_csrf_for_comments(tmp_path, monkeypatc
         assert imported.status_code == 200
         assert imported.json()["integration"]["authenticated"] is True
         assert "server-only-secret" not in imported.text
-        assert Path(config.settings.bilibili_cookies_file).read_text(encoding="utf-8") == cookie_text
+        assert app.state.bilibili_credentials.get("moderator") == cookie_text
+        assert b"server-only-secret" not in Path(config.settings.bilibili_account_store_path).read_bytes()
         assert client.get("/admin/integrations/bilibili").json()["integration"]["configured"] is True
         cleared = client.delete(
             "/admin/integrations/bilibili",
@@ -191,7 +212,7 @@ def test_community_api_requires_login_and_csrf_for_comments(tmp_path, monkeypatc
         )
         assert cleared.status_code == 200
         assert cleared.json()["integration"]["configured"] is False
-        assert not Path(config.settings.bilibili_cookies_file).exists()
+        assert app.state.bilibili_credentials.get("moderator") == ""
         report_id = dashboard.json()["community"]["moderation"]["reports"][0]["id"]
         hidden = client.post(
             f"/admin/comments/{comment['id']}/moderate",

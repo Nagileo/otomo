@@ -105,7 +105,7 @@ from ..tools.product_loop.tool import (
 from ..tools.writeback.tool import UpsertWatchPlanArgs, UpsertWatchPlanTool
 from ..tools.profile.tool import CollectionDashboardArgs, CollectionDashboardTool
 from ..tools.season.tool import SeasonGuideBriefArgs, SeasonGuideBriefTool
-from ..tools.videos.tool import guide_source_catalog
+from ..tools.videos.tool import guide_source_catalog, verify_bilibili_account
 from ..tools.user_analysis.tool import CompareUserTasteTool, TasteCompareArgs, _fetch_friends
 from ..workspace import (
     SavedViewCreate,
@@ -117,7 +117,11 @@ from ..workspace import (
 )
 from .community import router as community_router
 from .admin import router as admin_router
-from ..bilibili_account import BilibiliQrLoginService
+from ..bilibili_account import (
+    BilibiliCredentialStore,
+    BilibiliQrLoginService,
+    validate_bilibili_cookie_text,
+)
 
 log = logging.getLogger("otomo.api")
 
@@ -143,7 +147,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         ttl=settings.anime_hub_cache_ttl,
     )
     app.state.anime_hub_metrics = AnimeHubMetricStore()
-    app.state.bilibili_qr = BilibiliQrLoginService(settings.bilibili_cookies_file)
+    app.state.bilibili_credentials = BilibiliCredentialStore(cipher=app.state.auth.cipher)
+    app.state.bilibili_qr = BilibiliQrLoginService(app.state.bilibili_credentials)
     app.state.series_overrides = SeriesOverrideStore()
     app.state.workspace_store = WorkspaceStore()
     app.state.community_store = CommunityStore()
@@ -834,6 +839,78 @@ def _subscription_owner(session_id: str) -> tuple[str, str]:
     identity = _authenticated_identity(session_id)
     username = identity.username or str(identity.user_id or "")
     return f"user:{username}", username
+
+
+class UserBilibiliCookieImportRequest(BaseModel):
+    cookies_text: str = Field(min_length=32, max_length=512 * 1024)
+
+
+class UserBilibiliQrPollRequest(BaseModel):
+    login_id: str = Field(min_length=8, max_length=96)
+
+
+@app.get("/integrations/bilibili")
+async def user_bilibili_status(request: Request, response: Response) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    identity = _authenticated_identity(session.auth_session_id)
+    return {"ok": True, "integration": verify_bilibili_account(identity.username)}
+
+
+@app.post("/integrations/bilibili/qr/start")
+async def user_bilibili_qr_start(request: Request, response: Response) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    identity = _authenticated_identity(session.auth_session_id)
+    try:
+        login = await app.state.bilibili_qr.start(identity.username)
+    except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail=f"B站扫码登录暂不可用：{exc}") from exc
+    return {"ok": True, "login": login}
+
+
+@app.post("/integrations/bilibili/qr/poll")
+async def user_bilibili_qr_poll(
+    payload: UserBilibiliQrPollRequest,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    identity = _authenticated_identity(session.auth_session_id)
+    try:
+        login = await app.state.bilibili_qr.poll(identity.username, payload.login_id)
+    except (httpx.HTTPError, RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail=f"B站扫码状态读取失败：{exc}") from exc
+    result: dict[str, Any] = {"ok": True, "login": login}
+    if login.get("status") == "connected":
+        result["integration"] = verify_bilibili_account(identity.username)
+    return result
+
+
+@app.post("/integrations/bilibili/cookies")
+async def user_bilibili_import(
+    payload: UserBilibiliCookieImportRequest,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    identity = _authenticated_identity(session.auth_session_id)
+    try:
+        validate_bilibili_cookie_text(payload.cookies_text)
+        app.state.bilibili_credentials.save(identity.username, payload.cookies_text)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"ok": True, "integration": verify_bilibili_account(identity.username)}
+
+
+@app.delete("/integrations/bilibili")
+async def user_bilibili_disconnect(request: Request, response: Response) -> dict[str, Any]:
+    session = _ensure_auth_session(request, response)
+    _require_csrf(request, session.auth_session_id)
+    identity = _authenticated_identity(session.auth_session_id)
+    app.state.bilibili_credentials.delete(identity.username)
+    return {"ok": True, "integration": verify_bilibili_account(identity.username)}
 
 
 @app.get("/subscriptions/rules")

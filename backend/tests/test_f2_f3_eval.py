@@ -16,8 +16,8 @@ def test_pixiv_disabled_degrades_without_optional_dependency(monkeypatch):
 
 
 def test_bili_subtitle_no_public_subtitle_asr_off(monkeypatch):
-    monkeypatch.setattr(video_tool, "_sync_bili_pagelist", lambda aid, bvid: {"data": [{"cid": 123}]})
-    monkeypatch.setattr(video_tool, "_sync_bili_player", lambda aid, bvid, cid: {"data": {"subtitle": {"subtitles": []}}})
+    monkeypatch.setattr(video_tool, "_sync_bili_pagelist", lambda aid, bvid, owner: {"data": [{"cid": 123}]})
+    monkeypatch.setattr(video_tool, "_sync_bili_player", lambda aid, bvid, cid, owner: {"data": {"subtitle": {"subtitles": []}}})
     monkeypatch.setattr(video_tool.settings, "asr_provider", "off", raising=False)
 
     res = asyncio.run(GetBiliVideoSubtitlesTool().run(BiliVideoSubtitleArgs(aid=1, max_segments=10)))
@@ -27,8 +27,8 @@ def test_bili_subtitle_no_public_subtitle_asr_off(monkeypatch):
 
 
 def test_bili_subtitle_no_public_subtitle_uses_mock_asr(monkeypatch):
-    monkeypatch.setattr(video_tool, "_sync_bili_pagelist", lambda aid, bvid: {"data": [{"cid": 123}]})
-    monkeypatch.setattr(video_tool, "_sync_bili_player", lambda aid, bvid, cid: {"data": {"subtitle": {"subtitles": []}}})
+    monkeypatch.setattr(video_tool, "_sync_bili_pagelist", lambda aid, bvid, owner: {"data": [{"cid": 123}]})
+    monkeypatch.setattr(video_tool, "_sync_bili_player", lambda aid, bvid, cid, owner: {"data": {"subtitle": {"subtitles": []}}})
 
     async def fake_asr(source_url: str, max_segments: int):
         return [BiliSubtitleSegment(start=0.0, end=1.0, text="这是一段导视口播")], ["mock asr"], None

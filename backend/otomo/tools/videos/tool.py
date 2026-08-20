@@ -6,8 +6,8 @@
 from __future__ import annotations
 
 import asyncio
-from http.cookiejar import LoadError, MozillaCookieJar
 from datetime import datetime, timezone
+import hashlib
 import urllib.parse
 import html
 import re
@@ -22,7 +22,9 @@ import httpx
 from pydantic import BaseModel, Field
 
 from ...agent.contracts import Citation, Tool, ToolResult
+from ...bilibili_account import BilibiliCredentialStore
 from ...config import settings
+from ...security_context import current_principal
 from .._cache import acached, scached
 from .._concurrency import gather_limited
 from ..media_identity import assess_media_scope, build_media_identity
@@ -836,8 +838,10 @@ def classify_subject_video(
     auxiliary_media = any(
         token in content_lower
         for token in (
-            "op/ed", "op／ed", "剧中歌", "角色歌", "专辑", "演唱会", "演奏会",
-            "live event", "concert", "ライブ", "特典", "素材", "剪辑",
+            "op/ed", "op／ed", "op ed", "剧中歌", "角色歌", "主题歌", "主題歌",
+            "动画歌曲", "動畫歌曲", "歌曲全集", "音乐合集", "音樂合集", "原声", "原聲",
+            "soundtrack", "ost", "专辑", "演唱会", "演奏会", "live event", "concert",
+            "ライブ", "特典", "素材", "剪辑",
         )
     )
     reaction = "reaction" in content_lower
@@ -1394,25 +1398,41 @@ def _whitelist_by_name() -> dict[str, dict]:
     return {u["name"]: u for u in _GUIDE_UPS}
 
 
-def _bili_cookie_header() -> str:
-    """Load only bilibili.com cookies from the server-side Netscape jar.
+def _current_bilibili_owner(owner: str | None = None) -> str:
+    if owner is not None:
+        return owner.strip()
+    principal = current_principal()
+    if principal and principal.authenticated:
+        return principal.username.strip()
+    return ""
 
-    The raw value must never be returned by a tool or logged.  Reading per
-    request makes admin replacement/clear take effect without a process restart.
-    """
-    path = Path(settings.bilibili_cookies_file)
-    if not path.is_file():
+
+def _bili_cookie_text(owner: str | None = None) -> str:
+    """Load the encrypted cookie jar belonging to the current Bangumi user."""
+    resolved = _current_bilibili_owner(owner)
+    if not resolved:
         return ""
     try:
-        jar = MozillaCookieJar(str(path))
-        jar.load(ignore_discard=True, ignore_expires=True)
-    except (OSError, ValueError, LoadError):
+        return BilibiliCredentialStore().get(resolved)
+    except (OSError, ValueError):
         return ""
-    values = [
-        f"{cookie.name}={cookie.value}"
-        for cookie in jar
-        if cookie.value and str(cookie.domain or "").lower().endswith("bilibili.com")
-    ]
+
+
+def _bili_cookie_header(owner: str | None = None) -> str:
+    """Project a per-user Netscape jar into a request header without logging it."""
+    values: list[str] = []
+    for raw_line in _bili_cookie_text(owner).splitlines():
+        line = raw_line[len("#HttpOnly_"):] if raw_line.startswith("#HttpOnly_") else raw_line
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if (
+            len(parts) >= 7
+            and parts[0].lstrip(".").lower().endswith("bilibili.com")
+            and parts[5]
+            and parts[6]
+        ):
+            values.append(f"{parts[5]}={parts[6]}")
     return "; ".join(values)
 
 
@@ -1420,20 +1440,23 @@ def bilibili_account_mode() -> Literal["public", "cookie"]:
     return "cookie" if _bili_cookie_header() else "public"
 
 
-def _bili_headers() -> dict[str, str]:
+def _bili_headers(owner: str | None = None) -> dict[str, str]:
     headers = {"User-Agent": _BROWSER_UA, "Referer": "https://www.bilibili.com/"}
-    if cookie := _bili_cookie_header():
+    if cookie := _bili_cookie_header(owner):
         headers["Cookie"] = cookie
     return headers
 
 
-def verify_bilibili_account() -> dict[str, object]:
+def verify_bilibili_account(owner: str | None = None) -> dict[str, object]:
     """Verify imported login state without exposing cookie material."""
-    configured = bool(_bili_cookie_header())
+    resolved_owner = _current_bilibili_owner(owner)
+    configured = bool(_bili_cookie_header(resolved_owner))
     if not configured:
         return {"configured": False, "authenticated": False, "username": "", "user_id": 0}
     try:
-        response = httpx.get(_BILI_NAV_API, headers=_bili_headers(), timeout=settings.http_timeout)
+        headers = {"User-Agent": _BROWSER_UA, "Referer": "https://www.bilibili.com/"}
+        headers["Cookie"] = _bili_cookie_header(resolved_owner)
+        response = httpx.get(_BILI_NAV_API, headers=headers, timeout=settings.http_timeout)
         response.raise_for_status()
         payload = _bili_json(response.json())
         data = payload.get("data") or {}
@@ -1496,7 +1519,9 @@ def _is_rate_limited(exc: BaseException) -> bool:
 
 
 def _bili_cache_key(value: str) -> str:
-    return f"{bilibili_account_mode()}:{value}"
+    owner = _current_bilibili_owner()
+    partition = hashlib.sha256(owner.casefold().encode("utf-8")).hexdigest()[:12] if owner else "public"
+    return f"{bilibili_account_mode()}:{partition}:{value}"
 
 
 def _sync_bili_search(query: str) -> dict:
@@ -1523,11 +1548,11 @@ def _sync_bili_search(query: str) -> dict:
 
 
 @scached()
-def _sync_bili_replies(aid: int, limit: int) -> dict:
+def _sync_bili_replies(aid: int, limit: int, owner: str) -> dict:
     r = httpx.get(
         _BILI_REPLY_API,
         params={"type": 1, "oid": aid, "sort": 1, "pn": 1, "ps": min(limit, 50)},
-        headers=_bili_headers(),
+        headers=_bili_headers(owner),
         timeout=settings.http_timeout,
     )
     r.raise_for_status()
@@ -1585,12 +1610,12 @@ def _sync_bili_view(aid: int | None, bvid: str | None) -> dict:
 
 
 @scached()
-def _sync_bili_pagelist(aid: int | None, bvid: str | None) -> dict:
+def _sync_bili_pagelist(aid: int | None, bvid: str | None, owner: str) -> dict:
     params = {"aid": aid} if aid else {"bvid": bvid}
     r = httpx.get(
         _BILI_PAGELIST_API,
         params=params,
-        headers=_bili_headers(),
+        headers=_bili_headers(owner),
         timeout=settings.http_timeout,
     )
     r.raise_for_status()
@@ -1598,7 +1623,12 @@ def _sync_bili_pagelist(aid: int | None, bvid: str | None) -> dict:
 
 
 @scached()
-def _sync_bili_player(aid: int | None, bvid: str | None, cid: int) -> dict:
+def _sync_bili_player(
+    aid: int | None,
+    bvid: str | None,
+    cid: int,
+    owner: str,
+) -> dict:
     params = {"cid": cid}
     if aid:
         params["aid"] = aid
@@ -1607,7 +1637,7 @@ def _sync_bili_player(aid: int | None, bvid: str | None, cid: int) -> dict:
     r = httpx.get(
         _BILI_PLAYER_API,
         params=params,
-        headers=_bili_headers(),
+        headers=_bili_headers(owner),
         timeout=settings.http_timeout,
     )
     r.raise_for_status()
@@ -1615,11 +1645,11 @@ def _sync_bili_player(aid: int | None, bvid: str | None, cid: int) -> dict:
 
 
 @scached()
-def _sync_subtitle_json(url: str) -> dict:
+def _sync_subtitle_json(url: str, owner: str) -> dict:
     full = "https:" + url if url.startswith("//") else url
     r = httpx.get(
         full,
-        headers=_bili_headers(),
+        headers=_bili_headers(owner),
         timeout=settings.http_timeout,
     )
     r.raise_for_status()
@@ -1627,10 +1657,10 @@ def _sync_subtitle_json(url: str) -> dict:
 
 
 @scached()
-def _sync_bili_danmaku_xml(cid: int) -> str:
+def _sync_bili_danmaku_xml(cid: int, owner: str) -> str:
     r = httpx.get(
         _BILI_DANMAKU_API.format(cid=cid),
-        headers=_bili_headers(),
+        headers=_bili_headers(owner),
         timeout=settings.http_timeout,
     )
     r.raise_for_status()
@@ -1717,11 +1747,11 @@ def _parse_bili_video_ref(value: str | None) -> tuple[int | None, str | None]:
 
 
 @scached()
-def _sync_resolve_bili_url(url: str) -> str:
+def _sync_resolve_bili_url(url: str, owner: str) -> str:
     """Resolve b23.tv/share links without downloading video content."""
     r = httpx.get(
         url,
-        headers=_bili_headers(),
+        headers=_bili_headers(owner),
         timeout=settings.http_timeout,
         follow_redirects=True,
     )
@@ -1737,7 +1767,11 @@ async def _resolve_video_ref(url: str | None, aid: int | None, bvid: str | None)
         bvid = bvid or parsed_bvid
         if aid is None and not bvid and "b23.tv" in url:
             try:
-                resolved = await asyncio.to_thread(_sync_resolve_bili_url, url)
+                resolved = await asyncio.to_thread(
+                    _sync_resolve_bili_url,
+                    url,
+                    _current_bilibili_owner(),
+                )
                 parsed_aid, parsed_bvid = _parse_bili_video_ref(resolved)
                 aid = aid or parsed_aid
                 bvid = bvid or parsed_bvid
@@ -1766,7 +1800,11 @@ def _whisper_model(model_name: str, device: str, compute_type: str):
 _ASR_GATE = threading.BoundedSemaphore(1)
 
 
-def _sync_local_bili_asr(source_url: str, max_segments: int) -> list[BiliSubtitleSegment]:
+def _sync_local_bili_asr(
+    source_url: str,
+    max_segments: int,
+    owner: str,
+) -> list[BiliSubtitleSegment]:
     """Download public Bilibili audio to a temp dir and transcribe it locally."""
     try:
         import yt_dlp
@@ -1787,12 +1825,21 @@ def _sync_local_bili_asr(source_url: str, max_segments: int) -> list[BiliSubtitl
                 "Referer": "https://www.bilibili.com/",
             },
         }
-        if settings.asr_cookies_from_browser:
+        if cookie_text := _bili_cookie_text(owner):
+            cookie_path = tmp_path / "bilibili.cookies.txt"
+            cookie_path.write_text(cookie_text, encoding="utf-8")
+            try:
+                cookie_path.chmod(0o600)
+            except OSError:
+                pass
+            ydl_opts["cookiefile"] = str(cookie_path)
+        elif not owner and settings.asr_cookies_from_browser:
+            # Operator-level fallbacks are only allowed outside a tenant
+            # request.  An authenticated user without a linked Bilibili
+            # account must never silently borrow a shared server login.
             ydl_opts["cookiesfrombrowser"] = (settings.asr_cookies_from_browser.strip().lower(),)
-        elif settings.asr_cookies_file:
+        elif not owner and settings.asr_cookies_file:
             ydl_opts["cookiefile"] = settings.asr_cookies_file
-        elif _bili_cookie_header():
-            ydl_opts["cookiefile"] = settings.bilibili_cookies_file
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(source_url, download=False)
             duration = float(info.get("duration") or 0)
@@ -1830,12 +1877,20 @@ def _sync_local_bili_asr(source_url: str, max_segments: int) -> list[BiliSubtitl
 
 
 @acached(ttl=settings.asr_cache_ttl)
-async def _local_bili_asr(source_url: str, max_segments: int) -> list[BiliSubtitleSegment]:
-    return await asyncio.to_thread(_sync_local_bili_asr, source_url, max_segments)
+async def _local_bili_asr(
+    source_url: str,
+    max_segments: int,
+    owner: str,
+) -> list[BiliSubtitleSegment]:
+    return await asyncio.to_thread(_sync_local_bili_asr, source_url, max_segments, owner)
 
 
 @acached(ttl=settings.asr_cache_ttl)
-async def _worker_bili_asr(source_url: str, max_segments: int) -> list[BiliSubtitleSegment]:
+async def _worker_bili_asr(
+    source_url: str,
+    max_segments: int,
+    owner: str,
+) -> list[BiliSubtitleSegment]:
     headers = {
         "Authorization": f"Bearer {settings.asr_worker_token}"
     } if settings.asr_worker_token else {}
@@ -1858,14 +1913,15 @@ async def _maybe_asr_segments(source_url: str, max_segments: int) -> tuple[list[
         return [], ["ASR_PROVIDER=off，未启用本地转写。"], None
     if provider not in {"local", "worker"}:
         return [], [f"ASR_PROVIDER={settings.asr_provider} 暂未接入；当前支持 local/worker。"], None
+    owner = _current_bilibili_owner()
     try:
         segments = (
-            await _worker_bili_asr(source_url, max_segments)
+            await _worker_bili_asr(source_url, max_segments, owner)
             if provider == "worker" else
-            await _local_bili_asr(source_url, max_segments)
+            await _local_bili_asr(source_url, max_segments, owner)
         )
     except Exception as e:  # noqa: BLE001
-        hint = "（B站 412 风控：导出浏览器 cookies.txt 并配置 ASR_COOKIES_FILE 可解除）" if "412" in str(e) else ""
+        hint = "（B站 412 风控：请在“账号与集成”连接当前用户自己的 B站账号）" if "412" in str(e) else ""
         return [], [f"本地 ASR 转写失败：{type(e).__name__}: {e}{hint}"], str(e)
     caveats = [
         f"{'独立 ASR 服务' if provider == 'worker' else '本地 ASR'}由 faster-whisper 识别公开视频音频，可能漏字、错字或错分段。",
@@ -2599,8 +2655,14 @@ class GetBiliVideoCommentsTool(Tool):
     result_model = BiliVideoCommentsResult
 
     async def run(self, args: BiliVideoCommentsArgs) -> ToolResult[BiliVideoCommentsResult]:
+        owner = _current_bilibili_owner()
         try:
-            data = await asyncio.to_thread(_sync_bili_replies, args.aid, args.limit)
+            data = await asyncio.to_thread(
+                _sync_bili_replies,
+                args.aid,
+                args.limit,
+                owner,
+            )
         except (httpx.HTTPError, httpx.TransportError, ValueError) as e:
             return ToolResult(ok=False, error=f"B站评论抓取失败：{type(e).__name__}")
         comments: list[str] = []
@@ -2648,13 +2710,25 @@ class GetBiliVideoSubtitlesTool(Tool):
     async def run(self, args: BiliVideoSubtitleArgs) -> ToolResult[BiliVideoSubtitleResult]:
         if args.aid is None and not args.bvid:
             return ToolResult(ok=False, error="aid 或 bvid 至少传一个")
+        owner = _current_bilibili_owner()
         try:
-            pages = await asyncio.to_thread(_sync_bili_pagelist, args.aid, args.bvid)
+            pages = await asyncio.to_thread(
+                _sync_bili_pagelist,
+                args.aid,
+                args.bvid,
+                owner,
+            )
             first = ((pages.get("data") or []) or [{}])[0]
             cid = first.get("cid")
             if not cid:
                 return ToolResult(ok=False, error="未能从 B站 pagelist 获取 cid")
-            player = await asyncio.to_thread(_sync_bili_player, args.aid, args.bvid, int(cid))
+            player = await asyncio.to_thread(
+                _sync_bili_player,
+                args.aid,
+                args.bvid,
+                int(cid),
+                owner,
+            )
         except (httpx.HTTPError, httpx.TransportError, ValueError) as e:
             return ToolResult(ok=False, error=f"B站字幕元数据读取失败：{type(e).__name__}")
         subtitles = (((player.get("data") or {}).get("subtitle") or {}).get("subtitles") or [])
@@ -2692,7 +2766,7 @@ class GetBiliVideoSubtitlesTool(Tool):
         if not url:
             return ToolResult(ok=False, error="字幕条目缺少 subtitle_url")
         try:
-            payload = await asyncio.to_thread(_sync_subtitle_json, url)
+            payload = await asyncio.to_thread(_sync_subtitle_json, url, owner)
         except (httpx.HTTPError, httpx.TransportError, ValueError) as e:
             return ToolResult(ok=False, error=f"B站字幕正文读取失败：{type(e).__name__}")
         body = payload.get("body") or []
@@ -2747,13 +2821,19 @@ class GetBiliVideoDanmakuTool(Tool):
     async def run(self, args: BiliVideoDanmakuArgs) -> ToolResult[BiliVideoDanmakuResult]:
         if args.aid is None and not args.bvid:
             return ToolResult(ok=False, error="aid 或 bvid 至少传一个")
+        owner = _current_bilibili_owner()
         try:
-            pages = await asyncio.to_thread(_sync_bili_pagelist, args.aid, args.bvid)
+            pages = await asyncio.to_thread(
+                _sync_bili_pagelist,
+                args.aid,
+                args.bvid,
+                owner,
+            )
             first = ((pages.get("data") or []) or [{}])[0]
             cid = first.get("cid")
             if not cid:
                 return ToolResult(ok=False, error="未能从 B站 pagelist 获取 cid")
-            xml_text = await asyncio.to_thread(_sync_bili_danmaku_xml, int(cid))
+            xml_text = await asyncio.to_thread(_sync_bili_danmaku_xml, int(cid), owner)
         except (httpx.HTTPError, httpx.TransportError, ValueError) as e:
             return ToolResult(ok=False, error=f"B站弹幕读取失败：{type(e).__name__}")
         items = _parse_danmaku(xml_text, args.limit)

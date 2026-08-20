@@ -168,6 +168,20 @@ def test_review_is_not_mixed_with_full_episode() -> None:
     assert watch_candidate is False
 
 
+def test_animation_song_collection_is_never_promoted_to_full_episode() -> None:
+    role, _uploader, watch_candidate, _identity, _content, caution = classify_subject_video(
+        "《轻音少女》系列动画歌曲全集 1080P",
+        "音乐收藏UP",
+        "OP ED 剧中歌合集",
+        duration_seconds=180 * 60,
+        match_confidence=0.98,
+        expected_duration_seconds=24 * 60,
+    )
+    assert role == "related"
+    assert watch_candidate is False
+    assert "音乐" in caution
+
+
 def test_condensed_story_is_never_promoted_by_full_episode_words_or_duration() -> None:
     role, uploader, watch_candidate, _identity, _content, caution = classify_subject_video(
         "一口气看完《罗小黑战记》剧场版+动画+漫画番外！完整版",

@@ -289,11 +289,30 @@ class SubscriptionStore:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS subscription_outbox (
+                    idempotency_key TEXT PRIMARY KEY,
+                    rule_id TEXT NOT NULL,
+                    hit_key TEXT NOT NULL,
+                    owner_key TEXT NOT NULL,
+                    item_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    payload_json TEXT NOT NULL DEFAULT '{}',
+                    target_json TEXT NOT NULL DEFAULT '{}',
+                    deliveries_json TEXT NOT NULL DEFAULT '[]',
+                    error TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_sub_rules_owner ON subscription_rules(owner_key, updated_at DESC)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_sub_rules_enabled ON subscription_rules(enabled, kind)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_sub_deliveries_rule ON subscription_deliveries(rule_id, created_at DESC)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_webpush_owner ON webpush_subscriptions(owner_key, updated_at DESC)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_sub_leases_expiry ON subscription_leases(leased_until)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_sub_outbox_rule ON subscription_outbox(rule_id,updated_at DESC)")
 
     def upsert_webpush(
         self,
@@ -675,6 +694,15 @@ class SubscriptionStore:
                 ORDER BY consecutive_failures DESC,updated_at DESC LIMIT 40
                 """
             ).fetchall()]
+            outbox = dict(conn.execute(
+                """
+                SELECT
+                    SUM(CASE WHEN status='dispatching' THEN 1 ELSE 0 END) AS ambiguous,
+                    SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed,
+                    SUM(CASE WHEN status='sent' THEN 1 ELSE 0 END) AS sent
+                FROM subscription_outbox
+                """
+            ).fetchone())
         stale_after = max(30, settings.subscription_worker_stale_seconds)
         for worker in workers:
             heartbeat = _parse_datetime(str(worker.get("heartbeat_at") or ""))
@@ -688,8 +716,98 @@ class SubscriptionStore:
             "workers": workers,
             "active_leases": leases,
             "failed_rules": failed,
+            "outbox": {key: int(value or 0) for key, value in outbox.items()},
             "max_concurrency": max(1, settings.subscription_scheduler_max_concurrency),
         }
+
+    @staticmethod
+    def outbox_key(rule_id: str, hit_key: str) -> str:
+        digest = hashlib.sha256(f"{rule_id}\0{hit_key}".encode("utf-8")).hexdigest()
+        return f"notify_{digest[:40]}"
+
+    def prepare_outbox(
+        self,
+        rule: SubscriptionRule,
+        hit_key: str,
+        item: InboxItem,
+        target: NotificationTarget,
+    ) -> dict[str, Any]:
+        key = self.outbox_key(rule.id, hit_key)
+        now = now_iso()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """
+                INSERT INTO subscription_outbox(
+                    idempotency_key,rule_id,hit_key,owner_key,item_id,status,
+                    payload_json,target_json,created_at,updated_at
+                ) VALUES(?,?,?,?,?,'prepared',?,?,?,?)
+                ON CONFLICT(idempotency_key) DO NOTHING
+                """,
+                (
+                    key,
+                    rule.id,
+                    hit_key,
+                    rule.owner_key,
+                    item.id,
+                    _dump(item.model_dump(mode="json")),
+                    _dump(target.model_dump(mode="json")),
+                    now,
+                    now,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM subscription_outbox WHERE idempotency_key=?",
+                (key,),
+            ).fetchone()
+        assert row is not None
+        return dict(row)
+
+    def begin_outbox_dispatch(self, idempotency_key: str, *, retry_failed: bool = False) -> bool:
+        now = now_iso()
+        allowed = ("prepared", "failed") if retry_failed else ("prepared",)
+        marks = ",".join("?" for _ in allowed)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
+                f"""
+                UPDATE subscription_outbox SET status='dispatching',error='',updated_at=?
+                WHERE idempotency_key=? AND status IN ({marks})
+                """,  # noqa: S608 - placeholders are generated from a fixed tuple
+                (now, idempotency_key, *allowed),
+            )
+        return bool(cursor.rowcount)
+
+    def finish_outbox(
+        self,
+        idempotency_key: str,
+        *,
+        sent: bool,
+        deliveries: list[dict[str, Any]],
+        error: str = "",
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE subscription_outbox SET status=?,deliveries_json=?,error=?,updated_at=?
+                WHERE idempotency_key=? AND status='dispatching'
+                """,
+                (
+                    "sent" if sent else "failed",
+                    _dump(deliveries),
+                    error[:500],
+                    now_iso(),
+                    idempotency_key,
+                ),
+            )
+
+    def outbox_state(self, idempotency_key: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM subscription_outbox WHERE idempotency_key=?",
+                (idempotency_key,),
+            ).fetchone()
+        return dict(row) if row else None
 
     def add_delivery(self, record: DeliveryRecord) -> DeliveryRecord:
         with self._connect() as conn:
@@ -813,6 +931,7 @@ class SubscriptionService:
                 payload={"reason": "failure backoff", "retry_after": rule.retry_after},
             )
         lease_stop: asyncio.Event | None = None
+        lease_lost: asyncio.Event | None = None
         lease_task: asyncio.Task[None] | None = None
         lease_claimed = False
         if not test:
@@ -826,11 +945,13 @@ class SubscriptionService:
                     payload={"reason": "claimed by another worker"},
                 )
             lease_stop = asyncio.Event()
-            lease_task = asyncio.create_task(self._keep_lease(rule.id, hit_key, lease_stop))
+            lease_lost = asyncio.Event()
+            lease_task = asyncio.create_task(self._keep_lease(rule.id, hit_key, lease_stop, lease_lost))
             self._active_rules += 1
             self._heartbeat()
         try:
-            payload = await self._materialize(rule, test=test)
+            with tenant_scope(rule.username or None, authenticated=bool(rule.username)):
+                payload = await self._materialize(rule, test=test)
             if not _payload_has_content(payload):
                 if not test:
                     self.store.mark_success(rule, hit_key)
@@ -854,12 +975,17 @@ class SubscriptionService:
                         },
                     )
                 payload["_content_fingerprint"] = fingerprint
+            if lease_lost is not None and lease_lost.is_set():
+                raise RuntimeError("订阅执行租约续期失败，已在外部投递前中止")
             default_title = default_subscription_title(rule.kind)
             configured_title = rule.title or default_title
             suggested_title = str(payload.get("notification_title") or "").strip()
             item_title = suggested_title if suggested_title and configured_title == default_title else configured_title
             item = InboxItem(
-                id=secrets.token_urlsafe(14),
+                id=(
+                    self.store.outbox_key(rule.id, hit_key)
+                    if not test else secrets.token_urlsafe(14)
+                ),
                 kind=_inbox_kind(rule.kind),
                 title=item_title[:120],
                 payload={**payload, "subscription_id": rule.id, "subscription_kind": rule.kind, "push_grading": rule.template, "test": test},
@@ -873,7 +999,60 @@ class SubscriptionService:
                 target.channels = [c for c in target.channels if c != "inbox"]
             external_channels = [c for c in target.channels if c != "inbox"]
             target.channels = external_channels
-            deliveries = await dispatch_notifications(rule.username or rule.owner_key, target, item) if external_channels else []
+            deliveries: list[dict[str, Any]] = []
+            outbox_key = ""
+            if external_channels:
+                outbox = self.store.prepare_outbox(rule, hit_key, item, target) if not test else None
+                outbox_key = str((outbox or {}).get("idempotency_key") or "")
+                if outbox is not None:
+                    # A retry must dispatch the immutable message that was
+                    # committed to the outbox, even if the rule, target, or
+                    # freshly materialized content changed in the meantime.
+                    # Otherwise one idempotency key could refer to two
+                    # different external side effects.
+                    item = InboxItem.model_validate(_load(str(outbox.get("payload_json") or ""), {}))
+                    target = NotificationTarget.model_validate(
+                        _load(str(outbox.get("target_json") or ""), {})
+                    )
+                    previous_state = str(outbox.get("status") or "")
+                    can_dispatch = self.store.begin_outbox_dispatch(
+                        outbox_key,
+                        retry_failed=previous_state == "failed",
+                    )
+                    if not can_dispatch:
+                        if previous_state in {"sent", "dispatching"}:
+                            # ``dispatching`` after a worker crash is an
+                            # ambiguous external outcome.  Never resend it:
+                            # avoiding duplicate email/DM/webhook is safer than
+                            # pretending exactly-once is possible without
+                            # provider-side idempotency.
+                            self.store.mark_success(rule, hit_key)
+                            return self._record(
+                                rule,
+                                hit_key,
+                                "skipped",
+                                title=item.title,
+                                payload={
+                                    "reason": "external delivery already sent or outcome ambiguous; not resent",
+                                    "outbox_status": previous_state,
+                                    "idempotency_key": outbox_key,
+                                },
+                            )
+                        raise RuntimeError(f"订阅 outbox 状态不可投递：{previous_state or 'missing'}")
+                if lease_lost is not None and lease_lost.is_set():
+                    raise RuntimeError("订阅执行租约续期失败，已在外部投递前中止")
+                deliveries = await dispatch_notifications(rule.username or rule.owner_key, target, item)
+                external_succeeded = any(row.get("ok") for row in deliveries)
+                if outbox_key:
+                    self.store.finish_outbox(
+                        outbox_key,
+                        sent=external_succeeded,
+                        deliveries=deliveries,
+                        error="; ".join(
+                            str(row.get("error") or row.get("channel"))
+                            for row in deliveries if not row.get("ok")
+                        ),
+                    )
             expired_push_ids = [
                 str(device_id)
                 for row in deliveries
@@ -883,9 +1062,12 @@ class SubscriptionService:
                 self.store.delete_webpush_ids(rule.owner_key, expired_push_ids)
             if "inbox" in rule.channels and rule.username and not test:
                 try:
+                    if lease_lost is not None and lease_lost.is_set():
+                        raise RuntimeError("订阅执行租约续期失败，站内投递已中止")
                     with tenant_scope(rule.username, authenticated=True):
                         mem = self.ltm.load_user(rule.username)
-                        mem.inbox.append(item)
+                        if not any(existing.id == item.id for existing in mem.inbox):
+                            mem.inbox.append(item)
                         mem.inbox = mem.inbox[-60:]
                         self.ltm.save_user(mem)
                     deliveries.append({"channel": "inbox", "ok": True, "ts": now_iso()})
@@ -940,7 +1122,13 @@ class SubscriptionService:
                 self._active_rules = max(0, self._active_rules - 1)
                 self._heartbeat()
 
-    async def _keep_lease(self, rule_id: str, hit_key: str, stop: asyncio.Event) -> None:
+    async def _keep_lease(
+        self,
+        rule_id: str,
+        hit_key: str,
+        stop: asyncio.Event,
+        lost: asyncio.Event,
+    ) -> None:
         interval = max(5, min(
             settings.subscription_lease_heartbeat_seconds,
             max(10, settings.subscription_lease_seconds // 3),
@@ -950,6 +1138,7 @@ class SubscriptionService:
                 await asyncio.wait_for(stop.wait(), timeout=interval)
             except TimeoutError:
                 if not self.store.renew_lease(rule_id, hit_key, self.worker_id):
+                    lost.set()
                     return
 
     async def run_forever(self) -> None:

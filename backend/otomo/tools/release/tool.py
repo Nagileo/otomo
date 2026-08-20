@@ -39,6 +39,7 @@ from ..media_identity import (
     build_media_identity,
     media_identity_from_subject,
 )
+from .qbittorrent import downloader_config_error
 
 _MIKAN_MAP_URLS = [
     "https://raw.githubusercontent.com/xiaoyvyv/bangumi-data/main/data/mikan/bangumi-mikan.json",
@@ -80,7 +81,7 @@ class ReleaseItem(BaseModel):
     episode_label: str = ""
     release_kind: Literal["episode", "batch", "bd", "movie", "unknown"] = "unknown"
     content_kind: Literal[
-        "anime_video", "audio", "comic", "live", "game", "book", "unknown"
+        "anime_video", "audio", "comic", "live", "game", "book", "image", "subtitle", "extras", "unknown"
     ] = "unknown"
     content_reason: str = ""
     note: str = ""
@@ -637,7 +638,9 @@ def _classify_release_content(
     title: str,
     identity: MediaIdentity,
 ) -> tuple[
-    Literal["anime_video", "audio", "comic", "live", "game", "book", "unknown"],
+    Literal[
+        "anime_video", "audio", "comic", "live", "game", "book", "image", "subtitle", "extras", "unknown"
+    ],
     str,
 ]:
     """Classify the release medium after removing canonical work aliases.
@@ -648,6 +651,27 @@ def _classify_release_content(
     area; ambiguous title-only matches stay in the confirmation section.
     """
     payload = _release_payload(title, identity)
+
+    image_markers = (
+        "壁纸合集", "壁紙合集", "壁纸包", "壁紙包", "图片合集", "圖片合集",
+        "image collection", "wallpaper", "artwork pack", "[jpg]", "[png]", ".jpg", ".png",
+    )
+    if any(marker in payload for marker in image_markers):
+        return "image", "标题指向壁纸或图片合集，不是这部动画的正片资源。"
+
+    subtitle_markers = (
+        "字幕合集", "字幕包", "外挂字幕", "外掛字幕", "ass合集", "ass 合集",
+        "subtitle pack", "subtitles only", "[ass]", "[srt]", "[sup]", ".ass", ".srt", ".sup",
+    )
+    if any(marker in payload for marker in subtitle_markers):
+        return "subtitle", "标题指向独立字幕文件，不含动画正片。"
+
+    extras_markers = (
+        "ncop", "nced", "creditless opening", "creditless ending", "menu only",
+        "特典映像合集", "映像特典合集", "cm合集", "pv合集",
+    )
+    if any(marker in payload for marker in extras_markers):
+        return "extras", "标题只指向无字幕片头片尾、菜单或映像特典，不是动画正片。"
 
     comic_markers = (
         "漫画合集", "漫畫合集", "漫画版", "漫畫版", "单行本", "單行本",
@@ -706,7 +730,7 @@ def _classify_release_content(
         marker in payload
         for marker in (
             "剧场版", "劇場版", "movie", "全集", "合集", "complete", "batch",
-            "ncop", "nced", "ova", "oad", "web anime",
+            "ova", "oad", "web anime",
         )
     )
     if video_evidence or episode_evidence or animation_evidence:
@@ -997,10 +1021,14 @@ def _torrent_files(payload: bytes) -> tuple[list[tuple[str, int]], str]:
     return files, root_name
 
 
+class UnsafeTorrentUrlError(ValueError):
+    """A torrent URL that qBittorrent must never be asked to fetch."""
+
+
 async def _validate_public_https_url(value: str) -> str:
     parsed = urlparse(value.strip())
     if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
-        raise ValueError("种子检查只允许无账号信息的公网 HTTPS URL")
+        raise UnsafeTorrentUrlError("种子检查只允许无账号信息的公网 HTTPS URL")
     host = parsed.hostname.rstrip(".").lower()
     try:
         addresses = [ipaddress.ip_address(host)]
@@ -1012,7 +1040,7 @@ async def _validate_public_https_url(value: str) -> str:
         )
         addresses = list({ipaddress.ip_address(info[4][0]) for info in infos})
     if not addresses or any(not address.is_global for address in addresses):
-        raise ValueError("种子 URL 不能指向 localhost、内网或保留地址")
+        raise UnsafeTorrentUrlError("种子 URL 不能指向 localhost、内网或保留地址")
     return parsed.geturl()
 
 
@@ -1104,8 +1132,8 @@ class PrepareDownloaderPushTool(Tool):
         url = args.magnet.strip() or args.torrent_url.strip()
         if not url:
             return ToolResult(ok=False, error="需要 torrent_url 或 magnet")
-        if not settings.qbittorrent_url.strip():
-            return ToolResult(ok=False, error="qBittorrent 未配置，无法准备推送动作")
+        if config_error := downloader_config_error():
+            return ToolResult(ok=False, error=f"{config_error}，无法准备推送动作")
         mem = self.ltm.load_user(username)
         title = args.title.strip() or args.subject_name.strip() or "未命名资源"
         identity: MediaIdentity | None = None
@@ -1121,6 +1149,8 @@ class PrepareDownloaderPushTool(Tool):
         if args.torrent_url.strip():
             try:
                 inspection = await inspect_torrent_url(args.torrent_url.strip(), identity)
+            except UnsafeTorrentUrlError as exc:
+                return ToolResult(ok=False, error=f"不安全的种子地址：{exc}；已阻止进入下载器确认。")
             except Exception as exc:  # noqa: BLE001 - user can still confirm an unverified public URL
                 inspection_warning = f"种子内部文件检查失败（{type(exc).__name__}）；将按未核验资源处理"
         if inspection and inspection.scope_status == "conflict":

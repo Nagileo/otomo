@@ -279,11 +279,11 @@ export default function AdminPage() {
         <header><div><span className="section-kicker">外部账号</span><h2>Bilibili 登录态</h2></div><span>{data.integrations?.bilibili?.authenticated ? `已连接 @${data.integrations.bilibili.username}` : data.integrations?.bilibili?.configured ? "Cookie 已导入但登录态失效" : "当前使用公开模式"}</span></header>
         <div className="integration-status-row">
           <BadgeLike good={Boolean(data.integrations?.bilibili?.authenticated)} label={data.integrations?.bilibili?.authenticated ? "登录态有效" : "未连接"} />
-          <p>用于 B站搜索、视频详情、字幕读取和 ASR 音频下载。Cookie 只保存在服务器，不会进入聊天、模型上下文或普通用户 API。</p>
+          <p>这是当前管理员自己的 B站账号；按 Bangumi 用户加密隔离，用于搜索、视频详情、字幕读取和少量 ASR 核验，不会进入模型上下文。</p>
         </div>
         <div className="panel-actions"><button className="button-primary" disabled={biliBusy} onClick={() => void startBilibiliQr()}>{biliBusy ? <LoaderCircle className="spin" size={15} /> : <ShieldCheck size={15} />}使用B站App扫码连接</button>{data.integrations?.bilibili?.configured ? <button className="button-secondary" disabled={biliBusy} onClick={() => void disconnectBilibili()}><Trash2 size={15} />清除登录态</button> : null}</div>
         {biliQrImage ? <div className="admin-bili-qr"><img src={biliQrImage} alt="B站登录二维码" /><div><strong>{biliQr?.message || "等待扫码"}</strong><span>二维码仅在本机管理页显示，通常 3 分钟后过期。</span>{biliQr?.status === "expired" ? <button className="button-secondary" onClick={() => void startBilibiliQr()}>重新生成</button> : null}</div></div> : null}
-        <details className="admin-cookie-fallback"><summary>扫码不可用？改用 cookies.txt</summary><label className="admin-cookie-import"><span>粘贴浏览器插件导出的 Netscape cookies.txt</span><textarea value={biliCookies} onChange={(event) => setBiliCookies(event.target.value)} placeholder="# Netscape HTTP Cookie File…" rows={5} spellCheck={false} /><small>建议使用专门账号；Cookie 只保存在服务器，不会发送给模型。</small></label><button className="button-secondary" disabled={biliBusy || !biliCookies.trim()} onClick={() => void connectBilibili()}>导入并验证</button></details>
+        <details className="admin-cookie-fallback"><summary>扫码不可用？改用 cookies.txt</summary><label className="admin-cookie-import"><span>粘贴浏览器插件导出的 Netscape cookies.txt</span><textarea value={biliCookies} onChange={(event) => setBiliCookies(event.target.value)} placeholder="# Netscape HTTP Cookie File…" rows={5} spellCheck={false} /><small>建议使用专门账号；Cookie 会加密保存到当前用户，不会发送给模型。</small></label><button className="button-secondary" disabled={biliBusy || !biliCookies.trim()} onClick={() => void connectBilibili()}>导入并验证</button></details>
       </section>
 
       <section className="admin-section">
@@ -296,7 +296,7 @@ export default function AdminPage() {
           </article>
           <article>
             <div><strong>qBittorrent</strong><BadgeLike good={Boolean(data.integrations?.qbittorrent?.authenticated)} label={data.integrations?.qbittorrent?.authenticated ? "已连通" : data.integrations?.qbittorrent?.configured ? "待检测" : "未配置"} /></div>
-            <p>{data.integrations?.qbittorrent?.host ? `${data.integrations.qbittorrent.scheme}://${data.integrations.qbittorrent.host}` : "尚未填写 WebUI 地址"}{data.integrations?.qbittorrent?.version ? ` · v${data.integrations.qbittorrent.version}` : ""}</p>
+            <p>{data.integrations?.qbittorrent?.host ? `${data.integrations.qbittorrent.scheme}://${data.integrations.qbittorrent.host}` : "尚未填写 WebUI 地址"}{data.integrations?.qbittorrent?.version ? ` · qB v${data.integrations.qbittorrent.version}` : ""}{data.integrations?.qbittorrent?.web_api_version ? ` · API ${data.integrations.qbittorrent.web_api_version}` : ""}</p>
             {data.integrations?.qbittorrent?.error ? <small>{data.integrations.qbittorrent.error}</small> : <small>检测只登录 Web API 并读取版本，不会推送种子。</small>}
             <button className="button-secondary" disabled={adminAction === "qbittorrent" || !data.integrations?.qbittorrent?.configured} onClick={() => void testQbittorrent()}>{adminAction === "qbittorrent" ? <LoaderCircle className="spin" size={14} /> : <RefreshCw size={14} />}检测连接</button>
           </article>
@@ -309,6 +309,8 @@ export default function AdminPage() {
           <div><strong>{(data.subscriptions?.workers || []).filter((row: AnyRow) => row.healthy).length}</strong><span>健康工作进程</span></div>
           <div><strong>{(data.subscriptions?.active_leases || []).length}</strong><span>正在执行</span></div>
           <div><strong>{(data.subscriptions?.failed_rules || []).length}</strong><span>退避中的规则</span></div>
+          <div><strong>{data.subscriptions?.outbox?.ambiguous || 0}</strong><span>结果待人工核对</span></div>
+          <div><strong>{data.subscriptions?.outbox?.sent || 0}</strong><span>幂等投递完成</span></div>
           <div><strong>{data.subscriptions?.max_concurrency || 1}</strong><span>单进程并发上限</span></div>
         </div>
         {(data.subscriptions?.workers || []).length ? <div className="admin-task-list admin-scheduler-workers">{data.subscriptions.workers.map((worker: AnyRow) => <p key={worker.worker_id}><span><strong>{worker.worker_id}</strong><small>最近周期 {worker.last_cycle_at || "尚未执行"} · 累计处理 {worker.processed_count || 0}</small></span><b className={`task-status ${worker.healthy ? "done" : "failed"}`}>{worker.healthy ? `${worker.heartbeat_age_seconds || 0}s` : "心跳过期"}</b></p>)}</div> : <div className="inline-notice">若线上需要主动提醒，请启用订阅调度器；仅创建规则但没有常驻 worker 不会自动发送。</div>}
@@ -318,7 +320,7 @@ export default function AdminPage() {
       <section className="admin-section">
         <header><div><span className="section-kicker">系列纠错</span><h2>复杂作品人工顺序</h2></div><span>{data.series_overrides?.status?.rules || 0} 条规则 · {data.series_overrides?.status?.subjects || 0} 个条目</span></header>
         <p className="card-note">仅为 Bangumi 关系图无法可靠表达的复杂系列维护覆盖规则。required 会阻塞后续；optional 和 skip 不阻塞；alternates 是替代演绎。</p>
-        {(data.series_overrides?.rules || []).length ? <div className="admin-series-list">{data.series_overrides.rules.map((rule: AnyRow) => <article key={rule.id}><span><strong>{rule.title}</strong><small>{rule.id} · 主线 {rule.mainline?.length || 0} · 旁支 {rule.optional?.length || 0} · 替代 {rule.alternates?.length || 0}</small></span><button className="button-secondary" onClick={() => editSeriesRule(rule)}>编辑</button><button className="button-quiet danger" disabled={adminAction === `series-delete-${rule.id}`} onClick={() => void deleteSeriesRule(rule.id)}>删除</button></article>)}</div> : <div className="inline-notice">尚未配置人工规则；所有系列继续使用 Bangumi 关系图。</div>}
+        {(data.series_overrides?.rules || []).length ? <div className="admin-series-list">{data.series_overrides.rules.map((rule: AnyRow) => <article key={rule.id}><span><strong>{rule.title}</strong><small>{rule.builtin ? rule.operator_override ? "内置规则（已有运营覆盖）" : "内置规则" : "运营规则"} · {rule.id} · 主线 {rule.mainline?.length || 0} · 旁支 {rule.optional?.length || 0} · 替代 {rule.alternates?.length || 0}</small></span><button className="button-secondary" onClick={() => editSeriesRule(rule)}>{rule.builtin && !rule.operator_override ? "覆盖编辑" : "编辑"}</button>{rule.builtin && !rule.operator_override ? <span className="task-status">受保护</span> : <button className="button-quiet danger" disabled={adminAction === `series-delete-${rule.id}`} onClick={() => void deleteSeriesRule(rule.id)}>{rule.builtin ? "恢复内置" : "删除"}</button>}</article>)}</div> : <div className="inline-notice">尚未配置人工规则；所有系列继续使用 Bangumi 关系图。</div>}
         <details className="admin-series-editor" open id="series-rule-editor"><summary>新增或编辑规则</summary><textarea value={seriesDraft} onChange={(event) => setSeriesDraft(event.target.value)} rows={16} spellCheck={false} /><div className="panel-actions"><button className="button-primary" disabled={adminAction === "series-save"} onClick={() => void saveSeriesRule()}>{adminAction === "series-save" ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />}保存并立即生效</button><button className="button-secondary" onClick={() => setSeriesDraft(EMPTY_SERIES_RULE)}>新建模板</button></div></details>
       </section>
 

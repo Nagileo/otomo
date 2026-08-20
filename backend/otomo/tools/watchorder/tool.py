@@ -17,6 +17,7 @@ from ...memory import LongTermMemory
 from ...memory.consolidate import now_iso
 from ...memory.models import InboxItem, MemorySummary, memory_summary
 from ...profile import compute_taste_profile
+from ...series_overrides import SeriesOverrideMember, SeriesOverrideStore
 from .._concurrency import gather_limited
 from ..bangumi.client import SUBJECT_TYPE, BangumiClient
 from ..calendar.tool import AiringProgressArgs, AiringProgressItem, AiringProgressTool
@@ -212,6 +213,70 @@ class WatchOrderTool(Tool):
     def __init__(self, client: BangumiClient) -> None:
         self.client = client
 
+    async def _manual_order(
+        self,
+        ip: str,
+        mainline: list[SeriesOverrideMember],
+        optional: list[SeriesOverrideMember],
+        alternates: list[SeriesOverrideMember],
+        notes: list[str],
+        override_id: str,
+    ) -> ToolResult[WatchOrderResult]:
+        members = [*mainline, *optional, *alternates]
+        details = await gather_limited(
+            [self.client.get_subject(member.subject_id) for member in members],
+            host="bangumi",
+            return_exceptions=True,
+        )
+        raw_by_id = {
+            member.subject_id: raw
+            for member, raw in zip(members, details, strict=False)
+            if isinstance(raw, dict)
+        }
+
+        def item(member: SeriesOverrideMember, order: int, role: Literal["main", "entry", "side", "alternate"]) -> WatchItem:
+            raw = raw_by_id.get(member.subject_id, {})
+            necessity, generic_advice, duration_hint = _watch_metadata(
+                member.name or str(raw.get("name_cn") or raw.get("name") or ""),
+                "人工校正规则",
+                role,
+                _eps(raw),
+            )
+            final_necessity = member.necessity or necessity
+            return WatchItem(
+                order=order,
+                id=member.subject_id,
+                name=member.name or str(raw.get("name_cn") or raw.get("name") or member.subject_id),
+                date=str(raw.get("date") or "") or None,
+                score=float((raw.get("rating") or {}).get("score") or 0) or None,
+                relation="人工校正规则",
+                watch_role=role,
+                necessity=final_necessity,
+                skip_advice=member.note or generic_advice,
+                episode_count=_eps(raw),
+                duration_hint=duration_hint,
+            )
+
+        order = [item(member, index + 1, "entry" if index == 0 else "main") for index, member in enumerate(mainline)]
+        sides = [item(member, index + 1, "side") for index, member in enumerate(optional)]
+        alternate_rows = [item(member, index + 1, "alternate") for index, member in enumerate(alternates)]
+        all_rows = [*order, *sides, *alternate_rows]
+        return ToolResult(
+            ok=True,
+            data=WatchOrderResult(
+                ip=ip,
+                watch_order=order,
+                side_stories=sides,
+                alternate_routes=alternate_rows,
+                skip_candidates=[row for row in all_rows if row.necessity == "skip"],
+                notes=[f"已采用人工核验的复杂系列规则：{override_id}", *notes],
+            ),
+            sources=[
+                Citation(title=row.name, url=f"https://bgm.tv/subject/{row.id}", source="bangumi")
+                for row in all_rows[:8]
+            ],
+        )
+
     async def run(self, args: WatchOrderArgs) -> ToolResult[WatchOrderResult]:
         stype = SUBJECT_TYPE[args.subject_type]
         res = await self.client.search_subjects(args.title, stype, limit=1)
@@ -221,6 +286,17 @@ class WatchOrderTool(Tool):
         seed = data[0]
         sid = seed["id"]
         ip = seed.get("name_cn") or seed.get("name")
+        if args.subject_type == "anime":
+            override = SeriesOverrideStore().find_by_subject(int(sid))
+            if override is not None:
+                return await self._manual_order(
+                    ip,
+                    override.mainline,
+                    override.optional,
+                    override.alternates,
+                    override.notes,
+                    override.id,
+                )
 
         # BFS 沿系列边收集整条观看线；同时记旁支/不同演绎，供补番路线面板分栏展示。
         members: dict[int, dict] = {sid: seed}
